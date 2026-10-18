@@ -1,0 +1,4 @@
+faster-whisper==1.2.1
+# av 19 dropped the metadata_errors argument that faster-whisper 1.2.1 passes to av.open
+av<16
+nvidia-ml-py

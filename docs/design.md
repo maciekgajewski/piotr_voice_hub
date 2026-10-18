@@ -56,12 +56,12 @@ Piotr already has a hardware-tested continuous-mode driver, STT and speaker reco
 | GPU | NVIDIA GeForce RTX 5060 Ti, **16 GB VRAM** (12 MiB used at check time), compute capability 12.0 (Blackwell) |
 | Driver / CUDA | Driver 595.99.02, CUDA 13.2 (driver API) |
 | GPU sharing | Ollama keeps running on this host for unrelated tasks. It is not part of this project, but it shares the GPU with the hub |
-| Docker | Docker 29.1.3. The `nvidia` runtime is in `/etc/docker/daemon.json`, a CDI spec is at `/var/run/cdi/nvidia.yaml`, and `nvidia-ctk` is installed. `docker info` was not checked: the user `grok-developer` is not in the `docker` group |
+| Docker | Docker 29.1.3. The `nvidia` runtime is in `/etc/docker/daemon.json`, a CDI spec is at `/var/run/cdi/nvidia.yaml`, and `nvidia-ctk` is installed. The user `grok-developer` is in the `docker` group; `docker info` lists runtimes `nvidia` and `runc` (default `runc`) and CDI devices `nvidia.com/gpu=all` |
 
 Consequences:
 - The old repo's "i7-930 without AVX" note and its community no-AVX TensorFlow wheel (`wakeword/README.md`, `third_party/tensorflow-wheels/`) are **stale for this host**. Neither is carried over.
 - Blackwell needs CUDA ≥ 12.8 user-space builds. The old images already use `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04`.
-- **Verified 2026-10-18:** faster-whisper 1.2.1 / CTranslate2 4.8.3 with cuBLAS 12.9 and cuDNN 9 runs on this GPU (in a scratch venv on the host, outside Docker; see §4.3). The **P0 smoke test** still has to confirm onnxruntime-gpu (Piper) on sm_120 and the same stack inside the container.
+- **Verified 2026-10-18:** faster-whisper 1.2.1 / CTranslate2 4.8.3 with cuBLAS 12.9 and cuDNN 9 runs on this GPU (in a scratch venv on the host, outside Docker; see §4.3). **Confirmed in the container (T-003):** the same stack works in the `cuda:12.8.1-cudnn-runtime-ubuntu24.04` image, and the onnxruntime-gpu 1.26.0 CUDA EP (Piper) works on sm_120. onnxruntime-gpu 1.28+ are CUDA 13 builds and silently fall back to CPU on this image, so pin 1.26.0.
 
 ## 4. Architecture
 
@@ -114,7 +114,7 @@ flowchart LR
 ### 4.2 STT model choice: `large-v3-turbo`, float16
 The hub shares the GPU with Ollama (§4.3), but the measured footprint of `large-v3-turbo` is small enough to afford it.
 - **large-v3-turbo** (809M parameters, 4 decoder layers) keeps the large-v3 encoder, so it gives near-large-v3 accuracy on Polish. Decoding is several times faster than large-v3 (32 decoder layers). That matters because partials re-transcribe a 4 s window every 0.75 s for each active satellite.
-- It needs about 2.2 GB of the 16 GB VRAM (measured, §4.3).
+- It needs about 2.1 GB loaded and 2.3 GB peak of the 16 GB VRAM, CUDA context included (measured, §4.3).
 - **Fallback:** `medium` with `compute_type: int8_float16` (measured 1.1 GB) if VRAM gets tight next to Ollama, or if latency is ever an issue. `large-v3` is not worth roughly 3× the decode time for this use.
 - Load and warm it at startup (existing `FasterWhisperSpeechToText.start`).
 - Use beam 5 for finals and beam 1 for partials.
@@ -122,14 +122,14 @@ The hub shares the GPU with Ollama (§4.3), but the measured footprint of `large
 ### 4.3 VRAM budget (shared GPU)
 | Component | VRAM | Basis |
 |---|---|---|
-| faster-whisper `large-v3-turbo` float16 | **2.1 GB loaded, 2.2 GB peak** (beam 1 and 5, one stream) | **Measured** on piotr, 2026-10-18 (per-process `nvidia-smi`, includes CUDA context) |
-| faster-whisper `medium` int8_float16 (fallback) | **1.06 GB loaded, 1.13 GB peak** | **Measured**, same method |
+| faster-whisper `large-v3-turbo` float16 | **2.1 GB loaded, 2.3 GB peak** (beam 1 and 5, one stream; CUDA context included) | **Measured** in the hub's CUDA 12.8 container, T-003 (2085 / 2289 MiB over an idle GPU). A host-venv run with per-process `nvidia-smi` gave 2.1 / 2.2 GB |
+| faster-whisper `medium` int8_float16 (fallback) | **1.06 GB loaded, 1.13 GB peak** | **Measured** on the host (per-process `nvidia-smi`); not re-measured in the container |
 | Concurrent partials from several satellites | about +0.3–0.5 GB | Estimate. One shared model; extra activation buffers per in-flight decode |
-| Piper `pl_PL-bass-high` on CUDA (wyoming-piper) | about 0.5–1 GB | Estimate. The voice model is about 110 MB of ONNX; onnxruntime's CUDA context and memory arena dominate |
+| Piper `pl_PL-bass-high` on CUDA (wyoming-piper) | **0.3 GB loaded, 1.2 GB peak** | **Measured**, T-003: onnxruntime-gpu 1.26.0, the real voice model, 400 random phoneme ids (about 11 s of audio). The first inference took 48 s (cuDNN algorithm search) and later ones 0.1 s, so Piper needs a warm-up at startup |
 | ECAPA speaker recognition | **0 GB** (CPU) | Decision: keep today's `--device cpu` default. ECAPA is about 20M parameters, so a few seconds of audio embed quickly on the Ryzen 5 5600. On CUDA it would cost about 0.4–0.7 GB, mostly CUDA context (estimate) |
-| **Hub total** | **about 3–4 GB** of 16 GB | Leaves about 12 GB for Ollama when it runs |
+| **Hub total** | **about 4 GB** (3.8–4.0 GB: hub process 2.6–2.8 GB with partials, plus Piper 1.2 GB) | The driver also reserves 0.46 GB of the device. That leaves about 11.8 GB for Ollama when it runs |
 
-- **Measurement method:** load the model, transcribe a 2.1 s Polish clip from `audio/monitor-test/`, read per-process memory with `nvidia-smi`.
+- **Measurement method:** `tools/gpu-smoke.sh` (T-003). Load the model, transcribe a 2.1 s Polish clip from `audio/monitor-test/`, and sample device memory with NVML (v2 `used`, which excludes the driver reserve) on an otherwise idle GPU.
 - **First-call latency:** the first transcription took 7.8 s; later calls took 0.17–0.21 s with beam 5. The startup warm-up is therefore mandatory.
 - **Rule:** the hub loads its models at startup and holds them. If Ollama ever pushes the GPU into out-of-memory, the hub fails loudly and Docker restarts it; the configured fix is the `medium`/int8 fallback, not dynamic unloading.
 
@@ -256,8 +256,8 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
 ## 9. Deployment
 
 - **One compose file, three services**, all `network_mode: host` and `restart: unless-stopped`. Host networking lets satellites fetch the playback stream from the host IP, and Avahi/`libnss-mdns` resolves `.local` names.
-  - `hub` (CUDA 12.8 base, GPU): from `docker/ai-server.Dockerfile`, with only the hub's dependencies.
-  - `wyoming-piper` (GPU, `--use-cuda`): from `docker-compose.yml`.
+  - `hub` (CUDA 12.8 base, GPU): from `docker/ai-server.Dockerfile`, with only the hub's dependencies. It uses CPU `onnxruntime` (Silero, via faster-whisper) and must never also install `onnxruntime-gpu`.
+  - `wyoming-piper` (GPU, `--use-cuda`): from `docker-compose.yml`. **P1:** the image must install only `onnxruntime-gpu` (1.26.0), not `onnxruntime` too; the old `piotr-wyoming-piper` container has both, so it runs on CPU.
   - `speaker-recognition` (CPU): from `docker-compose.speaker-recognition.yml`, unchanged `--device cpu`.
 - **Ollama coexists.** It keeps running on the host for unrelated tasks and is *not* in the hub's compose file. The two share the GPU within the budget in §4.3.
 - **Ports:**
