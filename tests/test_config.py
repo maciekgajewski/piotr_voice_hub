@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -134,6 +135,28 @@ def test_missing_file(tmp_path: Path) -> None:
         ("timeout_seconds: 1.0", "timeout_seconds: 0", r"timeout_seconds: must be > 0"),
         ("voice: pl_PL-bass-high", "voice: ''", r"tts\.voice: must be a non-empty string"),
         ("id: sat-b", "id: sat-a", r"duplicate id\(s\): sat-a"),
+        ("address: b.local", "address: a.local", r"duplicate address\(s\): a\.local"),
+        (
+            "follow_up_seconds: 5}",
+            "follow_up_seconds: .nan}",
+            r"devices\[1\]\.follow_up_seconds: must be a finite",
+        ),
+        (
+            "reply_timeout_seconds: 30",
+            "reply_timeout_seconds: .inf",
+            r"satellites\.defaults\.reply_timeout_seconds: must be a finite",
+        ),
+        (
+            "timeout_seconds: 1.0",
+            "timeout_seconds: .nan",
+            r"speaker_recognition\.timeout_seconds: must be a finite",
+        ),
+        ("volume: 1.0", "volume: .nan", r"tts\.volume: must be a finite"),
+        (
+            "end_silence_seconds: 0.8",
+            "end_silence_seconds: -1",
+            r"satellites\.defaults\.end_silence_seconds: must be > 0",
+        ),
         ('api_key: "key-a"}', 'api_key: "key-a", color: red}', r"devices\[0\]: unknown key"),
         ("max_segment_seconds: 15", "max_segment_secs: 15", r"satellites\.defaults: unknown key"),
         ("partial: {", "partial: {extra: 1, ", r"stt\.partial: unknown key\(s\): extra"),
@@ -170,3 +193,39 @@ def test_redacted_hides_api_keys(tmp_path: Path) -> None:
     assert "key-a" in repr(config)
     assert "key-a" not in repr(config.redacted())
     assert config.redacted().satellites[0].id == "sat-a"
+
+
+def test_errors_name_the_file(tmp_path: Path) -> None:
+    path = write(tmp_path, "")
+    with pytest.raises(
+        ConfigError, match=f"^{re.escape(str(path))}: <top level>: must be a mapping"
+    ):
+        load_config(path)
+
+
+def test_override_into_non_mapping_section_names_the_file(tmp_path: Path) -> None:
+    path = write(tmp_path, MINIMAL.replace("api: {host: 0.0.0.0, port: 8750}", "api: 5"))
+    with pytest.raises(
+        ConfigError, match=f"^{re.escape(str(path))} \\(with command-line overrides\\): api"
+    ):
+        load_config(path, {"api.port": 9000})
+
+
+def test_non_utf8_file_is_a_one_line_error(tmp_path: Path) -> None:
+    path = tmp_path / "hub.yaml"
+    path.write_bytes(b"log_level: \xff\xfe\n")
+    with pytest.raises(ConfigError, match="not valid UTF-8") as error:
+        load_config(path)
+    assert "\n" not in str(error.value)
+
+
+def test_unhashable_yaml_key_is_a_one_line_error(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="invalid YAML.*unhashable key") as error:
+        load_text(tmp_path, "? [a, b]\n: 1\n")
+    assert "\n" not in str(error.value)
+
+
+def test_yaml_syntax_error_is_one_line(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="invalid YAML") as error:
+        load_text(tmp_path, "api: {host: [unclosed\n")
+    assert "\n" not in str(error.value)

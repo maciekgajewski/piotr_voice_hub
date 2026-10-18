@@ -5,6 +5,7 @@ Every key in §7 is required; there are no defaults in code. Satellite timing va
 """
 
 import dataclasses
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,14 +108,16 @@ def load_config(path: Path, overrides: Mapping[str, object] | None = None) -> Hu
         raise ConfigError(f"config file not found: {path}") from None
     except OSError as error:
         raise ConfigError(f"cannot read config file {path}: {error}") from None
+    except UnicodeDecodeError as error:
+        raise ConfigError(f"config file {path} is not valid UTF-8: {error}") from None
     try:
-        raw = yaml.load(text, Loader=_UniqueKeyLoader)
+        loaded = yaml.load(text, Loader=_UniqueKeyLoader)
     except yaml.YAMLError as error:
-        raise ConfigError(f"invalid YAML in {path}: {error}") from None
-    raw = _mapping(raw, "<top level>")
-    for dotted, value in (overrides or {}).items():
-        _apply_override(raw, dotted, value)
+        raise ConfigError(f"invalid YAML in {path}: {_one_line(error)}") from None
     try:
+        raw = _mapping(loaded, "<top level>")
+        for dotted, value in (overrides or {}).items():
+            _apply_override(raw, dotted, value)
         return _parse_hub(raw)
     except ConfigError as error:
         source = f"{path} (with command-line overrides)" if overrides else str(path)
@@ -128,6 +131,12 @@ class _UniqueKeyLoader(yaml.SafeLoader):
         seen: set[Any] = set()
         for key_node, _ in node.value:
             key = self.construct_object(key_node, deep=deep)
+            try:
+                hash(key)
+            except TypeError:
+                raise ConstructorError(
+                    None, None, f"unhashable key {key!r}", key_node.start_mark
+                ) from None
             if key in seen:
                 raise ConstructorError(None, None, f"duplicate key {key!r}", key_node.start_mark)
             seen.add(key)
@@ -188,6 +197,7 @@ def _parse_satellites(raw: dict[str, Any]) -> tuple[SatelliteConfig, ...]:
     _keys(raw, "satellites", {"defaults", "devices"})
     defaults = _section(raw, "defaults", "satellites")
     _keys(defaults, "satellites.defaults", set(), optional=set(SATELLITE_TIMING_KEYS))
+    default_timing = {key: _positive(defaults, key, "satellites.defaults") for key in defaults}
     devices = raw["devices"]
     if not isinstance(devices, list) or not devices:
         raise ConfigError("satellites.devices: must be a non-empty list")
@@ -201,14 +211,16 @@ def _parse_satellites(raw: dict[str, Any]) -> tuple[SatelliteConfig, ...]:
             {"id", "area", "address", "api_key"},
             optional=set(SATELLITE_TIMING_KEYS),
         )
-        merged = {**defaults, **device}
         timing: dict[str, float] = {}
         for key in SATELLITE_TIMING_KEYS:
-            if key not in merged:
+            if key in device:
+                timing[key] = _positive(device, key, path)
+            elif key in default_timing:
+                timing[key] = default_timing[key]
+            else:
                 raise ConfigError(
                     f"{path}: missing {key!r} (set it in satellites.defaults or on the device)"
                 )
-            timing[key] = _positive(merged, key, path)
         satellites.append(
             SatelliteConfig(
                 id=_str(device, "id", path),
@@ -218,10 +230,11 @@ def _parse_satellites(raw: dict[str, Any]) -> tuple[SatelliteConfig, ...]:
                 **timing,
             )
         )
-    ids = [s.id for s in satellites]
-    duplicates = sorted({i for i in ids if ids.count(i) > 1})
-    if duplicates:
-        raise ConfigError(f"satellites.devices: duplicate id(s): {', '.join(duplicates)}")
+    for field in ("id", "address"):
+        values = [getattr(s, field) for s in satellites]
+        duplicates = sorted({v for v in values if values.count(v) > 1})
+        if duplicates:
+            raise ConfigError(f"satellites.devices: duplicate {field}(s): {', '.join(duplicates)}")
     return tuple(satellites)
 
 
@@ -258,6 +271,10 @@ def _parse_tts(raw: dict[str, Any]) -> TtsConfig:
     if not 0.0 <= volume <= 1.0:
         raise ConfigError(f"tts.volume: must be between 0.0 and 1.0, got {volume}")
     return TtsConfig(uri=_str(raw, "uri", "tts"), voice=_str(raw, "voice", "tts"), volume=volume)
+
+
+def _one_line(error: Exception) -> str:
+    return " ".join(str(error).split())
 
 
 def _where(path: str, key: str) -> str:
@@ -314,6 +331,8 @@ def _number(raw: dict[str, Any], key: str, path: str) -> float:
     value = raw[key]
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigError(f"{_where(path, key)}: must be a number, got {value!r}")
+    if not math.isfinite(value):
+        raise ConfigError(f"{_where(path, key)}: must be a finite number, got {value}")
     return float(value)
 
 
