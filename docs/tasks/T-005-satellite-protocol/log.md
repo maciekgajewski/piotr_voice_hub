@@ -79,3 +79,7 @@ Rebased onto `02a75fe` (T-004 merged). Fixed:
   (b) `SPEECH_STARTED` fires at least 256 ms after speech onset (8 frames), so the 1 s pre-roll
   is required, and the `vad.py` docstring should say so;
   (c) add a loud non-speech test clip (TV/music/clatter) if one is available.
+
+## 2026-10-18: correction
+
+- The rebase recorded above as "onto `02a75fe`" was in fact onto `355c811` (T-006 merged).
