@@ -218,8 +218,8 @@ satellites:
   defaults: {end_silence_seconds: 0.8, max_segment_seconds: 15, reply_timeout_seconds: 30, follow_up_seconds: 8}
   devices:
     - {id: voice-pe-bedroom, area: bedroom, address: piotr-voice-pe-bedroom-01.local, api_key: "…"}
-    - {id: voice-pe-02,      area: living_room, address: voice-pe-02.local, api_key: "…"}
-    - {id: voice-pe-03,      area: kitchen, address: voice-pe-03.local, api_key: "…"}
+    - {id: voice-pe-02,      area: living_room, address: piotr-voice-pe-02.local, api_key: "…"}
+    - {id: voice-pe-03,      area: kitchen, address: piotr-voice-pe-03.local, api_key: "…"}
     - {id: box3-office,      area: office, address: piotr-box3-01.local, api_key: "…"}
 
 wake_phrase: Ryszardzie
