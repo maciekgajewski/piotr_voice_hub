@@ -13,7 +13,7 @@ one PR (AGENTS.md). Order is the dependency order.
 | T-004 config | Hub config dataclasses, strict YAML loader, CLI entry point | merged |
 | T-005 satellite-protocol | Satellite messages, protocol state machine, conformance checks | merged |
 | T-006 vad | Silero VAD with fixed hysteresis | merged |
-| T-007 esphome-driver | ESPHome native-API satellite driver with Silero segmentation | in progress |
+| T-007 esphome-driver | ESPHome native-API satellite driver: connection and capture with Silero segmentation (playback is T-014) | in progress |
 | T-008 stt | Streaming Polish STT on faster-whisper large-v3-turbo | PR #8 |
 | T-009 wake-matcher | Wake-phrase matcher ("Ryszardzie", vocative only) | PR #7 |
 | **T-013 wake-test-runner** | Minimal CLI: connect to the configured satellites, run VAD, STT and the wake matcher, print wake and final transcripts with timings, so Maciej can test "Ryszardzie" live on piotr. Runs right after T-007, T-008 and T-009 merge, before T-010. Its loop is the seed of T-012's main. | planned |

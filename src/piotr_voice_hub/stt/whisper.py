@@ -319,10 +319,17 @@ class FasterWhisperStreamingSttSession:
             raise
         call.add_done_callback(self._model_call_done)
         # shield: cancelling the awaiter (close(), a timeout) must not end the call's lock hold.
-        return await asyncio.shield(call)
+        try:
+            return await asyncio.shield(call)
+        except asyncio.CancelledError:
+            call.add_done_callback(self._abandoned_call_done)
+            raise
 
-    def _model_call_done(self, call: "asyncio.Future[str]") -> None:
+    def _model_call_done(self, _call: "asyncio.Future[str]") -> None:
         self._lock.release()
+
+    def _abandoned_call_done(self, call: "asyncio.Future[str]") -> None:
+        # Nobody awaits this call any more (close() cancelled it), but a model error is still
+        # fatal: fail loudly instead of leaving a broken model for the next session.
         if not call.cancelled() and (error := call.exception()) is not None:
-            # Retrieved here as well, in case the awaiter was cancelled (close()).
-            self._logger.error("STT model call failed", exc_info=error)
+            self._on_fatal(f"STT model call failed after its session closed: {error!r}")

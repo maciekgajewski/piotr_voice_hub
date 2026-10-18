@@ -7,7 +7,7 @@ the hub's driver for Voice PE and S3-BOX-3 over the ESPHome native API, in conti
 with Silero VAD segmentation. It implements the `Microphone` interface and passes
 `tests/microphone_driver_conformance.py` against a fake ESPHome connection.
 
-## Proposed split (the old driver is 1327 lines plus 1552 lines of tests)
+## Split (approved by the manager, 2026-10-18; the old driver is 1327 lines plus 1552 of tests)
 
 - **T-007 (this task): connection and capture.** Connect/reconnect with timeouts, transport
   recovery, `StartListening` → `start_open_mic_listening`, `StopListening` → `stop_listening`
@@ -41,6 +41,9 @@ with Silero VAD segmentation. It implements the `Microphone` interface and passe
      driver and later the session; never per-connection counters. Test: ids stay unique across
      a reconnect.
   6. A dated correction entry in the T-005 log: its rebase base was 355c811, not 02a75fe.
+  7. STT follow-up from the PR #8 review: a model error in a call already abandoned by
+     `close()` must also be fatal (CRITICAL plus exit 70), not only logged at ERROR, since all
+     model errors fail loudly. Test with a recording `on_fatal`.
 - Tests: a fake `aioesphomeapi` client (callbacks for start/audio/stop, service calls,
   disconnect), conformance suite, recovery, pre-roll, max-segment, stop ack, late events.
 - Dependency: `aioesphomeapi` (pinned to what the old project used, if it still installs).
