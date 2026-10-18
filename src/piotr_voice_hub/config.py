@@ -135,7 +135,7 @@ class _UniqueKeyLoader(yaml.SafeLoader):
                 hash(key)
             except TypeError:
                 raise ConstructorError(
-                    None, None, f"unhashable key {key!r}", key_node.start_mark
+                    None, None, f"unhashable key (a {type(key).__name__})", key_node.start_mark
                 ) from None
             if key in seen:
                 raise ConstructorError(None, None, f"duplicate key {key!r}", key_node.start_mark)
