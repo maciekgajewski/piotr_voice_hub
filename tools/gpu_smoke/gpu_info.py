@@ -1,4 +1,8 @@
-"""Device-level GPU memory sampling via NVML (works inside a container's PID namespace)."""
+"""GPU memory sampling via NVML.
+
+Uses the v2 memory query: its `used` excludes the memory the driver reserves (464 MiB on piotr),
+which the v1 query counts as used. NVML values are device-wide, not per process.
+"""
 
 import threading
 import time
@@ -24,11 +28,11 @@ class GpuMemorySampler:
         name = pynvml.nvmlDeviceGetName(self._handle)
         major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(self._handle)
         driver = pynvml.nvmlSystemGetDriverVersion()
-        total = pynvml.nvmlDeviceGetMemoryInfo(self._handle).total // MIB
+        total = self._memory().total // MIB
         return f"{name}, sm_{major}{minor}, driver {driver}, {total} MiB total"
 
     def used_mib(self) -> int:
-        return int(pynvml.nvmlDeviceGetMemoryInfo(self._handle).used) // MIB
+        return int(self._memory().used) // MIB
 
     def start(self) -> None:
         self._thread.start()
@@ -37,6 +41,9 @@ class GpuMemorySampler:
         self._stop.set()
         self._thread.join(timeout=5)
         assert not self._thread.is_alive()
+
+    def _memory(self):
+        return pynvml.nvmlDeviceGetMemoryInfo(self._handle, version=pynvml.nvmlMemory_v2)
 
     def _run(self) -> None:
         while not self._stop.is_set():

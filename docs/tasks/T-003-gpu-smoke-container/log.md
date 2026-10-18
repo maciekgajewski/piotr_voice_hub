@@ -50,3 +50,44 @@ onnxruntime-gpu 1.26.0: `CUDAExecutionProvider` active on sm_120 (session provid
 - design.md updated with the T-003 results: §3 container/onnxruntime-gpu 1.26.0 confirmed (1.28+ are CUDA 13
   builds and fall back to CPU); §4.3 hub share of about 2.3 GB for large-v3-turbo fp16 (2765 MiB device
   peak); §9 P1 note that the Piper image must install only onnxruntime-gpu. CI on `1ed7956` was green.
+
+## 2026-10-18 (review of `e9413b7`: changes needed)
+
+Review: https://github.com/maciekgajewski/piotr_voice_hub/pull/3#pullrequestreview-5564287596.
+Fixes:
+- `whisper_smoke.py` now fails (exit 1) if the warm-up transcript lacks the expected words
+  (`--expect-words`, default `test,pierwszy`, case- and diacritics-insensitive), or if the model adds
+  less than 1000 MiB after load. Verified on piotr: the default passes, and `kot,pies` fails with
+  `WHISPER SMOKE FAILED: ... lacks expected word(s) ['kot', 'pies']` and exit 1.
+- `ort_smoke.py` sets `session.disable_cpu_ep_fallback=1`; it still passes.
+- Dockerfile installs the requirements before copying the scripts; the build context is now
+  `tools/gpu_smoke`. `gpu-smoke.sh` prints a usage message (exit 2) without arguments.
+- Static tests pin `onnxruntime-gpu==1.26.0` and `av==15.*`, and check that CPU and GPU
+  onnxruntime never share a requirements file.
+- **Correction to the first entry:** the 476 MiB "before load" was not this process's CUDA
+  context. NVML's v1 memory query counts the driver's 464 MiB device reserve as used
+  (`nvidia-smi` shows `memory.reserved 465 MiB, used 12 MiB` on an idle GPU). A bare container
+  reads 476 MiB before any CUDA call, and the same after importing ctranslate2/faster_whisper.
+  `gpu_info.py` now uses the v2 query (reads 12 MiB at idle). The process's CUDA context is created
+  during model load, so it is inside the deltas. The whisper footprint is therefore **2.1 GB loaded /
+  2.3 GB peak**, not 2.55 / 2.75 GB (subtracting 12 MiB from the v1 figures double-counted the
+  driver reserve). design.md §4.2/§4.3 use these numbers.
+- NVML values are device-wide, so the runs were done with Ollama idle (no other compute process).
+- New `piper_vram.py` measures the real `pl_PL-bass-high` voice on onnxruntime-gpu 1.26.0
+  (random 400 phoneme ids, about 11 s of audio).
+
+Re-run on piotr (`tools/gpu-smoke.sh .../box3-tts-20260526T110342Z.wav`), all OK:
+
+| Check | Result |
+|---|---|
+| Whisper large-v3-turbo fp16 | load 2.08 s, warm-up 7.95 s, beam 5 median 0.170 s, beam 1 median 0.154 s on the 2.10 s clip; VRAM 12 → 2097 MiB loaded, 2301 MiB peak (+2085 / +2289 MiB) |
+| ORT CUDA EP (no CPU fallback) | active on sm_120, relative error 2.86e-04; 187 MiB with the session alive |
+| Piper voice on CUDA EP | session load 1.30 s; first run 47.9 s (cuDNN algorithm search), then 0.09–0.10 s per run; VRAM +281 MiB loaded, +1195 MiB peak |
+
+VRAM budget (design.md §4.3): hub process 2.6–2.8 GB (whisper 2.3 GB peak + 0.3–0.5 GB estimated
+for concurrent partials) + Piper 1.2 GB = **about 4 GB (3.8–4.0)**. Plus the 0.46 GB driver
+reserve, that leaves about 11.8 GB of 16.3 GB for Ollama. Piper's 48 s first inference means the
+P1 Piper service needs a startup warm-up.
+
+Image digests used: `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc`,
+`ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336`.

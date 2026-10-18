@@ -14,7 +14,9 @@ RTX 5060 Ti (sm_120). Measure real numbers.
   beam 1 on a clip, sample device VRAM (NVML).
 - `tools/gpu_smoke/ort_smoke.py`: tiny MatMul+Relu ONNX model on `CUDAExecutionProvider` only;
   fail if ORT falls back to CPU or the result is wrong.
-- `tools/gpu-smoke.sh`: build and run both on the host GPU.
+- `tools/gpu_smoke/piper_vram.py`: VRAM and latency of the real Piper Polish voice on the CUDA EP
+  (added after review, for the VRAM budget).
+- `tools/gpu-smoke.sh`: build and run all checks on the host GPU.
 - Static tests: base image matches the design, requirements are pinned with hashes.
 - Fix the stale `docker` group line in design.md §3.
 

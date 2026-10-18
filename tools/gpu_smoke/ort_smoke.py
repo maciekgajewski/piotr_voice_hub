@@ -35,6 +35,8 @@ def main() -> int:
 
     options = ort.SessionOptions()
     options.log_severity_level = 1
+    # Refuse to place any node on the CPU instead of silently falling back.
+    options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
     session = ort.InferenceSession(build_model(), options, providers=[CUDA])
     active = session.get_providers()
     print(f"Session providers: {active}")
