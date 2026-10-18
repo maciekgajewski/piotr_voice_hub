@@ -89,11 +89,11 @@ flowchart LR
    - The driver still emits `SpeechStarted`/`AudioChunk`/`SpeechEnded`. Only the detector changes.
 3. **STT.** Each segment streams into a `FasterWhisperStreamingSttSession`, which gives partials every 0.75 s and a final transcript at segment end, language fixed to `pl`. `hotwords`/`initial_prompt` contain "Ryszardzie" to bias recognition of the name.
 4. **Wake phrase.**
-   - Normalize the text: lowercase, strip punctuation and diacritics.
-   - Match the stem regex `\bryszard\w{0,3}\b` (Ryszardzie, Ryszardze, Ryszard, Ryszarda…) within the first three words.
+   - Normalize each word: lowercase, strip diacritics (ł folded explicitly).
+   - Match only the vocative `ryszardzie` as a whole word within the first three words; repeats right after it are skipped. Other case forms (Ryszard, Ryszarda, Ryszardem…) don't wake: TV and radio talk *about* a Ryszard, people address the hub in the vocative. Revisit at hardware acceptance if Whisper drops the vocative ending.
    - **On a partial match:** emit `wake`, set the `LISTENING` visual (wake candidate).
    - **On the final:** if the phrase is confirmed and the remaining text is non-empty, accept. Otherwise emit `wake_cancelled`, call `reset_open_mic_wake_candidate`, set `IDLE`, and keep listening.
-   - This is today's `_capture_open_mic_utterance` / `_text_after_wake_phrase` logic, made tolerant to inflection.
+   - This is today's `_capture_open_mic_utterance` / `_text_after_wake_phrase` logic, made tolerant to punctuation, case and diacritics.
 5. **Accept.**
    - Stop listening and play the `accepted` cue.
    - Set the `PROCESSING` visual.
@@ -288,7 +288,7 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
   - Delete the wake-word and follow-up mode cases.
 - **New unit tests:**
   - VAD hysteresis (synthetic frames).
-  - Wake matcher (inflections, phrase late in the sentence, partial-then-cancel).
+  - Wake matcher (vocative only, other case forms rejected, repeats, phrase late in the sentence, partial-then-cancel).
   - Session state machine with fake driver, STT and TTS (accept, cancel, reply timeout, follow-up window, busy, announcement while idle).
   - API schema and broadcast tests.
 - **Recorded-audio fixtures:** WAVs captured from each satellite type (`capture_voice_samples.py`): phrase + command, inflected phrase, no phrase, TV/music, silence, two speakers.
