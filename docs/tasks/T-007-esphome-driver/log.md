@@ -74,3 +74,4 @@
   error is now passed to `on_fatal` (CRITICAL plus exit 70), not only logged at ERROR. Test
   `test_model_error_after_close_is_still_fatal`; it fails on the old code.
 - `make check`: ruff and pyright clean, 370 passed, 1 skipped (the GPU test).
+- PR #8 re-review 2 (MERGE) nits: the first (fatal on an abandoned call's error) is the follow-up above; for the second, a comment in the partial skip path explains that a call hanging after `close()` makes partials skip until the next final times out and exits.
