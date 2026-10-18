@@ -285,6 +285,8 @@ class FasterWhisperStreamingSttSession:
     async def _transcribe(
         self, pcm: bytes, beam_size: int, kind: str, *, skip_if_busy: bool = False
     ) -> str | None:
+        # A call that hangs after close() keeps the lock, so partials skip quietly until the
+        # next final's lock wait hits GPU_CALL_TIMEOUT_SECONDS and exits the process.
         if skip_if_busy and self._lock.locked():
             self._logger.debug("STT model busy; skipping this partial")
             return None
