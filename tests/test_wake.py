@@ -129,3 +129,26 @@ def test_hyphen_and_quotes_around_phrase() -> None:
 )
 def test_normalize_word_folds_polish_letters(word: str, normalized: str) -> None:
     assert normalize_word(word) == normalized
+
+
+@pytest.mark.parametrize(
+    "text", ["Ryszardzie ♪", "Ryszardzie *", "Ryszardzie …", "Ryszardzie ♪ ♪ ♪", "Ryszardzie, ¿ #"]
+)
+def test_remainder_without_letters_or_digits_is_empty(text: str) -> None:
+    assert match_wake_phrase(text) == WakeMatch("Ryszardzie", "")
+
+
+def test_remainder_with_symbols_and_a_word_is_kept() -> None:
+    assert match_wake_phrase("Ryszardzie ♪ włącz radio") == WakeMatch("Ryszardzie", "♪ włącz radio")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Ryszardzie,\u00a0włącz radio\u00a0",
+        "Ryszardzie\u2003, \u00a0włącz radio.\u3000",
+        "Ryszardzie\twłącz radio\n",
+    ],
+)
+def test_unicode_whitespace_is_stripped(text: str) -> None:
+    assert match_wake_phrase(text) == WakeMatch("Ryszardzie", "włącz radio")

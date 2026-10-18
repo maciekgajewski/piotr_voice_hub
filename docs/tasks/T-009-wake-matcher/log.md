@@ -37,3 +37,12 @@
   lose only whitespace, sentence punctuation, quotes and dashes, so "50%" keeps its "%"; the
   diacritics test now really tests diacritic artifacts ("Ryszardzię"), and the case test is
   named for case; the ø/đ folds are gone (ł/Ł kept). Naming nit skipped, as instructed.
+
+## 2026-10-18: re-review fixes (PR #7, review 5564587784)
+
+- Blocker: a remainder with no letter or digit ("♪", "*", "…") is now empty, so a bare wake
+  with music in the background ("Ryszardzie ♪") is cancelled, not accepted as a command.
+  "Ryszardzie ♪ włącz radio" keeps its remainder as is.
+- The remainder's edges are stripped with `str.strip()` (any Unicode whitespace, including NBSP)
+  alternating with the punctuation set until stable.
+- Bracketed Whisper notes such as "(muzyka)" are left to the STT transcript preprocessing (T-008).

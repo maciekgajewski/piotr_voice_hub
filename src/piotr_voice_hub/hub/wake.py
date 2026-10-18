@@ -15,15 +15,15 @@ from dataclasses import dataclass
 WAKE_WORD = "ryszardzie"  # normalized vocative
 MAX_WAKE_WORD_INDEX = 2  # the wake word must be one of the first three words
 _WORD = re.compile(r"\w+")
-# Stripped from the remainder's edges: whitespace and sentence punctuation, quotes, dashes.
-# Symbols such as % stay ("ustaw jasność na 50%").
-_EDGE_PUNCTUATION = " \t\r\n.,!?…;:-–—\"'„”“«»"
+# Stripped from the remainder's edges, with any Unicode whitespace (str.strip): sentence
+# punctuation, quotes, dashes. Symbols such as % stay ("ustaw jasność na 50%").
+_EDGE_PUNCTUATION = ".,!?…;:-–—\"'„”“«»"
 
 
 @dataclass(frozen=True)
 class WakeMatch:
     phrase: str  # the matched word as transcribed, e.g. "Ryszardzie"
-    remainder: str  # original text after the wake word(s), edge punctuation stripped; may be ""
+    remainder: str  # original text after the wake word(s), edges stripped; "" if no letter/digit
 
 
 def normalize_word(word: str) -> str:
@@ -44,5 +44,12 @@ def match_wake_phrase(text: str) -> WakeMatch | None:
             if normalize_word(repeat.group()) != WAKE_WORD:
                 break
             end = repeat.end()
-        return WakeMatch(phrase=word.group(), remainder=text[end:].strip(_EDGE_PUNCTUATION))
+        return WakeMatch(phrase=word.group(), remainder=_remainder(text[end:]))
     return None
+
+
+def _remainder(text: str) -> str:
+    while (stripped := text.strip().strip(_EDGE_PUNCTUATION)) != text:
+        text = stripped
+    # No letter or digit ("♪", "*", "…") is not a command: Whisper emits ♪ for music.
+    return text if any(c.isalnum() for c in text) else ""
