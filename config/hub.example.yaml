@@ -1,0 +1,24 @@
+# Example hub config (design.md §7). Copy, fill in api_key values, and pass with --config.
+log_level: INFO
+api: {host: 0.0.0.0, port: 8750}
+playback_http: {port: 8751}
+
+satellites:
+  defaults: {end_silence_seconds: 0.8, max_segment_seconds: 15, reply_timeout_seconds: 30, follow_up_seconds: 8}
+  devices:
+    - {id: voice-pe-bedroom, area: bedroom, address: piotr-voice-pe-bedroom-01.local, api_key: "CHANGE_ME"}
+    - {id: voice-pe-02,      area: living_room, address: voice-pe-02.local, api_key: "CHANGE_ME"}
+    - {id: voice-pe-03,      area: kitchen, address: voice-pe-03.local, api_key: "CHANGE_ME"}
+    - {id: box3-office,      area: office, address: piotr-box3-01.local, api_key: "CHANGE_ME"}
+
+wake_phrase: Ryszardzie
+
+stt: {model: large-v3-turbo, device: cuda, compute_type: float16, beam_size: 5,
+      partial: {interval_seconds: 0.75, window_seconds: 4.0, beam_size: 1}}
+
+speaker_recognition:
+  url: http://127.0.0.1:2140
+  timeout_seconds: 1.0
+  profiles: {Maciek: /profiles/maciek/profile/speaker_profile.npz}
+
+tts: {uri: tcp://127.0.0.1:10200, voice: pl_PL-bass-high, volume: 1.0}
