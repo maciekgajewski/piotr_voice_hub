@@ -2,6 +2,7 @@
 
 import asyncio
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,8 @@ class FakeSession:
         self.audio = bytearray()
         self.ended = asyncio.Event()
         self.closed = False
+        self.linger = 0.0  # seconds the partial reader takes to unwind when cancelled
+        self.cancel_seen = asyncio.Event()
 
     async def send_audio(self, pcm: bytes) -> None:
         self.audio.extend(pcm)
@@ -69,7 +72,12 @@ class FakeSession:
             await asyncio.sleep(0)
             self.clock.now = at
             return TextPartial(text, 0.0, at)
-        await self.ended.wait()
+        try:
+            await self.ended.wait()
+        except asyncio.CancelledError:
+            self.cancel_seen.set()
+            await asyncio.sleep(self.linger)
+            raise
         return TextEnd()
 
     async def transcribe_final(self) -> str:
@@ -86,14 +94,16 @@ type SegmentScript = tuple[list[tuple[float, str]], tuple[float, str]]  # (parti
 
 
 class FakeStt:
-    def __init__(self, clock: Clock, segments: list[SegmentScript]) -> None:
+    def __init__(self, clock: Clock, segments: list[SegmentScript], linger: float = 0.0) -> None:
         self.clock = clock
         self.segments = deque(segments)
+        self.linger = linger
         self.sessions: list[tuple[str, float, FakeSession]] = []
 
     def create_streaming_session(self, session_id: str, max_audio_seconds: float) -> FakeSession:
         partials, final = self.segments.popleft()
         session = FakeSession(self.clock, partials, final)
+        session.linger = self.linger
         self.sessions.append((session_id, max_audio_seconds, session))
         return session
 
@@ -119,6 +129,7 @@ class FakeMicrophone:
         self.overlapped = False
         self.block_at_end = block_at_end
         self.fail_commands: dict[type, Exception] = {}
+        self.fail_exact: dict[MicrophoneCommand, Exception] = {}
 
     @property
     def listen_id(self) -> str:
@@ -148,6 +159,8 @@ class FakeMicrophone:
             self.commands.append(event)
             if type(event) in self.fail_commands:
                 raise self.fail_commands[type(event)]
+            if event in self.fail_exact:
+                raise self.fail_exact[event]
             if isinstance(event, StartListening) and self.fail_starts:
                 self.fail_starts -= 1
                 raise MicrophoneUnavailable("connection refused")
@@ -364,6 +377,7 @@ async def _run_then_cancel(runners: list[SatelliteRunner], mics: list[FakeMicrop
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert not any(m.overlapped for m in mics), "commands to one satellite overlapped"
 
 
 def test_cancel_stops_listening_and_goes_idle() -> None:
@@ -394,6 +408,7 @@ async def _test_cancel_stops_listening_and_goes_idle() -> None:
     # Not armed: closed only, no reconnect for the idle visual.
     assert not any(isinstance(c, StopListening) for c in backing_off.commands)
     assert backing_off.closes >= 1 and not backing_off.in_flight
+    assert not armed.overlapped and not backing_off.overlapped
 
 
 def test_shutdown_failure_still_closes() -> None:
@@ -455,3 +470,70 @@ async def _test_second_speech_start_with_a_segment_open_fails_loudly() -> None:
     assert error.endswith("; retry in 1 s")
     [(_, _, session)] = run.stt.sessions
     assert session.closed
+
+
+def test_cancel_during_error_recovery_exits_at_once() -> None:
+    asyncio.run(_test_cancel_during_error_recovery_exits_at_once())
+
+
+async def _test_cancel_during_error_recovery_exits_at_once() -> None:
+    """A Ctrl-C while recovery waits for the partial reader to unwind is not swallowed."""
+    clock, lines = Clock(), []
+    microphone = FakeMicrophone(
+        clock,
+        [
+            "listening",
+            (1.0, SpeechStarted("L", "u1", 16000, 2, 1)),
+            (1.1, MicrophoneUnavailable("connection lost")),
+            "listening",
+        ],
+    )  # without block_at_end: a swallowed cancel would end the run with ScriptDone instead
+    stt = FakeStt(clock, [([], (0.0, "unused"))], linger=0.2)
+    runner = _test_runner("kitchen", microphone, stt, lines)
+    task = asyncio.create_task(runner.run())
+    while not stt.sessions:
+        await asyncio.sleep(0)
+    _, _, session = stt.sessions[0]
+    await asyncio.wait_for(session.cancel_seen.wait(), 2)  # recovery is abandoning u1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    assert not microphone.overlapped
+    assert len([c for c in microphone.commands if isinstance(c, StartListening)]) == 1
+
+
+def test_partial_reader_failure_is_logged_when_abandoned(caplog: pytest.LogCaptureFixture) -> None:
+    asyncio.run(_test_partial_reader_failure_is_logged(caplog))
+
+
+async def _test_partial_reader_failure_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """The reader fails (its LISTENING visual) while the main loop is still reading audio; the
+    segment is then abandoned on a disconnect. The reader's error is logged, not dropped."""
+    clock, lines = Clock(), []
+    microphone = FakeMicrophone(
+        clock,
+        [
+            "listening",
+            (1.0, SpeechStarted("L", "u1", 16000, 2, 1)),
+            *[(1.0, AudioChunk("L", "u1", b"\x01\x00")) for _ in range(5)],
+            (1.1, MicrophoneUnavailable("connection lost")),
+            "listening",
+        ],
+        block_at_end=True,
+    )
+    microphone.fail_exact[SetVisualState(VisualState.LISTENING)] = MicrophoneUnavailable("visual")
+    stt = FakeStt(clock, [([(1.05, "Ryszardzie")], (0.0, "unused"))])
+    runner = _test_runner("kitchen", microphone, stt, lines)
+    task = asyncio.create_task(runner.run())
+    await asyncio.wait_for(_until(lambda: not microphone.script), 2)
+    await settle()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert "partial reader failed: MicrophoneUnavailable('visual')" in caplog.text
+    assert "[kitchen] unavailable: connection lost; retry in 1 s" in lines
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    while not condition():
+        await asyncio.sleep(0.001)

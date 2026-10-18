@@ -7,7 +7,6 @@ latencies. No session, agent or playback (T-010, T-012, T-014). Ctrl-C to stop.
 
 import argparse
 import asyncio
-import contextlib
 import dataclasses
 import datetime
 import logging
@@ -116,6 +115,9 @@ class SatelliteRunner:
         not armed (connecting, or backing off) is only closed, never reconnected."""
         listen_id, self._listen_id = self._listen_id, None
         if listen_id is None:
+            # Also when Ctrl-C landed during an in-flight StartListening: _listen_id is set only
+            # once it returns, so that satellite is only disconnected (the device's stream ends
+            # with the connection), never sent StopListening for an arm it may not have done.
             await self._close()
             return
         try:
@@ -229,8 +231,11 @@ class SatelliteRunner:
         await segment.session.close()
         if segment.partials is not None:
             segment.partials.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await segment.partials
+            # asyncio.wait does not raise the task's error or its cancellation, so a Ctrl-C
+            # landing here propagates at once instead of being swallowed with them.
+            await asyncio.wait({segment.partials})
+            if not segment.partials.cancelled() and (error := segment.partials.exception()):
+                _logger.warning("satellite %s: partial reader failed: %r", self.satellite_id, error)
 
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:

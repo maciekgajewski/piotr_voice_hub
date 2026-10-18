@@ -230,13 +230,14 @@ class FasterWhisperStreamingSttSession:
         self._audio_ended.set()
         if not self._worker.done():
             self._worker.cancel()
-        try:
-            async with asyncio.timeout(GPU_CALL_TIMEOUT_SECONDS):
-                await self._worker
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass  # already handled by on_fatal; retrieved here so it is not left on the task
+        # asyncio.wait does not raise the worker's error or its cancellation, so a cancellation
+        # of the caller landing here propagates at once.
+        done, _ = await asyncio.wait({self._worker}, timeout=GPU_CALL_TIMEOUT_SECONDS)
+        if not done:
+            raise TimeoutError("STT partial worker did not stop after close()")
+        if not self._worker.cancelled() and (error := self._worker.exception()) is not None:
+            # Already handled by on_fatal; retrieved here so it is not left on the task.
+            self._logger.debug("partial worker had failed: %r", error)
         self._end_stream()  # also when the worker was cancelled before it ever ran
 
     def _end_stream(self) -> None:

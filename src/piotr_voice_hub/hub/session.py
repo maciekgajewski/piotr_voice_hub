@@ -275,12 +275,17 @@ class SatelliteSession:
         await segment.stt.close()
         if segment.partials is not None:
             segment.partials.cancel()
-            try:
-                await segment.partials
-            except asyncio.CancelledError:
-                pass
-            except MicrophoneUnavailable:
-                pass  # the driver failed; the main loop gets the same failure
+            # asyncio.wait does not raise the task's error or its cancellation, so a
+            # cancellation of run() landing here propagates at once.
+            await asyncio.wait({segment.partials})
+            if segment.partials.cancelled():
+                return
+            error = segment.partials.exception()
+            if isinstance(error, MicrophoneUnavailable):
+                # The driver failed; the main loop gets (or got) the same failure.
+                self._logger.warning("partial reader stopped: %s", error)
+            elif error is not None:
+                raise error  # fail loudly, like any other unexpected error
 
     def _status(self, connected: bool, state: SatelliteState) -> None:
         status = SatelliteStatus(self._config.id, self._config.area, connected, state)

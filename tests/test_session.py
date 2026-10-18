@@ -59,6 +59,8 @@ class FakeSttSession:
         self.audio = bytearray()
         self.ended = asyncio.Event()
         self.closed = False
+        self.linger = 0.0  # seconds the partial reader takes to unwind when cancelled
+        self.cancel_seen = asyncio.Event()
 
     async def send_audio(self, pcm: bytes) -> None:
         self.audio.extend(pcm)
@@ -67,7 +69,12 @@ class FakeSttSession:
         if self.partials:
             await asyncio.sleep(0)
             return TextPartial(self.partials.popleft(), 0.0, 1.0)
-        await self.ended.wait()
+        try:
+            await self.ended.wait()
+        except asyncio.CancelledError:
+            self.cancel_seen.set()
+            await asyncio.sleep(self.linger)
+            raise
         return TextEnd()
 
     async def transcribe_final(self) -> str:
@@ -86,6 +93,7 @@ class FakeStt:
     def __init__(self) -> None:
         self.scripts: dict[str, tuple[list[str], str, float]] = {}
         self.sessions: dict[str, tuple[float, FakeSttSession]] = {}
+        self.linger = 0.0
 
     def say(
         self, utterance_id: str, final: str, partials: tuple[str, ...] = (), delay: float = 0.0
@@ -95,6 +103,7 @@ class FakeStt:
     def create_streaming_session(self, session_id: str, max_audio_seconds: float) -> FakeSttSession:
         partials, final, delay = self.scripts[session_id]
         session = FakeSttSession(partials, final, delay)
+        session.linger = self.linger
         self.sessions[session_id] = (max_audio_seconds, session)
         return session
 
@@ -125,6 +134,7 @@ class FakeDriver:
             self.events.put_nowait(item)
 
     async def wait_for_event(self) -> MicrophoneEvent:
+        await asyncio.sleep(0)  # like a real reader: other tasks run between events
         item = await self.events.get()
         if isinstance(item, Exception):
             raise item
@@ -528,3 +538,84 @@ async def _test_cue_ids() -> None:
     cue_ids = [c.cue_id for c in h.driver.commands if isinstance(c, PlayCue)]
     assert len(cue_ids) == len(set(cue_ids)) == 2
     assert all(i.startswith("cue-") for i in cue_ids)
+
+
+def test_cancel_during_recovery_exits_at_once() -> None:
+    asyncio.run(_test_cancel_during_recovery_exits_at_once())
+
+
+async def _test_cancel_during_recovery_exits_at_once() -> None:
+    """A cancellation while recovery waits for the partial reader to unwind is not swallowed
+    (it would otherwise re-arm and keep running)."""
+    h = Harness()
+    h.stt.say("u1", "unused")
+    h.stt.linger = 0.2
+    h.driver.after_arm[0] = lambda listen_id: [
+        SpeechStarted(listen_id, "u1", 16000, 2, 1),
+        MicrophoneUnavailable("connection lost"),
+    ]
+    h.start()
+    await h.until(lambda: "u1" in h.stt.sessions)
+    _, stt = h.stt.sessions["u1"]
+    await asyncio.wait_for(stt.cancel_seen.wait(), TIMEOUT)
+    assert h.task is not None
+    h.task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(h.task, TIMEOUT)
+    assert len(h.driver.starts()) == 1 and h.sleeps == []
+    assert not h.driver.overlapped
+
+
+def test_partial_reader_unavailable_is_logged_when_abandoned(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    asyncio.run(_test_partial_reader_unavailable_is_logged(caplog))
+
+
+async def _test_partial_reader_unavailable_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    h = Harness()
+    h.stt.say("u1", "unused", ("Ryszardzie",))
+    original = h.driver.send_output_event
+
+    async def failing_listening_visual(event: MicrophoneCommand) -> None:
+        await original(event)
+        if event == SetVisualState(VisualState.LISTENING):
+            raise MicrophoneUnavailable("visual failed")
+
+    h.driver.send_output_event = failing_listening_visual  # type: ignore[method-assign]
+    h.driver.after_arm[0] = lambda listen_id: [
+        SpeechStarted(listen_id, "u1", 16000, 2, 1),
+        *[AudioChunk(listen_id, "u1", CHUNK) for _ in range(5)],
+    ]
+    h.start()
+    await h.until(lambda: SetVisualState(VisualState.LISTENING) in h.driver.commands)
+    await asyncio.sleep(0.01)
+    h.driver.push(MicrophoneUnavailable("connection lost"))
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.stop()
+    assert "partial reader stopped: visual failed" in caplog.text
+
+
+def test_partial_reader_bug_propagates_when_abandoned() -> None:
+    asyncio.run(_test_partial_reader_bug_propagates_when_abandoned())
+
+
+async def _test_partial_reader_bug_propagates_when_abandoned() -> None:
+    h = Harness()
+    h.stt.say("u1", "unused", ("Ryszardzie",))
+    original = h.driver.send_output_event
+
+    async def buggy_listening_visual(event: MicrophoneCommand) -> None:
+        await original(event)
+        if event == SetVisualState(VisualState.LISTENING):
+            raise RuntimeError("bug")
+
+    h.driver.send_output_event = buggy_listening_visual  # type: ignore[method-assign]
+    h.driver.after_arm[0] = lambda listen_id: [SpeechStarted(listen_id, "u1", 16000, 2, 1)]
+    h.start()
+    await h.until(lambda: SetVisualState(VisualState.LISTENING) in h.driver.commands)
+    await asyncio.sleep(0.01)
+    h.driver.push(MicrophoneUnavailable("connection lost"))
+    assert h.task is not None
+    with pytest.raises(RuntimeError, match="bug"):
+        await asyncio.wait_for(h.task, TIMEOUT)
