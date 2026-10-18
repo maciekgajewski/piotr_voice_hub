@@ -105,9 +105,9 @@ flowchart LR
    - The hub sends `media_player_command(media_url, announcement=True)`, as today in `_start_playback`. `play` passes a consumer URL straight to the media player.
    - `playback_finished` fires when the stream drains. Then the hub re-arms continuous listening.
 7. **Follow-up.** If the command had `listen_after: true`:
-   - After playback the hub re-arms, plays the `follow_up_ready` cue and sets `LISTENING`.
-   - The **next VAD segment within `follow_up_seconds` (default 8 s) is accepted without the wake phrase.**
-   - If no speech starts before the deadline, the hub plays the `timeout` cue and sets `IDLE`.
+   - After playback, while the satellite is still disarmed, the hub sets `LISTENING`, plays the `follow_up_ready` cue, and then re-arms continuous listening (cues play only while disarmed, MP-AUDIO-001).
+   - The **next VAD segment within `follow_up_seconds` (default 8 s) after re-arming is accepted without the wake phrase.**
+   - If no speech starts before the deadline, the hub stops listening, plays the `timeout` cue, sets `IDLE` and re-arms.
    - That is the whole mechanism. The hub keeps no conversation state beyond this one flag.
 8. **Announcements.** `speak` to an idle satellite (listening, no speech segment open) stops listening, plays, then re-arms. Otherwise the busy policy (§6) applies.
 
