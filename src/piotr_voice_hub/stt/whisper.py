@@ -8,7 +8,9 @@ model as an array (no temp WAV), no extra partial after audio end, no non-stream
 
 - No hotwords or initial_prompt: biasing with "Ryszardzie" made the model echo the wake word
   for silence, noise and the start of ordinary speech (measured, T-008 log).
-- One model, one lock: a partial skips its tick while the model is busy; a final waits.
+- One model, one lock: a partial skips its tick while the model is busy; a final waits. The
+  lock is released when the model thread finishes, not when its awaiter is cancelled, so a
+  `close()` mid-partial can't let a second call overlap the one still running.
 - Decoding parameters are faster-whisper's defaults, exactly as the old project ran them
   (language and beam only); `TranscriptPreprocessor` cleans the text.
 - Every GPU call has a timeout. A timeout or a model error is fatal for the process (a wedged
@@ -188,7 +190,8 @@ class FasterWhisperStreamingSttSession:
         self._closed = False
         self._last_partial_text = ""
         self._last_partial_end_byte = 0
-        # A partial needs new audio, so at most one per interval of audio, plus TextEnd.
+        # Sized for real-time audio (one partial per interval) plus TextEnd. Partials are
+        # best-effort: one that doesn't fit is dropped, and the last slot is kept for TextEnd.
         max_events = math.ceil(max_audio_seconds / config.partial.interval_seconds) + 2
         self._events: asyncio.Queue[StreamingTextEvent] = asyncio.Queue(maxsize=max_events)
         self._stream_ended = False
@@ -238,8 +241,8 @@ class FasterWhisperStreamingSttSession:
 
     def _end_stream(self) -> None:
         if not self._stream_ended:
+            self._events.put_nowait(TextEnd())  # a slot is always free: partials leave one
             self._stream_ended = True
-            self._events.put_nowait(TextEnd())
 
     async def _partial_worker(self) -> None:
         try:
@@ -266,6 +269,9 @@ class FasterWhisperStreamingSttSession:
                     self._logger.debug("dropping stale partial backlog_seconds=%.2f", backlog)
                     continue
                 if text and text != self._last_partial_text:
+                    if self._events.qsize() >= self._events.maxsize - 1:
+                        self._logger.debug("event queue full; dropping a partial")
+                        continue
                     self._last_partial_text = text
                     self._events.put_nowait(
                         TextPartial(text, audio_seconds(start_byte), audio_seconds(end_byte))
@@ -285,14 +291,10 @@ class FasterWhisperStreamingSttSession:
         started_at = time.monotonic()
         try:
             async with asyncio.timeout(GPU_CALL_TIMEOUT_SECONDS):
-                async with self._lock:
-                    raw = await asyncio.to_thread(
-                        self._transcriber.transcribe, pcm_to_float(pcm), beam_size
-                    )
+                raw = await self._run_model(pcm, beam_size)
         except TimeoutError:
             self._on_fatal(f"STT {kind} transcription timed out")
         except Exception as error:
-            self._logger.exception("STT %s transcription failed", kind)
             self._on_fatal(f"STT {kind} transcription failed: {error!r}")
         text = self._preprocessor.preprocess(raw)
         self._logger.debug("STT %s transcript raw=%r text=%r", kind, raw, text)
@@ -304,3 +306,23 @@ class FasterWhisperStreamingSttSession:
             time.monotonic() - started_at,
         )
         return text
+
+    async def _run_model(self, pcm: bytes, beam_size: int) -> str:
+        """One model call under the lock; the lock is released when the thread finishes."""
+        await self._lock.acquire()
+        try:
+            call = asyncio.ensure_future(
+                asyncio.to_thread(self._transcriber.transcribe, pcm_to_float(pcm), beam_size)
+            )
+        except BaseException:
+            self._lock.release()
+            raise
+        call.add_done_callback(self._model_call_done)
+        # shield: cancelling the awaiter (close(), a timeout) must not end the call's lock hold.
+        return await asyncio.shield(call)
+
+    def _model_call_done(self, call: "asyncio.Future[str]") -> None:
+        self._lock.release()
+        if not call.cancelled() and (error := call.exception()) is not None:
+            # Retrieved here as well, in case the awaiter was cancelled (close()).
+            self._logger.error("STT model call failed", exc_info=error)

@@ -131,3 +131,22 @@ beam 1 partials every 0.75 s over 4 s).
 - Unbiased transcripts: "O jest test pierwszy.", "Ryszardzie, jaka będzie jutro pogoda?";
   noise/silence gave "Dziękuję." / "Dzięki za oglądanie!" / "Dziękuje za uwagę.", never
   "Ryszardzie". `make check`: 285 passed, 1 skipped.
+
+## 2026-10-18: re-review fixes (PR #8, review 5564634105)
+
+- Correction: the entry above that says "the §6 STT row" means design.md §5.
+- Blocker: `close()` mid-partial released the model lock while the executor thread was still
+  decoding, so the next final ran at the same time (2 concurrent calls, reproduced by the
+  reviewer). Fix: `_run_model` acquires the lock, starts the thread, and releases the lock in
+  the thread future's done callback; the awaiter awaits it through `asyncio.shield`, so
+  cancelling the awaiter no longer releases the lock. The callback also retrieves the call's
+  exception (logged at ERROR) when the awaiter is gone. Test: close-then-final keeps
+  `max_active == 1`, and the final waits for the abandoned call.
+- Blocker: the event bound assumed real-time audio; with slow audio and a lagging reader
+  `put_nowait` raised `QueueFull` and `TextEnd` was lost. Fix: a partial that would take the
+  last slot is dropped (best-effort, DEBUG log), so `TextEnd` always fits. Test with a 6-slot
+  queue, 40 distinct partials and no reader.
+- Tests added: the real `exit_process` in a subprocess with a wedged non-daemon thread (exit 70,
+  CRITICAL logged), and a final waiting behind a wedged partial (fatal timeout, no deadlock).
+- docs/tasks/README.md: T-010 without follow-up/busy (P1), T-011 events only (commands P1),
+  T-014 ESPHome playback added.

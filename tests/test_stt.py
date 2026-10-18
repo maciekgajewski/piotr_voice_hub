@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import subprocess
+import sys
 import threading
 from typing import Any, NoReturn
 
@@ -435,3 +437,100 @@ def test_transcript_preprocessor_uses_word_boundaries() -> None:
 )
 def test_transcript_preprocessor_drops_notes_and_symbol_only_text(text: str, cleaned: str) -> None:
     assert TranscriptPreprocessor("test").preprocess(text) == cleaned
+
+
+class Concurrency(FakeTranscriber):
+    """Counts overlapping model calls; partials (beam 1) on session audio block until released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.active = 0
+        self.max_active = 0
+        self.guard = threading.Lock()
+        self.partial_started = threading.Event()
+        self.release = threading.Event()
+
+    def transcribe(self, audio: np.ndarray, beam_size: int) -> str:
+        with self.guard:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            if beam_size == 1 and not audio.any():  # session audio is silence; warm-up is noise
+                self.partial_started.set()
+                self.release.wait(5)
+            return "final" if beam_size == 5 else "partial"
+        finally:
+            with self.guard:
+                self.active -= 1
+
+
+def test_close_mid_partial_keeps_the_model_locked_until_the_call_finishes() -> None:
+    async def run() -> None:
+        fake = Concurrency()
+        stt = await started(fake, make_config(interval=0.01))
+        a = session_of(stt)
+        b = stt.create_streaming_session("b", MAX_AUDIO_SECONDS)
+        await a.send_audio(pcm(0.5))
+        await asyncio.to_thread(fake.partial_started.wait, 5)
+        await a.close()  # cancels a's worker while its partial is still running
+        await b.send_audio(pcm(0.5))
+        final = asyncio.create_task(b.transcribe_final())
+        await asyncio.sleep(0.05)
+        assert not final.done()  # waits for a's call to finish, not for a's cancellation
+        fake.release.set()
+        assert await asyncio.wait_for(final, 2) == "final"
+        assert fake.max_active == 1
+
+    asyncio.run(run())
+
+
+def test_full_event_queue_drops_partials_but_keeps_the_end_marker() -> None:
+    class Changing(FakeTranscriber):
+        def transcribe(self, audio: np.ndarray, beam_size: int) -> str:
+            return "final" if beam_size == 5 else f"partial {len(audio)}"
+
+    async def run() -> None:
+        stt = await started(Changing(), make_config(interval=0.01))
+        session = stt.create_streaming_session("s", 0.04)  # maxsize = ceil(0.04 / 0.01) + 2 = 6
+        for _ in range(40):  # far more distinct partials than slots, and nobody reads yet
+            await session.send_audio(bytes(32))
+            await asyncio.sleep(0.015)
+        assert await session.transcribe_final() == "final"
+        events = await asyncio.wait_for(collect(session), 1)
+        assert 0 < len(events) <= 5  # one slot stays free for TextEnd
+
+    asyncio.run(run())
+
+
+def test_final_waiting_behind_a_timed_out_partial_is_fatal_not_a_deadlock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        fake = Concurrency()
+        stt = await started(fake, make_config(interval=0.01))
+        monkeypatch.setattr(whisper, "GPU_CALL_TIMEOUT_SECONDS", 0.2)
+        session = session_of(stt)
+        await session.send_audio(pcm(0.5))
+        await asyncio.to_thread(fake.partial_started.wait, 5)  # the partial is wedged
+        await asyncio.sleep(0.1)  # so the partial's 0.2 s budget clearly runs out first
+        with pytest.raises(Fatal, match="partial transcription timed out"):
+            await asyncio.wait_for(session.transcribe_final(), 2)
+        fake.release.set()
+
+    asyncio.run(run())
+
+
+def test_exit_process_logs_critical_and_exits_70_with_a_wedged_thread() -> None:
+    code = """
+import logging, threading
+from piotr_voice_hub.stt.whisper import exit_process
+logging.basicConfig(level=logging.INFO)
+threading.Thread(target=threading.Event().wait).start()  # non-daemon, never finishes
+exit_process("STT final transcription timed out")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 70
+    assert "CRITICAL" in result.stderr
+    assert "STT final transcription timed out; exiting so the container restarts" in result.stderr

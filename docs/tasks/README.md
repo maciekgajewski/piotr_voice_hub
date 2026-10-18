@@ -17,6 +17,7 @@ one PR (AGENTS.md). Order is the dependency order.
 | T-008 stt | Streaming Polish STT on faster-whisper large-v3-turbo | PR #8 |
 | T-009 wake-matcher | Wake-phrase matcher ("Ryszardzie", vocative only) | PR #7 |
 | **T-013 wake-test-runner** | Minimal CLI: connect to the configured satellites, run VAD, STT and the wake matcher, print wake and final transcripts with timings, so Maciej can test "Ryszardzie" live on piotr. Runs right after T-007, T-008 and T-009 merge, before T-010. Its loop is the seed of T-012's main. | planned |
-| T-010 session | Per-satellite session state machine (accept, cancel, reply timeout, follow-up, busy) | planned |
-| T-011 api | WebSocket API events and commands | planned |
+| T-010 session | Per-satellite session state machine with the wake matcher (accept, cancel, reply timeout); follow-up and busy handling are P1 | planned |
+| T-011 api | WebSocket API events only (commands such as speak/play/stop/release are P1) | planned |
 | T-012 main-compose | Hub main wiring and compose with the hub only | planned |
+| T-014 esphome-playback | ESPHome playback split from T-007: shared playback HTTP server, media_player announce, drain, PlaybackFinished | planned |
