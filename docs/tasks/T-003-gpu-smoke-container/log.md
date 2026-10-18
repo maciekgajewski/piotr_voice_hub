@@ -44,3 +44,9 @@ onnxruntime-gpu 1.26.0: `CUDAExecutionProvider` active on sm_120 (session provid
 (TF32), which is correct. Device VRAM 651 MiB with the session alive.
 
 - `make check` passes. Status: pushed, PR to be opened.
+
+## 2026-10-18 (design follow-up)
+
+- design.md updated with the T-003 results: §3 container/onnxruntime-gpu 1.26.0 confirmed (1.28+ are CUDA 13
+  builds and fall back to CPU); §4.3 hub share of about 2.3 GB for large-v3-turbo fp16 (2765 MiB device
+  peak); §9 P1 note that the Piper image must install only onnxruntime-gpu. CI on `1ed7956` was green.

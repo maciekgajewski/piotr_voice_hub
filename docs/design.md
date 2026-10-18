@@ -61,7 +61,7 @@ Piotr already has a hardware-tested continuous-mode driver, STT and speaker reco
 Consequences:
 - The old repo's "i7-930 without AVX" note and its community no-AVX TensorFlow wheel (`wakeword/README.md`, `third_party/tensorflow-wheels/`) are **stale for this host**. Neither is carried over.
 - Blackwell needs CUDA ≥ 12.8 user-space builds. The old images already use `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04`.
-- **Verified 2026-10-18:** faster-whisper 1.2.1 / CTranslate2 4.8.3 with cuBLAS 12.9 and cuDNN 9 runs on this GPU (in a scratch venv on the host, outside Docker; see §4.3). The **P0 smoke test** still has to confirm onnxruntime-gpu (Piper) on sm_120 and the same stack inside the container.
+- **Verified 2026-10-18:** faster-whisper 1.2.1 / CTranslate2 4.8.3 with cuBLAS 12.9 and cuDNN 9 runs on this GPU (in a scratch venv on the host, outside Docker; see §4.3). **Confirmed in the container (T-003):** the same stack works in the `cuda:12.8.1-cudnn-runtime-ubuntu24.04` image, and the onnxruntime-gpu 1.26.0 CUDA EP (Piper) works on sm_120. onnxruntime-gpu 1.28+ are CUDA 13 builds and silently fall back to CPU on this image, so pin 1.26.0.
 
 ## 4. Architecture
 
@@ -122,7 +122,7 @@ The hub shares the GPU with Ollama (§4.3), but the measured footprint of `large
 ### 4.3 VRAM budget (shared GPU)
 | Component | VRAM | Basis |
 |---|---|---|
-| faster-whisper `large-v3-turbo` float16 | **2.1 GB loaded, 2.2 GB peak** (beam 1 and 5, one stream) | **Measured** on piotr, 2026-10-18 (per-process `nvidia-smi`, includes CUDA context) |
+| faster-whisper `large-v3-turbo` float16 | **2.1 GB loaded, 2.2 GB peak** on the host; **about 2.3 GB hub share** in the container (2765 MiB device peak) (beam 1 and 5, one stream) | **Measured** on piotr, 2026-10-18 (host: per-process `nvidia-smi`, includes CUDA context; container: T-003 smoke test, device NVML) |
 | faster-whisper `medium` int8_float16 (fallback) | **1.06 GB loaded, 1.13 GB peak** | **Measured**, same method |
 | Concurrent partials from several satellites | about +0.3–0.5 GB | Estimate. One shared model; extra activation buffers per in-flight decode |
 | Piper `pl_PL-bass-high` on CUDA (wyoming-piper) | about 0.5–1 GB | Estimate. The voice model is about 110 MB of ONNX; onnxruntime's CUDA context and memory arena dominate |
@@ -257,7 +257,7 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
 
 - **One compose file, three services**, all `network_mode: host` and `restart: unless-stopped`. Host networking lets satellites fetch the playback stream from the host IP, and Avahi/`libnss-mdns` resolves `.local` names.
   - `hub` (CUDA 12.8 base, GPU): from `docker/ai-server.Dockerfile`, with only the hub's dependencies.
-  - `wyoming-piper` (GPU, `--use-cuda`): from `docker-compose.yml`.
+  - `wyoming-piper` (GPU, `--use-cuda`): from `docker-compose.yml`. **P1:** the image must install only `onnxruntime-gpu` (1.26.0), not `onnxruntime` too; the old `piotr-wyoming-piper` container has both, so it runs on CPU.
   - `speaker-recognition` (CPU): from `docker-compose.speaker-recognition.yml`, unchanged `--device cpu`.
 - **Ollama coexists.** It keeps running on the host for unrelated tasks and is *not* in the hub's compose file. The two share the GPU within the budget in §4.3.
 - **Ports:**
