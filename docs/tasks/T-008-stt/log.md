@@ -56,3 +56,7 @@ beam 1 partials every 0.75 s over 4 s).
 - `tools/stt-gpu-test.sh` now passes `--reinstall-package piotr-voice-hub`: the first re-run
   silently tested the cached wheel of the previous commit (same version, so uv reused it).
 - `make check`: 268 passed, 1 skipped.
+- Transcript cleanup (PR #7 re-review note, manager): the preprocessor drops bracketed Whisper
+  notes, i.e. any non-nested "(...)" or "[...]" group ("(muzyka)", "[MUZYKA]", "(śmiech)") with
+  the whitespace before it, then collapses spaces. "Ryszardzie (muzyka)" becomes "Ryszardzie",
+  so the matcher sees an empty remainder. Runs on partials and finals, before the copied rules.

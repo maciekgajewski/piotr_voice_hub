@@ -1,4 +1,9 @@
-"""Fixed transcript corrections, copied verbatim from piotr_the_ai_server (hardware-tuned)."""
+"""Fixed transcript cleanup.
+
+The replacement rules are copied verbatim from piotr_the_ai_server (hardware-tuned). New in the
+hub: bracketed Whisper notes such as "(muzyka)" or "[MUZYKA]" are dropped first, so they never
+become a command after the wake word.
+"""
 
 import logging
 import re
@@ -34,6 +39,9 @@ TRANSCRIPT_REPLACEMENTS = (
         replacement="pogoda",
     ),
 )
+# One non-nested (...) or [...] group, with the whitespace before it.
+BRACKETED_NOTE = re.compile(r"\s*(?:\([^()]*\)|\[[^\[\]]*\])")
+_SPACES = re.compile(r"\s{2,}")
 
 
 class TranscriptPreprocessor:
@@ -41,7 +49,10 @@ class TranscriptPreprocessor:
         self._logger = logging.getLogger(f"{__name__}.TranscriptPreprocessor[{instance_id}]")
 
     def preprocess(self, text: str) -> str:
-        processed = text
+        processed, note_count = BRACKETED_NOTE.subn("", text)
+        if note_count:
+            processed = _SPACES.sub(" ", processed).strip()
+            self._logger.info("dropped bracketed transcript notes count=%s", note_count)
         for rule in TRANSCRIPT_REPLACEMENTS:
             processed, replacement_count = rule.pattern.subn(rule.replacement, processed)
             if replacement_count:

@@ -253,3 +253,31 @@ def test_transcript_preprocessor_uses_word_boundaries() -> None:
     preprocessor = TranscriptPreprocessor("test")
     assert preprocessor.preprocess("włącz tryb ventilacji") == "włącz tryb wentylacji"
     assert preprocessor.preprocess("superventilacji") == "superventilacji"
+
+
+@pytest.mark.parametrize(
+    ("text", "cleaned"),
+    [
+        ("(muzyka)", ""),
+        ("[MUZYKA]", ""),
+        ("Ryszardzie (muzyka)", "Ryszardzie"),
+        ("[Muzyka] Ryszardzie, włącz radio", "Ryszardzie, włącz radio"),
+        ("Ryszardzie, (śmiech) włącz [brawa] radio", "Ryszardzie, włącz radio"),
+        ("Ryszardzie, włącz radio", "Ryszardzie, włącz radio"),
+        ("ustaw 50% (proszę", "ustaw 50% (proszę"),  # unbalanced: left alone
+    ],
+)
+def test_transcript_preprocessor_drops_bracketed_notes(text: str, cleaned: str) -> None:
+    assert TranscriptPreprocessor("test").preprocess(text) == cleaned
+
+
+def test_session_final_drops_bracketed_notes() -> None:
+    async def run() -> None:
+        fake = FakeTranscriber()
+        stt = await started(fake, make_config(interval=10.0))
+        fake.texts = ["Ryszardzie (muzyka)"]
+        session = stt.create_streaming_session("s")
+        await session.send_audio(pcm(0.5))
+        assert await session.transcribe_final() == "Ryszardzie"
+
+    asyncio.run(run())
