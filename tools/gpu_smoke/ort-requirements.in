@@ -1,0 +1,5 @@
+# 1.26.0 is the newest PyPI onnxruntime-gpu built for CUDA 12; 1.28+ need CUDA 13 (T-003 log)
+onnxruntime-gpu==1.26.0
+onnx
+numpy
+nvidia-ml-py

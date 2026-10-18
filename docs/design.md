@@ -56,7 +56,7 @@ Piotr already has a hardware-tested continuous-mode driver, STT and speaker reco
 | GPU | NVIDIA GeForce RTX 5060 Ti, **16 GB VRAM** (12 MiB used at check time), compute capability 12.0 (Blackwell) |
 | Driver / CUDA | Driver 595.99.02, CUDA 13.2 (driver API) |
 | GPU sharing | Ollama keeps running on this host for unrelated tasks. It is not part of this project, but it shares the GPU with the hub |
-| Docker | Docker 29.1.3. The `nvidia` runtime is in `/etc/docker/daemon.json`, a CDI spec is at `/var/run/cdi/nvidia.yaml`, and `nvidia-ctk` is installed. `docker info` was not checked: the user `grok-developer` is not in the `docker` group |
+| Docker | Docker 29.1.3. The `nvidia` runtime is in `/etc/docker/daemon.json`, a CDI spec is at `/var/run/cdi/nvidia.yaml`, and `nvidia-ctk` is installed. The user `grok-developer` is in the `docker` group; `docker info` lists runtimes `nvidia` and `runc` (default `runc`) and CDI devices `nvidia.com/gpu=all` |
 
 Consequences:
 - The old repo's "i7-930 without AVX" note and its community no-AVX TensorFlow wheel (`wakeword/README.md`, `third_party/tensorflow-wheels/`) are **stale for this host**. Neither is carried over.
