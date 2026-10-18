@@ -82,4 +82,5 @@ Rebased onto `02a75fe` (T-004 merged). Fixed:
 
 ## 2026-10-18: correction
 
-- The rebase recorded above as "onto `02a75fe`" was in fact onto `355c811` (T-006 merged).
+- The review-fix entry above says "Rebased onto `02a75fe`". The branch was then rebased again, and its
+  final base (head `4679d10`, the one reviewed and merged) was `355c811` (T-006 merged).
