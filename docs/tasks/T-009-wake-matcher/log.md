@@ -20,3 +20,20 @@
   stem) and rejects Ryszardowski (5) and Ryszardowskiego. "Rysiu"/"Rysiek" don't match (not the
   stem). A filler word before the phrase is fine, since it is still within the first three words.
 - `make check` passes. Status: pushed, PR to be opened.
+
+## 2026-10-18: review fixes (PR #7, review 5564414056)
+
+- Rebased onto `c3a8dd6` (T-005 merged).
+- Blocker: a repeated wake word became the command ("Ryszardzie Ryszardzie" → "Ryszardzie",
+  a false accept under the "non-empty final remainder" rule). The matcher now skips wake words
+  that immediately follow the match. "Ryszardzie, Ryszardzie, włącz światło" → "włącz światło".
+  A wake word later in the command is kept.
+- **Decision (manager): match only the vocative "ryszardzie" after normalization.** No other
+  case forms (Ryszard, Ryszarda, Ryszardem, Ryszardowi, Ryszardu, Ryszardze) and no bare
+  "Ryszard". The stem accepted "Ryszard Kalisz powiedział..." or "Ryszarda nie ma w domu" from
+  TV/radio as a wake plus a command. design.md §4.1 step 4 is updated. **Revisit at hardware
+  acceptance with data**, if Whisper turns out to drop or mangle the vocative ending.
+- Nits: NFC before splitting (NFD input split words at combining marks); the remainder's edges
+  lose only whitespace, sentence punctuation, quotes and dashes, so "50%" keeps its "%"; the
+  diacritics test now really tests diacritic artifacts ("Ryszardzię"), and the case test is
+  named for case; the ø/đ folds are gone (ł/Ł kept). Naming nit skipped, as instructed.

@@ -9,16 +9,17 @@ partial and final transcripts.
 
 - `src/piotr_voice_hub/hub/wake.py` (design.md §5 `hub/`): `match_wake_phrase(text)` returns
   `WakeMatch(phrase, remainder)` or `None`.
-  - Words are `\w+` runs. Each word is normalized (lowercase, NFKD diacritics stripped, plus explicit
-    folds for letters NFKD keeps whole, notably Polish `ł`).
-  - Match the design stem `ryszard\w{0,3}` on a whole normalized word, within the first three words.
-    Per word, this equals the design's `\bryszard\w{0,3}\b` on the normalized text.
-  - The remainder is the original text after the matched word (casing and diacritics kept), with
-    leading and trailing punctuation and whitespace stripped. Inner punctuation is kept.
-    It may be empty; the session decides (a final needs a non-empty remainder; a partial may
-    emit `wake` with an empty one).
-- Tests for inflections, punctuation, filler words, late phrase, empty remainder, Whisper oddities,
-  growing partials, stem edge cases.
+  - Text is NFC-normalized, then split into `\w+` words. Each word is normalized (lowercase,
+    NFKD diacritics stripped, Polish `ł` folded explicitly).
+  - The wake word is the vocative `ryszardzie` only (normalized, whole word), within the first
+    three words. Other case forms and bare "Ryszard" don't match.
+  - Repeated wake words right after the match are skipped.
+  - The remainder is the original text after the wake word(s), with casing and diacritics kept,
+    and only whitespace, sentence punctuation, quotes and dashes stripped from its edges (`%` and
+    other symbols stay). It may be empty; the session decides (a final needs a non-empty
+    remainder; a partial may emit `wake` with an empty one).
+- Tests for the vocative, rejected case forms, punctuation, filler words, late phrase, repeats,
+  empty remainder, Whisper oddities, growing partials, NFD input.
 
 ## Out of scope
 
