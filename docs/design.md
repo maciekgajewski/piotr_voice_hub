@@ -1,7 +1,7 @@
 # piotr_voice_hub: design doc (rev. 3)
 
-> **Status:** Rev. 3, after Maciej's second review. No code has been written yet.
-> **Repo:** <https://github.com/maciekgajewski/piotr_voice_hub> (public, MIT; only the initial commit so far).
+> **Status:** Rev. 3, after Maciej's second review. Repo bootstrap (T-001) is merged; P0 (§11) is next.
+> **Repo:** <https://github.com/maciekgajewski/piotr_voice_hub> (public, MIT). Work is tracked per task in `docs/tasks/`.
 > **Source:** all needed code, config and docs are **copied** from `maciekgajewski/piotr_the_ai_server` @ `a299643`. Paths below refer to that repo.
 
 ## Project rule: SIMPLICITY, NARROW SCOPE, RELIABILITY
