@@ -538,19 +538,22 @@ def test_concurrent_first_calls_both_fail_when_connect_fails() -> None:
     asyncio.run(run())
 
 
-def test_connect_failure_is_logged_at_warning(caplog: pytest.LogCaptureFixture) -> None:
+def test_connect_failure_is_logged_at_info(caplog: pytest.LogCaptureFixture) -> None:
+    """The session logs the one WARNING per refused connect (PR #12 review)."""
+
     async def run() -> None:
         mic, clients = make()
         clients.setup = lambda client: setattr(client, "connect_error", OSError("refused"))
         with pytest.raises(MicrophoneUnavailable, match="refused"):
             await mic.driver.send_output_event(SetVisualState(VisualState.IDLE))
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         asyncio.run(run())
     assert any(
-        r.levelno == logging.WARNING and "connect to 10.0.0.5:6053 failed" in r.getMessage()
+        r.levelno == logging.INFO and "connect to 10.0.0.5:6053 failed" in r.getMessage()
         for r in caplog.records
     )
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_close_wakes_a_blocked_reader() -> None:

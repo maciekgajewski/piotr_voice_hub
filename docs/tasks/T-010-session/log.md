@@ -43,3 +43,31 @@ fixed here as an extra commit:
   takes 0.2 s to unwind; both fail against the old code), partial-reader errors are logged on
   abandon (runner, session) and a non-`MicrophoneUnavailable` one propagates (session), and
   cancelling the caller of STT `close()` propagates.
+
+## 2026-10-18: PR #12 review 5564992469 (CHANGES NEEDED)
+
+- B1 (blocker): cancelling `run()` while a final was running leaked the partial task:
+  `_segment` was cleared before `_finish_segment`, so `run()`'s `finally` had nothing to
+  abandon, and the task later sent `SetVisualState(LISTENING)` and emitted `wake`. The same
+  leak was in `_abandon_segment`, which cleared `_segment` and awaited `stt.close()` before
+  cancelling the task. Now the session owns the segment until it is fully finished or
+  abandoned: `_finish_segment` clears `_segment` only after the STT session is closed and the
+  partial task has ended; `_abandon_segment` cancels the task first, closes the STT session
+  in `try`, and waits for the task and clears `_segment` in `finally`. Tests cancel `run()`
+  during a final and during an abandon (slow STT close), each with a partial that would
+  arrive 0.1 s later, and assert that no command or event follows the cancellation and no
+  task is left. The T-013 runner had the same pattern (`_read_segments`/`_abandon`); fixed the
+  same way, with a test.
+- (1) recovery emits `wake_cancelled` for a `wake` without `transcript_final` (disconnect
+  after the candidate, or a failure during the accept). Tests for both.
+- (2) design.md §6: `wake` once per utterance (first matching partial, else just before
+  `transcript_final`), `wake_cancelled` also on failure, `transcript_partial` only for matching
+  partials with the post-phrase text, `satellite` on change, and the state mapping.
+- (3) `SatelliteSession.shutdown()`: clean stop on exit (StopListening if armed, idle visual,
+  3 s bound, then close; offline: close only; no events). Tests: armed, processing, offline, a
+  hanging driver. README: T-012 carry-forward (main calls it; also quiet aioesphomeapi's own
+  per-connect WARNING).
+- (4) the driver logs a failed connect at INFO; the session's line is the one WARNING per
+  attempt.
+- (5), (6) plan.md: a partial-task crash is noticed at the next end of speech; the error state
+  is shown before the first connect.

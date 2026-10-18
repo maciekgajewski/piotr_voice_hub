@@ -260,7 +260,8 @@ class EsphomeSatellite:
             await self._disconnect(client)  # never leave a half-open connection behind
             raise
         except EXPECTED_ERRORS as error:
-            self._logger.warning("connect to %s failed: %r", self._address(), error)
+            # INFO: the caller (the session) logs the one WARNING per failed attempt.
+            self._logger.info("connect to %s failed: %r", self._address(), error)
             await self._disconnect(client)
             raise MicrophoneUnavailable(
                 f"connect to {self._address()} failed: {error!r}"

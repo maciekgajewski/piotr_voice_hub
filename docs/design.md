@@ -176,10 +176,10 @@ Proposed package layout in `piotr_voice_hub/`:
 ### Events (hub → consumer)
 | Type | Data |
 |---|---|
-| `satellite` | `area`, `connected`, `state` (`idle/listening/processing/speaking/error`) |
-| `wake` | `utterance_id` (fired on the first partial match) |
-| `wake_cancelled` | `utterance_id` (final transcript did not confirm) |
-| `transcript_partial` | `utterance_id`, `text` (post-phrase) |
+| `satellite` | `area`, `connected`, `state` (`idle/listening/processing/speaking/error`), sent on change |
+| `wake` | `utterance_id`. Once per utterance: on the first partial that matches, or else just before `transcript_final` |
+| `wake_cancelled` | `utterance_id`. The final did not confirm, or the satellite failed before `transcript_final`. Every `wake` ends with exactly one `transcript_final` or `wake_cancelled` |
+| `transcript_partial` | `utterance_id`, `text`. Only for partials that match, carrying the post-phrase text |
 | `transcript_final` | `utterance_id`, `text`, `raw_text`, `follow_up` (bool), `speaker` `{name, confidence}` or `null`, `audio_ms` |
 | `playback_finished` | `playback_id`, `listening_for_follow_up` (bool) |
 | `follow_up_timeout` | none |
@@ -193,6 +193,8 @@ Proposed package layout in `piotr_voice_hub/`:
 | `release` | none | End `PROCESSING` without speaking (e.g. nothing to say); re-arm. |
 
 Errors are `busy`, `unknown_satellite`, `satellite_offline` and `bad_request`.
+
+**Satellite states.** `idle`: armed, no wake candidate. `listening`: a wake candidate is open (after `wake`). `processing`: accepted, awaiting a reply. `speaking`: playing audio (P1). `error`: offline, also before the first connect.
 
 **Busy policy (decision).** `speak`/`play` is accepted when the satellite is listening with no open speech segment, or is waiting for a reply (`PROCESSING`). While a speech segment is being captured or audio is playing, it gets an immediate `busy` error. There is no queue; consumers send their next item after `playback_finished`. *Rationale:* no queue means no buffered audio and no stale state, so there is nothing to drain after a disconnect or restart.
 

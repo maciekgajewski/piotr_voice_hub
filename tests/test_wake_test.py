@@ -62,6 +62,9 @@ class FakeSession:
         self.closed = False
         self.linger = 0.0  # seconds the partial reader takes to unwind when cancelled
         self.cancel_seen = asyncio.Event()
+        self.late: list[tuple[float, str]] = []  # (delay, text): partials that arrive later
+        self.final_delay = 0.0
+        self.final_started = False
 
     async def send_audio(self, pcm: bytes) -> None:
         self.audio.extend(pcm)
@@ -72,6 +75,10 @@ class FakeSession:
             await asyncio.sleep(0)
             self.clock.now = at
             return TextPartial(text, 0.0, at)
+        if self.late:
+            delay, text = self.late.pop(0)
+            await asyncio.sleep(delay)
+            return TextPartial(text, 0.0, delay)
         try:
             await self.ended.wait()
         except asyncio.CancelledError:
@@ -81,6 +88,8 @@ class FakeSession:
         return TextEnd()
 
     async def transcribe_final(self) -> str:
+        self.final_started = True
+        await asyncio.sleep(self.final_delay)
         self.ended.set()
         self.clock.now, text = self.final
         return text
@@ -98,12 +107,14 @@ class FakeStt:
         self.clock = clock
         self.segments = deque(segments)
         self.linger = linger
+        self.setup: Callable[[FakeSession], None] = lambda _session: None
         self.sessions: list[tuple[str, float, FakeSession]] = []
 
     def create_streaming_session(self, session_id: str, max_audio_seconds: float) -> FakeSession:
         partials, final = self.segments.popleft()
         session = FakeSession(self.clock, partials, final)
         session.linger = self.linger
+        self.setup(session)
         self.sessions.append((session_id, max_audio_seconds, session))
         return session
 
@@ -537,3 +548,43 @@ async def _test_partial_reader_failure_is_logged(caplog: pytest.LogCaptureFixtur
 async def _until(condition: Callable[[], bool]) -> None:
     while not condition():
         await asyncio.sleep(0.001)
+
+
+def test_cancel_during_a_final_leaves_no_partial_task() -> None:
+    asyncio.run(_test_cancel_during_a_final_leaves_no_partial_task())
+
+
+async def _test_cancel_during_a_final_leaves_no_partial_task() -> None:
+    """PR #12 review B1, same pattern here: a Ctrl-C while a final runs must also end the
+    segment's partial reader, which would otherwise print and send LISTENING later."""
+    clock, lines = Clock(), []
+    microphone = FakeMicrophone(
+        clock,
+        [
+            "listening",
+            (1.0, SpeechStarted("L", "u1", 16000, 2, 1)),
+            (2.0, SpeechEnded("L", "u1", "completed")),
+        ],
+        block_at_end=True,
+    )
+    stt = FakeStt(clock, [([], (2.5, "Ryszardzie, światło"))])
+
+    def slow(session: FakeSession) -> None:
+        session.late.append((0.1, "Ryszardzie"))
+        session.final_delay = 1.0
+
+    stt.setup = slow
+    runner = _test_runner("kitchen", microphone, stt, lines)
+    task = asyncio.create_task(runner.run())
+    await asyncio.wait_for(_until(lambda: bool(stt.sessions)), 2)
+    _, _, session = stt.sessions[0]
+    await asyncio.wait_for(_until(lambda: session.final_started), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    commands, printed = len(microphone.commands), len(lines)
+    await asyncio.sleep(0.3)  # past the late partial
+    assert microphone.commands[commands:] == [] and lines[printed:] == []
+    assert not any("wake partial" in line for line in lines)
+    assert [t for t in asyncio.all_tasks() if t is not asyncio.current_task()] == []
+    assert session.closed and not microphone.overlapped

@@ -61,6 +61,10 @@ class FakeSttSession:
         self.closed = False
         self.linger = 0.0  # seconds the partial reader takes to unwind when cancelled
         self.cancel_seen = asyncio.Event()
+        self.late: list[tuple[float, str]] = []  # (delay, text): partials that arrive later
+        self.close_delay = 0.0
+        self.final_started = False
+        self.close_started = False
 
     async def send_audio(self, pcm: bytes) -> None:
         self.audio.extend(pcm)
@@ -69,6 +73,10 @@ class FakeSttSession:
         if self.partials:
             await asyncio.sleep(0)
             return TextPartial(self.partials.popleft(), 0.0, 1.0)
+        if self.late:
+            delay, text = self.late.pop(0)
+            await asyncio.sleep(delay)
+            return TextPartial(text, 0.0, 1.0)
         try:
             await self.ended.wait()
         except asyncio.CancelledError:
@@ -78,6 +86,7 @@ class FakeSttSession:
         return TextEnd()
 
     async def transcribe_final(self) -> str:
+        self.final_started = True
         while self.partials:  # like the real session: in-flight partials come first
             await asyncio.sleep(0)
         await asyncio.sleep(self.final_delay)
@@ -87,6 +96,8 @@ class FakeSttSession:
     async def close(self) -> None:
         self.closed = True
         self.ended.set()
+        self.close_started = True
+        await asyncio.sleep(self.close_delay)
 
 
 class FakeStt:
@@ -94,6 +105,7 @@ class FakeStt:
         self.scripts: dict[str, tuple[list[str], str, float]] = {}
         self.sessions: dict[str, tuple[float, FakeSttSession]] = {}
         self.linger = 0.0
+        self.setup: Callable[[FakeSttSession], None] = lambda _session: None
 
     def say(
         self, utterance_id: str, final: str, partials: tuple[str, ...] = (), delay: float = 0.0
@@ -104,6 +116,7 @@ class FakeStt:
         partials, final, delay = self.scripts[session_id]
         session = FakeSttSession(partials, final, delay)
         session.linger = self.linger
+        self.setup(session)
         self.sessions[session_id] = (max_audio_seconds, session)
         return session
 
@@ -259,7 +272,7 @@ async def _test_partial_wake_then_accept_then_reply_timeout_rearms() -> None:
     h.driver.after_arm[0] = segments("u1")
     h.start()
     await h.until(lambda: len(h.driver.starts()) == 2)
-    await h.until(lambda: h.events[-1] == IDLE)
+    await h.until(lambda: h.events[-1:] == [IDLE])
     await h.stop()
     assert h.events == [
         OFFLINE,
@@ -329,7 +342,7 @@ async def _test_partial_candidate_rejected_by_the_final_is_cancelled() -> None:
     h.driver.after_arm[0] = segments("u1")
     h.start()
     await h.until(lambda: bool(h.hub(WakeCancelled)))
-    await h.until(lambda: h.events[-1] == IDLE)
+    await h.until(lambda: h.events[-1:] == [IDLE])
     await h.stop()
     assert h.events == [
         OFFLINE,
@@ -405,7 +418,7 @@ async def _test_unavailable_backs_off(caplog: pytest.LogCaptureFixture) -> None:
     h.driver.after_arm[0] = lambda _listen_id: [MicrophoneUnavailable("connection lost")]
     h.start()
     await h.until(lambda: len(h.driver.starts()) == 5)
-    await h.until(lambda: h.events[-1] == IDLE)
+    await h.until(lambda: h.events[-1:] == [IDLE])
     await h.stop()
     assert h.sleeps == [1.0, 2.0, 4.0, 1.0]
     assert h.driver.closes == 4
@@ -446,7 +459,7 @@ async def _test_disconnect_while_waiting_for_a_reply_recovers_at_once() -> None:
     await h.until(lambda: bool(h.hub(TranscriptFinal)))
     h.driver.push(MicrophoneUnavailable("ESPHome transport stopped"))
     await h.until(lambda: len(h.driver.starts()) == 2)
-    await h.until(lambda: h.events[-1] == IDLE)
+    await h.until(lambda: h.events[-1:] == [IDLE])
     await h.stop()
     assert h.sleeps == [1.0]
     assert CueType.TIMEOUT not in h.driver.without_ids()
@@ -487,7 +500,7 @@ async def _test_missing_answer(silent: type) -> None:
     h.start()
     await h.until(lambda: h.driver.closes == 1)
     h.driver.silent.clear()
-    await h.until(lambda: h.events[-1] == IDLE)
+    await h.until(lambda: h.events[-1:] == [IDLE])
     await h.stop()
     assert h.sleeps[0] == 1.0
 
@@ -619,3 +632,194 @@ async def _test_partial_reader_bug_propagates_when_abandoned() -> None:
     assert h.task is not None
     with pytest.raises(RuntimeError, match="bug"):
         await asyncio.wait_for(h.task, TIMEOUT)
+
+
+# B1 (PR #12 review): the session owns a segment until it is finished or abandoned
+
+
+async def _assert_quiet_after_cancel(h: Harness) -> None:
+    """Cancel run(); afterwards nothing is sent or emitted and no task is left."""
+    assert h.task is not None
+    h.task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(h.task, TIMEOUT)
+    commands, events = len(h.driver.commands), len(h.events)
+    await asyncio.sleep(0.3)  # past the late partial
+    assert h.driver.commands[commands:] == []
+    assert h.events[events:] == []
+    assert [t for t in asyncio.all_tasks() if t is not asyncio.current_task()] == []
+    assert not h.driver.overlapped
+
+
+def test_cancel_during_a_final_leaves_no_partial_task() -> None:
+    asyncio.run(_test_cancel_during_a_final_leaves_no_partial_task())
+
+
+async def _test_cancel_during_a_final_leaves_no_partial_task() -> None:
+    h = Harness()
+    h.stt.say("u1", "Ryszardzie, światło", delay=1.0)
+    h.stt.setup = lambda session: session.late.append((0.1, "Ryszardzie"))
+    h.driver.after_arm[0] = segments("u1")
+    h.start()
+    await h.until(lambda: "u1" in h.stt.sessions and h.stt.sessions["u1"][1].final_started)
+    await _assert_quiet_after_cancel(h)
+    assert not h.hub(Wake)  # the late partial never got through
+    assert h.stt.sessions["u1"][1].closed
+
+
+def test_cancel_during_an_abandon_leaves_no_partial_task() -> None:
+    asyncio.run(_test_cancel_during_an_abandon_leaves_no_partial_task())
+
+
+async def _test_cancel_during_an_abandon_leaves_no_partial_task() -> None:
+    h = Harness()
+    h.stt.say("u1", "unused")
+
+    def slow_close(session: FakeSttSession) -> None:
+        session.late.append((0.1, "Ryszardzie"))
+        session.close_delay = 1.0
+
+    h.stt.setup = slow_close
+    h.driver.after_arm[0] = lambda listen_id: [
+        SpeechStarted(listen_id, "u1", 16000, 2, 1),
+        MicrophoneUnavailable("connection lost"),
+    ]
+    h.start()
+    await h.until(lambda: "u1" in h.stt.sessions and h.stt.sessions["u1"][1].close_started)
+    await _assert_quiet_after_cancel(h)
+    assert not h.hub(Wake)
+
+
+# Every wake ends with transcript_final or wake_cancelled
+
+
+def test_disconnect_after_wake_before_the_final_cancels_the_wake() -> None:
+    asyncio.run(_test_disconnect_after_wake_before_the_final_cancels_the_wake())
+
+
+async def _test_disconnect_after_wake_before_the_final_cancels_the_wake() -> None:
+    h = Harness()
+    h.stt.say("u1", "unused", ("Ryszardzie",))
+    h.driver.after_arm[0] = lambda listen_id: [
+        SpeechStarted(listen_id, "u1", 16000, 2, 1),
+        *[AudioChunk(listen_id, "u1", CHUNK) for _ in range(5)],
+    ]
+    h.start()
+    await h.until(lambda: h.events[-1:] == [LISTENING])
+    h.driver.push(MicrophoneUnavailable("connection lost"))
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.events == [
+        OFFLINE,
+        IDLE,
+        Wake("kitchen", "u1"),
+        LISTENING,
+        WakeCancelled("kitchen", "u1"),
+        OFFLINE,
+        IDLE,
+    ]
+
+
+def test_failure_between_wake_and_transcript_final_cancels_the_wake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_module, "EVENT_TIMEOUT_SECONDS", 0.02)
+    asyncio.run(_test_failure_between_wake_and_transcript_final())
+
+
+async def _test_failure_between_wake_and_transcript_final() -> None:
+    h = Harness()
+    h.stt.say("u1", "Ryszardzie, światło")
+    h.driver.after_arm[0] = segments("u1")
+    h.driver.silent.add(PlayCue)  # the accepted cue never finishes
+    h.start()
+    await h.until(lambda: h.driver.closes == 1)
+    h.driver.silent.clear()
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal) == [
+        Wake("kitchen", "u1"),
+        WakeCancelled("kitchen", "u1"),
+    ]
+
+
+# Clean stop on exit
+
+
+def test_shutdown_stops_listening_goes_idle_and_closes() -> None:
+    asyncio.run(_test_shutdown_stops_listening_goes_idle_and_closes())
+
+
+async def _test_shutdown_stops_listening_goes_idle_and_closes() -> None:
+    h = Harness()
+    h.start()
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    events = len(h.events)
+    await h.session.shutdown()
+    listen_id = h.driver.starts()[-1].listen_id
+    assert h.driver.commands[-2:] == [
+        StopListening(listen_id, "shutdown"),
+        SetVisualState(VisualState.IDLE),
+    ]
+    assert h.driver.closes == 1
+    assert h.events[events:] == []
+
+
+def test_shutdown_while_processing_goes_idle_without_a_stop() -> None:
+    asyncio.run(_test_shutdown_while_processing_goes_idle_without_a_stop())
+
+
+async def _test_shutdown_while_processing_goes_idle_without_a_stop() -> None:
+    h = Harness(reply_timeout=60)
+    h.stt.say("u1", "Ryszardzie, światło")
+    h.driver.after_arm[0] = segments("u1")
+    h.start()
+    await h.until(lambda: bool(h.hub(TranscriptFinal)))
+    await h.stop()
+    stops = len([c for c in h.driver.commands if isinstance(c, StopListening)])
+    await h.session.shutdown()
+    assert len([c for c in h.driver.commands if isinstance(c, StopListening)]) == stops
+    assert h.driver.commands[-1] == SetVisualState(VisualState.IDLE)
+    assert h.driver.closes == 1
+
+
+def test_shutdown_offline_only_closes() -> None:
+    asyncio.run(_test_shutdown_offline_only_closes())
+
+
+async def _test_shutdown_offline_only_closes() -> None:
+    h = Harness()
+    h.driver.fail_starts = 1000
+    h.start()
+    await h.until(lambda: len(h.sleeps) >= 2)
+    await h.stop()
+    commands, closes = len(h.driver.commands), h.driver.closes
+    await h.session.shutdown()
+    assert len(h.driver.commands) == commands
+    assert h.driver.closes == closes + 1
+
+
+def test_shutdown_failure_is_logged_and_still_closes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(session_module, "SHUTDOWN_TIMEOUT_SECONDS", 0.02)
+    asyncio.run(_test_shutdown_failure_is_logged_and_still_closes())
+    assert "shutdown: could not stop listening and go idle: TimeoutError()" in caplog.text
+
+
+async def _test_shutdown_failure_is_logged_and_still_closes() -> None:
+    h = Harness()
+    h.start()
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    original = h.driver.send_output_event
+
+    async def hang(event: MicrophoneCommand) -> None:
+        await asyncio.sleep(10)
+        await original(event)
+
+    h.driver.send_output_event = hang  # type: ignore[method-assign]
+    await h.session.shutdown()
+    assert h.driver.closes == 1

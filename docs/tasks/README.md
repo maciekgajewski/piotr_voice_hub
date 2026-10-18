@@ -36,6 +36,10 @@ one PR (AGENTS.md). Order is the dependency order.
 - **Driver follow-up (done in T-010):** a half-open connection is closed when the reader is
   cancelled mid-connect (`_connect` cancelled after `client.connect()` but before the client is
   published), so no orphaned API connection stays open (PR #9 review).
+- **T-012:** on shutdown, main cancels each `SatelliteSession.run()` and then awaits
+  `SatelliteSession.shutdown()` for all of them (stop listening, idle visual, close; bounded).
+  Also raise the `aioesphomeapi` logger to ERROR: it logs its own WARNING per failed connect,
+  next to the session's one (PR #12 review).
 - **P2 (soak):** an audio-liveness check before the soak: while armed, no audio from the device
   for a bounded time is `MicrophoneUnavailable`, so a silent stall is not mistaken for a quiet
   room (PR #9 review, B1).
