@@ -11,6 +11,7 @@ from piotr_voice_hub.satellites.vad import (
     FRAME_SAMPLES,
     MODEL_PATH,
     SAMPLE_RATE,
+    START_THRESHOLD,
     Hysteresis,
     SileroVad,
     VadTransition,
@@ -162,3 +163,60 @@ def test_frame_cost_is_small() -> None:
     for _ in range(100):
         vad.process_frame(frame)
     assert (time.perf_counter() - start) / 100 < 0.016  # under half a frame
+
+
+ALARM_CLIP = Path(__file__).parent / "data" / "alarm_tone_16k.wav"
+
+
+def test_reset_ends_the_segment_and_a_new_one_needs_a_full_start_run() -> None:
+    hysteresis = Hysteresis(0.8)
+    assert feed(hysteresis, [0.9] * START_FRAMES) == [(START_FRAMES - 1, STARTED)]
+    hysteresis.reset()  # the 15 s max-segment cut, while speech goes on
+    assert not hysteresis.speaking
+    assert feed(hysteresis, [0.9] * (START_FRAMES - 1)) == []
+    assert feed(hysteresis, [0.9]) == [(0, STARTED)]
+
+
+def test_reset_forgets_a_partial_start_run_and_the_silence_run() -> None:
+    hysteresis = Hysteresis(0.8)
+    feed(hysteresis, [0.9] * (START_FRAMES - 1))
+    hysteresis.reset()
+    assert feed(hysteresis, [0.9] * (START_FRAMES - 1)) == []  # the old run doesn't count
+    hysteresis.reset()
+    feed(hysteresis, [0.9] * START_FRAMES + [0.0] * (END_FRAMES - 1))
+    hysteresis.reset()
+    assert not hysteresis.speaking
+    assert feed(hysteresis, [0.0] * END_FRAMES) == []  # no ENDED without a segment
+
+
+def test_silero_reset_and_force_end() -> None:
+    vad = SileroVad(load_session(), 0.8)
+    speech = speech_clip()
+    transitions = []
+    for index in range(len(speech) // FRAME_BYTES):
+        _, transition = vad.process_frame(speech[index * FRAME_BYTES : (index + 1) * FRAME_BYTES])
+        transitions.append(transition)
+    assert STARTED in transitions and vad.speaking
+    vad.force_end()
+    assert not vad.speaking
+    vad.reset()
+    assert not vad.speaking
+    assert run_model(silence(1.0) + speech)[1][0][1] is STARTED  # still works after a reset
+
+
+def test_model_does_not_open_a_segment_on_a_loud_alarm_tone() -> None:
+    """A full-scale alarm tone (peak 32758) tripped the old peak gate; Silero ignores it."""
+    with wave.open(str(ALARM_CLIP), "rb") as clip:
+        assert clip.getframerate() == SAMPLE_RATE
+        assert (clip.getsampwidth(), clip.getnchannels()) == (2, 1)
+        alarm = clip.readframes(clip.getnframes())
+    assert np.abs(np.frombuffer(alarm, "<i2")).max() > 30000
+    probabilities, events = run_model(alarm + alarm + silence(1.0))
+    assert events == []
+    assert max(probabilities) < START_THRESHOLD
+
+
+def test_vad_docstring_explains_the_pre_roll() -> None:
+    import piotr_voice_hub.satellites.vad as vad_module
+
+    assert vad_module.__doc__ is not None and "pre-roll" in vad_module.__doc__

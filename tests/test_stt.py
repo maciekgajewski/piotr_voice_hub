@@ -534,3 +534,49 @@ exit_process("STT final transcription timed out")
     assert result.returncode == 70
     assert "CRITICAL" in result.stderr
     assert "STT final transcription timed out; exiting so the container restarts" in result.stderr
+
+
+def test_model_error_after_close_is_still_fatal() -> None:
+    fatal_messages: list[str] = []
+
+    def record(message: str) -> NoReturn:
+        fatal_messages.append(message)
+        raise Fatal(message)
+
+    class FailsAfterRelease(FakeTranscriber):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def transcribe(self, audio: np.ndarray, beam_size: int) -> str:
+            if beam_size == 1 and not audio.any():  # session audio is silence; warm-up is noise
+                self.started.set()
+                self.release.wait(5)
+                raise RuntimeError("CUDA error")
+            return "warm"
+
+    async def run() -> None:
+        fake = FailsAfterRelease()
+        stt = FasterWhisperSpeechToText(make_config(), lambda _c: fake, on_fatal=record)
+        await stt.start()
+        session = session_of(stt)
+        await session.send_audio(pcm(0.5))
+        await asyncio.to_thread(fake.started.wait, 5)
+        await session.close()  # abandons the running partial
+        fake.release.set()
+        for _ in range(100):
+            if fatal_messages:
+                break
+            await asyncio.sleep(0.01)
+
+    loop_errors: list[dict[str, Any]] = []
+
+    async def main() -> None:
+        asyncio.get_running_loop().set_exception_handler(lambda _l, c: loop_errors.append(c))
+        await run()
+
+    asyncio.run(main())
+    assert fatal_messages == [
+        "STT model call failed after its session closed: RuntimeError('CUDA error')"
+    ]

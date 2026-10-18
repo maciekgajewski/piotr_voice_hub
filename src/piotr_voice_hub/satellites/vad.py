@@ -2,6 +2,11 @@
 
 One shared CPU onnxruntime session; one `SileroVad` (recurrent state + hysteresis) per stream.
 Input is 16 kHz 16-bit mono PCM in frames of 512 samples (32 ms).
+
+`SPEECH_STARTED` fires at the earliest 8 frames (256 ms) after speech onset, since the start
+rule needs p >= 0.5 for 250 ms, and in practice later (Silero's probability rises over a few
+frames). The driver therefore keeps a 1 s pre-roll and sends it at segment start; without it the
+first syllables, often the wake word itself, would be cut off.
 """
 
 import math
@@ -55,6 +60,11 @@ class Hysteresis:
             return VadTransition.SPEECH_ENDED
         return None
 
+    def reset(self) -> None:
+        """End any segment and forget the current run (max-segment cut, disarm, new stream);
+        the next segment needs a full start run."""
+        self.speaking, self._run = False, 0
+
 
 def load_session(path: Path = MODEL_PATH) -> ort.InferenceSession:
     options = ort.SessionOptions()
@@ -69,9 +79,18 @@ class SileroVad:
     def __init__(self, session: ort.InferenceSession, end_silence_seconds: float) -> None:
         self._session = session
         self._hysteresis = Hysteresis(end_silence_seconds)
+        self._sample_rate = np.array(SAMPLE_RATE, dtype=np.int64)
+        self.reset()
+
+    def reset(self) -> None:
+        """Clear the recurrent state and the hysteresis (disarm, new stream)."""
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
         self._context = np.zeros((1, CONTEXT_SAMPLES), dtype=np.float32)
-        self._sample_rate = np.array(SAMPLE_RATE, dtype=np.int64)
+        self._hysteresis.reset()
+
+    def force_end(self) -> None:
+        """End the current segment now (max segment length); keeps the model's context."""
+        self._hysteresis.reset()
 
     @property
     def speaking(self) -> bool:

@@ -13,7 +13,7 @@ one PR (AGENTS.md). Order is the dependency order.
 | T-004 config | Hub config dataclasses, strict YAML loader, CLI entry point | merged |
 | T-005 satellite-protocol | Satellite messages, protocol state machine, conformance checks | merged |
 | T-006 vad | Silero VAD with fixed hysteresis | merged |
-| T-007 esphome-driver | ESPHome native-API satellite driver with Silero segmentation | in progress |
+| T-007 esphome-driver | ESPHome native-API satellite driver: connection and capture with Silero segmentation (playback is T-014) | in progress |
 | T-008 stt | Streaming Polish STT on faster-whisper large-v3-turbo | PR #8 |
 | T-009 wake-matcher | Wake-phrase matcher ("Ryszardzie", vocative only) | PR #7 |
 | **T-013 wake-test-runner** | Minimal CLI: connect to the configured satellites, run VAD, STT and the wake matcher, print wake and final transcripts with timings, so Maciej can test "Ryszardzie" live on piotr. Runs right after T-007, T-008 and T-009 merge, before T-010. Its loop is the seed of T-012's main. | planned |
@@ -21,3 +21,16 @@ one PR (AGENTS.md). Order is the dependency order.
 | T-011 api | WebSocket API events only (commands such as speak/play/stop/release are P1) | planned |
 | T-012 main-compose | Hub main wiring and compose with the hub only | planned |
 | T-014 esphome-playback | ESPHome playback split from T-007: shared playback HTTP server, media_player announce, drain, PlaybackFinished | planned |
+
+## Carry-forwards
+
+- **T-010:** re-arm after `MicrophoneUnavailable` must back off (for example 1 s, doubling up to
+  30 s, reset after a successful arm), with one log line per attempt. The driver itself never
+  retries, and a refused connect fails in milliseconds (PR #9 review).
+- **T-014:** a true `CueFinished`. Make the firmware cue services `supports_response` (they
+  already `script.wait`) and call `execute_service(..., return_response=True, timeout=...)`.
+  Today `CueFinished` follows a fire-and-forget call, so the cue may still be playing.
+- **P1 (follow-up):** the `play_follow_up_ready_cue` firmware service (BOX-3 already has
+  `play_follow_up_listening_cue`, Voice PE `follow_up_listening_sound`) is needed when follow-up
+  lands, ahead of the rest of the P2 firmware work. Until then the driver logs it as missing at
+  connect and skips the cue with a warning.
