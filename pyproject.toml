@@ -5,7 +5,12 @@ description = "Voice I/O hub for ESPHome satellites: VAD, Polish STT, wake phras
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+piotr-voice-hub = "piotr_voice_hub.cli:main"
 
 [dependency-groups]
 dev = [
