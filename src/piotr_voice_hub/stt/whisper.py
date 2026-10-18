@@ -3,13 +3,12 @@
 Copied from piotr_the_ai_server `ai_server/speech_to_text/faster_whisper.py` and trimmed to
 the hub's one use: a streaming session per speech segment that gives partials every
 `stt.partial.interval_seconds` over the last `window_seconds`, plus a final transcript.
-Changes from the old code: hub `SttConfig`, language fixed to Polish, optional `hotwords`
-(the configured `wake_phrase`), audio passed to the model as an array (no temp WAV), no extra
-partial after audio end, no non-streaming session.
+Changes from the old code: hub `SttConfig`, language fixed to Polish, audio passed to the
+model as an array (no temp WAV), no extra partial after audio end, no non-streaming session.
 
-Measured on piotr (T-008 log): with `hotwords="Ryszardzie"` the model echoes "Ryszardzie" for
-silence, noise and the first ~0.75 s of ordinary speech. Without it, the full wake clip is
-still transcribed correctly. Whether the session passes the wake phrase is decided by the caller.
+No hotwords or initial_prompt: biasing with "Ryszardzie" made the model echo the wake word for
+silence, noise and the start of ordinary speech (measured, T-008 log). Unbiased, the wake clip
+is still transcribed correctly.
 """
 
 import asyncio
@@ -54,26 +53,23 @@ class Transcriber(Protocol):
         ...
 
 
-type TranscriberFactory = Callable[[SttConfig, str | None], Transcriber]
+type TranscriberFactory = Callable[[SttConfig], Transcriber]
 
 
 class FasterWhisperTranscriber:
-    def __init__(self, model: Any, hotwords: str | None) -> None:
+    def __init__(self, model: Any) -> None:
         self._model = model
-        self._hotwords = hotwords
 
     def transcribe(self, audio: np.ndarray, beam_size: int) -> str:
-        segments, _info = self._model.transcribe(
-            audio, language=LANGUAGE, beam_size=beam_size, hotwords=self._hotwords
-        )
+        segments, _info = self._model.transcribe(audio, language=LANGUAGE, beam_size=beam_size)
         return " ".join(segment.text.strip() for segment in segments).strip()
 
 
-def create_faster_whisper_transcriber(config: SttConfig, hotwords: str | None) -> Transcriber:
+def create_faster_whisper_transcriber(config: SttConfig) -> Transcriber:
     from faster_whisper import WhisperModel  # heavy import, only when actually loading
 
     model = WhisperModel(config.model, device=config.device, compute_type=config.compute_type)
-    return FasterWhisperTranscriber(model, hotwords=hotwords)
+    return FasterWhisperTranscriber(model)
 
 
 def pcm_to_float(pcm: bytes) -> np.ndarray:
@@ -91,11 +87,9 @@ class FasterWhisperSpeechToText:
     def __init__(
         self,
         config: SttConfig,
-        hotwords: str | None,
         transcriber_factory: TranscriberFactory = create_faster_whisper_transcriber,
     ) -> None:
         self._config = config
-        self._hotwords = hotwords
         self._transcriber_factory = transcriber_factory
         self._transcriber: Transcriber | None = None
 
@@ -105,13 +99,12 @@ class FasterWhisperSpeechToText:
         config = self._config
         started_at = time.monotonic()
         _logger.info(
-            "loading STT model model=%s device=%s compute_type=%s hotwords=%r",
+            "loading STT model model=%s device=%s compute_type=%s",
             config.model,
             config.device,
             config.compute_type,
-            self._hotwords,
         )
-        transcriber = await asyncio.to_thread(self._transcriber_factory, config, self._hotwords)
+        transcriber = await asyncio.to_thread(self._transcriber_factory, config)
         # The first call on the GPU is slow (7.8 s measured, design.md §4.3): warm both beams.
         warmup = np.zeros(int(config.partial.window_seconds * SAMPLE_RATE), dtype=np.float32)
         for beam_size in sorted({config.partial.beam_size, config.beam_size}):

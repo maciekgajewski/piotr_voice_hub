@@ -87,7 +87,7 @@ flowchart LR
    - Fixed hysteresis: start when p ≥ 0.5 for 250 ms; end after 0.8 s with p < 0.35.
    - Keep the existing 1 s pre-roll ring buffer and a 15 s maximum segment length.
    - The driver still emits `SpeechStarted`/`AudioChunk`/`SpeechEnded`. Only the detector changes.
-3. **STT.** Each segment streams into a `FasterWhisperStreamingSttSession`, which gives partials every 0.75 s and a final transcript at segment end, language fixed to `pl`. `hotwords`/`initial_prompt` contain "Ryszardzie" to bias recognition of the name.
+3. **STT.** Each segment streams into a `FasterWhisperStreamingSttSession`, which gives partials every 0.75 s and a final transcript at segment end, language fixed to `pl`.
 4. **Wake phrase.**
    - Normalize the text: lowercase, strip punctuation and diacritics.
    - Match the stem regex `\bryszard\w{0,3}\b` (Ryszardzie, Ryszardze, Ryszard, Ryszarda…) within the first three words.
@@ -150,7 +150,7 @@ Proposed package layout in `piotr_voice_hub/`:
 | Interfaces/types | `ai_server/microphones/interfaces.py`, `types.py` | Copy | Drop `TextToSpeech.speak()`. |
 | ESPHome driver | `ai_server/microphones/drivers/box3_esphome.py` | Copy, adapt | Swap the peak gate for Silero. Delete wake-word/follow-up service paths. Make the playback HTTP server shared. Keep the T-002/T-003/T-010 fixes (pre-roll bound, stop ack, transport recovery). |
 | VAD | new | Write | About 80 lines: Silero ONNX wrapper with hysteresis. |
-| STT | `ai_server/speech_to_text/*` | Copy | Replace the `ai_server.config.SttConfig` import; add `hotwords`. |
+| STT | `ai_server/speech_to_text/*` | Copy | Replace the `ai_server.config.SttConfig` import. |
 | Transcript fixes | `ai_server/speech_to_text/transcript_preprocessor.py`, `utils/polish_numbers.py`, `utils/text.py` | Copy | Only what the preprocessor uses. |
 | Speaker recognition | `ai_server/speaker_recognition/*` | Copy | Service unchanged (:2140). In the client, drop the `microphones.messages` import. |
 | TTS | `ai_server/microphones/tts.py` | Copy `PiperTextToSpeech.synthesize` only | Delete `_stream_to_box` (duplicate playback path). |

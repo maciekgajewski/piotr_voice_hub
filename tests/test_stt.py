@@ -47,7 +47,7 @@ def pcm(seconds: float) -> bytes:
 
 
 async def started(transcriber: Transcriber, config: SttConfig) -> FasterWhisperSpeechToText:
-    stt = FasterWhisperSpeechToText(config, "Ryszardzie", lambda _c, _w: transcriber)
+    stt = FasterWhisperSpeechToText(config, lambda _c: transcriber)
     await stt.start()
     return stt
 
@@ -59,20 +59,20 @@ async def collect(session: Any) -> list[Any]:
     return events
 
 
-def test_start_loads_with_config_and_hotwords_and_warms_both_beams() -> None:
+def test_start_loads_with_config_and_warms_both_beams() -> None:
     async def run() -> None:
         fake = FakeTranscriber()
-        seen: list[tuple[SttConfig, str | None]] = []
+        seen: list[SttConfig] = []
 
-        def factory(config: SttConfig, hotwords: str | None) -> Transcriber:
-            seen.append((config, hotwords))
+        def factory(config: SttConfig) -> Transcriber:
+            seen.append(config)
             return fake
 
         config = make_config(window=0.5)
-        stt = FasterWhisperSpeechToText(config, "Ryszardzie", factory)
+        stt = FasterWhisperSpeechToText(config, factory)
         await stt.start()
         await stt.start()  # idempotent
-        assert seen == [(config, "Ryszardzie")]
+        assert seen == [config]
         assert fake.calls == [(8000, 1), (8000, 5)]
 
     asyncio.run(run())
@@ -84,7 +84,7 @@ def test_warmup_failure_propagates_and_stays_unstarted() -> None:
             raise RuntimeError("CUDA failed")
 
     async def run() -> None:
-        stt = FasterWhisperSpeechToText(make_config(), "Ryszardzie", lambda _c, _w: Failing())
+        stt = FasterWhisperSpeechToText(make_config(), lambda _c: Failing())
         with pytest.raises(RuntimeError, match="CUDA failed"):
             await stt.start()
         with pytest.raises(AssertionError, match="start"):
@@ -215,7 +215,7 @@ def test_pcm_to_float() -> None:
         pcm_to_float(b"\x00")
 
 
-def test_transcriber_passes_polish_beam_and_hotwords_and_joins_segments() -> None:
+def test_transcriber_passes_polish_and_beam_without_bias_and_joins_segments() -> None:
     class Segment:
         def __init__(self, text: str) -> None:
             self.text = text
@@ -229,11 +229,9 @@ def test_transcriber_passes_polish_beam_and_hotwords_and_joins_segments() -> Non
             return iter([Segment(" Ryszardzie, "), Segment(" włącz radio. ")]), None
 
     model = Model()
-    transcriber = FasterWhisperTranscriber(model, hotwords="Ryszardzie")
+    transcriber = FasterWhisperTranscriber(model)
     assert transcriber.transcribe(np.zeros(16, np.float32), 5) == "Ryszardzie, włącz radio."
-    assert model.kwargs == {"language": "pl", "beam_size": 5, "hotwords": "Ryszardzie"}
-    FasterWhisperTranscriber(model, hotwords=None).transcribe(np.zeros(16, np.float32), 1)
-    assert model.kwargs == {"language": "pl", "beam_size": 1, "hotwords": None}
+    assert model.kwargs == {"language": "pl", "beam_size": 5}  # no hotwords/initial_prompt
 
 
 def test_model_is_created_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,7 +244,7 @@ def test_model_is_created_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
         return object()
 
     monkeypatch.setattr(faster_whisper, "WhisperModel", fake_model)
-    transcriber = create_faster_whisper_transcriber(make_config(), None)
+    transcriber = create_faster_whisper_transcriber(make_config())
     assert created == [("large-v3-turbo", "cuda", "float16")]
     assert isinstance(transcriber, FasterWhisperTranscriber)
 

@@ -28,7 +28,7 @@ def normalize(text: str) -> list[str]:
 
 def transcribe(model: WhisperModel, audio, beam_size: int) -> tuple[float, str]:
     start = time.perf_counter()
-    segments, _ = model.transcribe(audio, language="pl", beam_size=beam_size, hotwords="Ryszardzie")
+    segments, _ = model.transcribe(audio, language="pl", beam_size=beam_size)
     text = " ".join(s.text.strip() for s in segments)  # segments is lazy; this runs the decode
     return time.perf_counter() - start, text
 

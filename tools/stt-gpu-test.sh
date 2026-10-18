@@ -19,4 +19,4 @@ docker run --rm --gpus all --user "$(id -u):$(id -g)" \
     -v "$cache/huggingface:/hf" -v "$cache/uv:/uv-cache" -v "$cache/uv-python:/uv-python" \
     -v "$(command -v uv):/usr/local/bin/uv:ro" \
     -v "$repo:/repo:ro" -w /repo \
-    "$image" uv run --locked --no-editable pytest -p no:cacheprovider -s -m gpu tests/test_stt_gpu.py
+    "$image" uv run --locked --no-editable --reinstall-package piotr-voice-hub pytest -p no:cacheprovider -s -m gpu tests/test_stt_gpu.py

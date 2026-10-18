@@ -68,11 +68,11 @@ def noise(seconds: float, sigma: float) -> bytes:
     return samples.astype("<i2").tobytes()
 
 
-async def run_clips(hotwords: str | None) -> dict[str, tuple[list[str], str]]:
-    stt = FasterWhisperSpeechToText(CONFIG, hotwords)
+async def run_clips() -> dict[str, tuple[list[str], str]]:
+    stt = FasterWhisperSpeechToText(CONFIG)
     started_at = time.monotonic()
     await stt.start()
-    print(f"\nhotwords={hotwords!r}: load+warm-up {time.monotonic() - started_at:.2f} s")
+    print(f"\nload+warm-up {time.monotonic() - started_at:.2f} s")
     clips = {
         "speech": read_pcm("speech_pl_16k.wav"),
         "wake": read_pcm("wake_pl_16k.wav"),
@@ -88,9 +88,8 @@ async def run_clips(hotwords: str | None) -> dict[str, tuple[list[str], str]]:
     return results
 
 
-@pytest.mark.parametrize("hotwords", [None, "Ryszardzie"])
-def test_real_model_partials_and_final(hotwords: str | None) -> None:
-    results = asyncio.run(run_clips(hotwords))
+def test_real_model_partials_and_final() -> None:
+    results = asyncio.run(run_clips())
     partials, final = results["speech"]
     assert partials
     assert {"test", "pierwszy"} <= set(words(final))
@@ -100,10 +99,5 @@ def test_real_model_partials_and_final(hotwords: str | None) -> None:
     for name in ("noise", "silence"):
         partials, final = results[name]
         texts = [*partials, final]
-        if hotwords is None:
-            # Without the bias, non-speech never yields the wake word.
-            assert not any("ryszard" in w for t in texts for w in words(t)), name
-        else:
-            # Measured: the bias echoes the bare wake word on non-speech. It is never more than
-            # that, so a final has an empty remainder and the session cancels the wake.
-            assert all(words(t) in ([], ["ryszardzie"]) for t in texts), (name, texts)
+        # No bias: non-speech never yields the wake word (it did with hotwords; T-008 log).
+        assert not any("ryszard" in w for t in texts for w in words(t)), (name, texts)

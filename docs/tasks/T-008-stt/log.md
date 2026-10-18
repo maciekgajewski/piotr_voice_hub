@@ -41,3 +41,18 @@ beam 1 partials every 0.75 s over 4 s).
 - `initial_prompt="Ryszardzie"` behaves like `hotwords` (same echo); measured in a one-off run.
 - So `hotwords` is an optional argument; the caller (T-010 wiring) decides. **Open design
   question for Maciej**; design.md is unchanged.
+
+## 2026-10-18: hotword decision (manager)
+
+- **Decision: drop the hotword bias.** The `hotwords` option is removed from `stt/whisper.py`
+  (nothing else used it), from the T-003 smoke script, and from design.md §4.1 step 3 and the
+  §6 STT row. No `initial_prompt` either: the only prompt worth adding was the wake word, and it
+  echoed the same way as `hotwords` (measured above).
+- The GPU test now has one variant (no bias). It asserts that silence and noise never yield
+  "ryszard", and that the wake clip's final and a partial start "Ryszardzie jaka".
+- Re-run on piotr, unbiased: load + warm-up 10.0 s; finals "O jest test pierwszy." and
+  "Ryszardzie, jaka będzie jutro pogoda?" (final latency 0.17-0.30 s); silence and noise gave
+  "Dziękuję." / "Dzięki za oglądanie!" / "Dziękuje za uwagę.", no "Ryszardzie". Passed.
+- `tools/stt-gpu-test.sh` now passes `--reinstall-package piotr-voice-hub`: the first re-run
+  silently tested the cached wheel of the previous commit (same version, so uv reused it).
+- `make check`: 268 passed, 1 skipped.
