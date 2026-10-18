@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 piotr-voice-hub = "piotr_voice_hub.cli:main"
+piotr-voice-hub-wake-test = "piotr_voice_hub.wake_test:main"
 
 [dependency-groups]
 dev = [
