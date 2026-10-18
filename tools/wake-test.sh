@@ -2,6 +2,7 @@
 # T-013: live wake test on piotr's GPU, inside the CUDA 12.8 cuDNN image (no host cuBLAS).
 # Usage: tools/wake-test.sh CONFIG [--satellite ID ...] [--log-level LEVEL]
 # CONFIG is a hub config (config/hub.example.yaml format) with the satellites' api_key values.
+# It holds secrets: keep it outside the repo and private (chmod 600 CONFIG).
 # Ctrl-C to stop.
 set -euo pipefail
 

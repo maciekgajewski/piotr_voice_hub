@@ -17,7 +17,7 @@ real pieces (ESPHome driver, Silero VAD, faster-whisper STT, wake matcher) uncha
     `--satellite ID` (repeatable) to test a subset, `--log-level`.
   - Loads the shared Silero session and the STT model once (`stt.start()`), then runs one loop
     per satellite in a `TaskGroup`.
-  - Per satellite (`run_satellite`): `SetVisualState(IDLE)`, `StartListening(new_id("listen"))`,
+  - Per satellite (`SatelliteRunner.run`): `SetVisualState(IDLE)`, `StartListening(new_id("listen"))`,
     wait for `ListeningStarted`, then read events forever:
     - `SpeechStarted`: new STT session (`max_segment_seconds` + 0.1 s), a task reading partials.
     - `AudioChunk`: `send_audio`.
@@ -33,11 +33,17 @@ real pieces (ESPHome driver, Silero VAD, faster-whisper STT, wake matcher) uncha
     the event loop both send visuals).
   - `MicrophoneUnavailable`: print it, `close()` the driver, wait with backoff (1 s doubling to
     30 s, reset after a successful arm) and re-arm. The real backoff lives in T-010; this is the
-    same rule, kept small.
+    same rule, kept small. Any other exception on one satellite is logged with its traceback
+    and handled the same way (follow-up PR), so it never stops the other satellites.
   - Output goes to stdout as `HH:MM:SS.mmm [satellite] message`, local time. Transcripts are
     printed because this is an explicit operator diagnostic; logs stay metadata-only
     (MP-OBS-003).
-  - Exit: Ctrl-C stops all loops and closes the drivers. STT fatal errors keep exit 70.
+  - Exit: Ctrl-C cancels all loops; each armed satellite then gets `StopListening` and
+    `SetVisualState(IDLE)`, best effort within 3 s, and every driver is closed (follow-up PR).
+    A satellite that is not armed is only closed, not reconnected. Exit codes: 0 after Ctrl-C,
+    2 for an invalid config; a model load failure is an uncaught exception from `stt.start()`
+    (traceback, exit 1); a load or warm-up timeout and any model error during a segment call
+    `exit_process` (CRITICAL, exit 70).
 - `tools/wake-test.sh CONFIG [ARGS...]`: runs the script with `docker run` in
   `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04` (piotr has no host cuBLAS, so a host
   `uv run` does not work on the GPU), same caches as `tools/stt-gpu-test.sh`, `--network host`
@@ -89,4 +95,9 @@ fake STT (scripted partials and final), a fake clock and a captured printer:
 
 ## Manual test (piotr, Maciej)
 
-See the PR checklist.
+1. `cp config/hub.example.yaml ~/hub-wake.yaml && chmod 600 ~/hub-wake.yaml`, then set each
+   satellite's `api_key` (the ESPHome `secrets.yaml` value). The file holds the API keys: keep
+   it private and outside the repo.
+2. `cd ~/src/piotr_voice_hub && git pull && tools/wake-test.sh ~/hub-wake.yaml --satellite
+   voice-pe-02 --satellite voice-pe-03`
+3. Follow the PR checklist.

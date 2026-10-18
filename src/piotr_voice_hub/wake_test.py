@@ -31,6 +31,7 @@ from piotr_voice_hub.satellites.messages import (
     SpeechEnded,
     SpeechStarted,
     StartListening,
+    StopListening,
     VisualState,
 )
 from piotr_voice_hub.stt.whisper import StreamingTextEvent, TextEnd
@@ -38,6 +39,9 @@ from piotr_voice_hub.stt.whisper import StreamingTextEvent, TextEnd
 BACKOFF_FIRST_SECONDS = 1.0
 BACKOFF_MAX_SECONDS = 30.0
 SEGMENT_MARGIN_SECONDS = 0.1  # the driver ends a segment on a whole 32 ms frame
+SHUTDOWN_TIMEOUT_SECONDS = 3.0  # per satellite: stop listening (waits for the stop ack) + idle
+
+_logger = logging.getLogger(__name__)
 
 type Printer = Callable[[str, str], None]
 type Sleep = Callable[[float], Awaitable[None]]
@@ -81,23 +85,60 @@ class SatelliteRunner:
     clock: Callable[[], float] = time.monotonic
     sleep: Sleep = asyncio.sleep
     _commands: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock)
+    _listen_id: str | None = None  # set while the driver is armed with our StartListening
+    _segment: _Segment | None = None
 
     async def run(self) -> None:
+        """Run until cancelled. Any failure on this satellite re-arms it after a backoff;
+        it never ends the other satellites' loops."""
         backoff = BACKOFF_FIRST_SECONDS
         while True:
             listen_id = new_id("listen")
             try:
                 await self._command(SetVisualState(VisualState.IDLE))
                 await self._command(StartListening(listen_id))
+                self._listen_id = listen_id
                 await self._expect_listening_started(listen_id)
                 backoff = BACKOFF_FIRST_SECONDS
                 self.out(self.satellite_id, f"listening (listen_id={listen_id})")
                 await self._read_segments(listen_id)
             except MicrophoneUnavailable as error:
-                self.out(self.satellite_id, f"unavailable: {error}; retry in {backoff:g} s")
-                await self.microphone.close()
-                await self.sleep(backoff)
+                await self._recover(f"unavailable: {error}", backoff)
                 backoff = min(backoff * 2, BACKOFF_MAX_SECONDS)
+            except Exception as error:  # a bug here must not stop the other satellites
+                _logger.exception("satellite %s failed", self.satellite_id)
+                await self._recover(f"unexpected error: {error!r}", backoff)
+                backoff = min(backoff * 2, BACKOFF_MAX_SECONDS)
+
+    async def shutdown(self) -> None:
+        """Best effort, after `run()` was cancelled: if armed, stop listening and show idle,
+        then close, so the device does not stay in the listening state. A satellite that is
+        not armed (connecting, or backing off) is only closed, never reconnected."""
+        listen_id, self._listen_id = self._listen_id, None
+        if listen_id is None:
+            await self._close()
+            return
+        try:
+            async with asyncio.timeout(SHUTDOWN_TIMEOUT_SECONDS):
+                await self._command(StopListening(listen_id, "shutdown"))
+                await self._command(SetVisualState(VisualState.IDLE))
+        except Exception as error:  # includes TimeoutError and MicrophoneUnavailable
+            self.out(self.satellite_id, f"shutdown: could not stop and go idle: {error!r}")
+        else:
+            self.out(self.satellite_id, "stopped")
+        await self._close()
+
+    async def _recover(self, what: str, backoff: float) -> None:
+        self.out(self.satellite_id, f"{what}; retry in {backoff:g} s")
+        await self._close()
+        await self.sleep(backoff)
+
+    async def _close(self) -> None:
+        self._listen_id = None
+        try:
+            await self.microphone.close()
+        except Exception:
+            _logger.exception("satellite %s: close failed", self.satellite_id)
 
     async def _command(self, command: MicrophoneCommand) -> None:
         async with self._commands:  # the partial reader also sends visuals
@@ -108,31 +149,33 @@ class SatelliteRunner:
         assert event == ListeningStarted(listen_id), event
 
     async def _read_segments(self, listen_id: str) -> None:
-        segment: _Segment | None = None
         try:
             while True:
                 event = await self.microphone.wait_for_event()
+                segment = self._segment
                 if isinstance(event, SpeechStarted):
-                    segment = self._start_segment(event.utterance_id)
+                    self._start_segment(event.utterance_id)
                 elif isinstance(event, AudioChunk):
                     assert segment is not None and event.utterance_id == segment.utterance_id
                     await segment.session.send_audio(event.data)
                 elif isinstance(event, SpeechEnded):
                     assert segment is not None and event.utterance_id == segment.utterance_id
-                    current, segment = segment, None
-                    await self._finish_segment(listen_id, current, event.reason)
+                    self._segment = None
+                    await self._finish_segment(listen_id, segment, event.reason)
                 else:
                     raise AssertionError(f"unexpected event while listening: {event}")
         finally:
-            if segment is not None:
+            if self._segment is not None:
+                segment, self._segment = self._segment, None
                 await self._abandon(segment)
 
-    def _start_segment(self, utterance_id: str) -> _Segment:
+    def _start_segment(self, utterance_id: str) -> None:
+        assert self._segment is None, f"segment {self._segment.utterance_id} is still open"
         session = self.stt.create_streaming_session(utterance_id, self.max_audio_seconds)
         segment = _Segment(utterance_id, session, self.clock())
         segment.partials = asyncio.create_task(self._read_partials(segment))
+        self._segment = segment
         self.out(self.satellite_id, f"speech started ({utterance_id})")
-        return segment
 
     async def _read_partials(self, segment: _Segment) -> None:
         while not isinstance(event := await segment.session.receive_text(), TextEnd):
@@ -186,7 +229,7 @@ class SatelliteRunner:
         await segment.session.close()
         if segment.partials is not None:
             segment.partials.cancel()
-            with contextlib.suppress(asyncio.CancelledError, MicrophoneUnavailable):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await segment.partials
 
 
@@ -228,24 +271,28 @@ async def run(config: HubConfig) -> None:
     stt = FasterWhisperSpeechToText(config.stt)
     await stt.start()
     vad_session = load_session()
-    satellites = [
-        (s, EsphomeSatellite(s, SileroVad(vad_session, s.end_silence_seconds)))
+    runners = [
+        SatelliteRunner(
+            s.id,
+            EsphomeSatellite(s, SileroVad(vad_session, s.end_silence_seconds)),
+            stt,
+            s.max_segment_seconds + SEGMENT_MARGIN_SECONDS,
+        )
         for s in config.satellites
     ]
+    for satellite in config.satellites:
+        print_line(satellite.id, f"connecting to {satellite.address}")
+    await run_until_cancelled(runners)
+
+
+async def run_until_cancelled(runners: Sequence[SatelliteRunner]) -> None:
+    """Run all satellites; on cancellation (Ctrl-C) shut each one down cleanly."""
     try:
         async with asyncio.TaskGroup() as group:
-            for satellite, microphone in satellites:
-                print_line(satellite.id, f"connecting to {satellite.address}")
-                runner = SatelliteRunner(
-                    satellite.id,
-                    microphone,
-                    stt,
-                    satellite.max_segment_seconds + SEGMENT_MARGIN_SECONDS,
-                )
+            for runner in runners:
                 group.create_task(runner.run())
     finally:
-        for _, microphone in satellites:
-            await microphone.close()
+        await asyncio.gather(*(runner.shutdown() for runner in runners))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

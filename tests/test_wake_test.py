@@ -18,17 +18,23 @@ from piotr_voice_hub.satellites.messages import (
     SpeechEnded,
     SpeechStarted,
     StartListening,
+    StopListening,
     VisualState,
 )
 from piotr_voice_hub.satellites.types import MicrophoneContext, PlaybackTarget
 from piotr_voice_hub.stt.whisper import StreamingTextEvent, TextEnd, TextPartial
-from piotr_voice_hub.wake_test import SatelliteRunner, main, select_satellites
+from piotr_voice_hub.wake_test import (
+    SatelliteRunner,
+    main,
+    run_until_cancelled,
+    select_satellites,
+)
 
 EXAMPLE_CONFIG = Path(__file__).parents[1] / "config" / "hub.example.yaml"
 MAX_AUDIO = 15.1
 
 
-class ScriptDone(Exception):
+class ScriptDone(BaseException):  # not Exception: the runner recovers from those
     pass
 
 
@@ -99,7 +105,9 @@ class FakeMicrophone:
     """`script` items: (time, event or exception) for wait_for_event, or "listening" for the
     ListeningStarted of the latest StartListening. `fail_starts` StartListening calls raise."""
 
-    def __init__(self, clock: Clock, script: list[Step], fail_starts: int = 0) -> None:
+    def __init__(
+        self, clock: Clock, script: list[Step], fail_starts: int = 0, block_at_end: bool = False
+    ) -> None:
         self.context = MicrophoneContext("fake", "kitchen", "kitchen")
         self.playback_target = PlaybackTarget("fake", "kitchen", "10.0.0.5", "a2V5")
         self.clock = clock
@@ -108,6 +116,9 @@ class FakeMicrophone:
         self.commands: list[MicrophoneCommand] = []
         self.closes = 0
         self.in_flight = False
+        self.overlapped = False
+        self.block_at_end = block_at_end
+        self.fail_commands: dict[type, Exception] = {}
 
     @property
     def listen_id(self) -> str:
@@ -116,6 +127,8 @@ class FakeMicrophone:
     async def wait_for_event(self) -> MicrophoneEvent:
         await settle()
         if not self.script:
+            if self.block_at_end:
+                await asyncio.Event().wait()
             raise ScriptDone
         step = self.script.popleft()
         if step == "listening":
@@ -128,11 +141,13 @@ class FakeMicrophone:
         return item
 
     async def send_output_event(self, event: MicrophoneCommand) -> None:
-        assert not self.in_flight, "commands to one satellite overlapped"
+        self.overlapped |= self.in_flight  # recorded: the runner recovers from assertions
         self.in_flight = True
         try:
             await settle()
             self.commands.append(event)
+            if type(event) in self.fail_commands:
+                raise self.fail_commands[type(event)]
             if isinstance(event, StartListening) and self.fail_starts:
                 self.fail_starts -= 1
                 raise MicrophoneUnavailable("connection refused")
@@ -177,6 +192,7 @@ class Run:
         )
         with pytest.raises(ScriptDone):
             await runner.run()
+        assert not self.microphone.overlapped, "commands to one satellite overlapped"
 
 
 def commands_without_ids(run: Run) -> list[object]:
@@ -318,3 +334,124 @@ def test_select_satellites() -> None:
 def test_unknown_satellite_is_a_config_error(caplog: pytest.LogCaptureFixture) -> None:
     assert main(["--config", str(EXAMPLE_CONFIG), "--satellite", "garage"]) == 2
     assert "unknown --satellite garage" in caplog.text
+
+
+def _test_runner(
+    satellite_id: str, microphone: FakeMicrophone, stt: FakeStt, lines: list[str]
+) -> SatelliteRunner:
+    async def no_sleep(_seconds: float) -> None:
+        pass
+
+    return SatelliteRunner(
+        satellite_id,
+        microphone,
+        stt,
+        MAX_AUDIO,
+        out=lambda satellite, message: lines.append(f"[{satellite}] {message}"),
+        clock=microphone.clock,
+        sleep=no_sleep,
+    )
+
+
+async def _run_then_cancel(runners: list[SatelliteRunner], mics: list[FakeMicrophone]) -> None:
+    task = asyncio.create_task(run_until_cancelled(runners))
+    for _ in range(100):
+        await settle()
+        if not any(m.script for m in mics):
+            break
+    assert not any(m.script for m in mics), "scripts did not run to the end"
+    await settle()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_cancel_stops_listening_and_goes_idle() -> None:
+    asyncio.run(_test_cancel_stops_listening_and_goes_idle())
+
+
+async def _test_cancel_stops_listening_and_goes_idle() -> None:
+    clock, lines = Clock(), []
+    armed = FakeMicrophone(clock, ["listening"], block_at_end=True)
+    backing_off = FakeMicrophone(clock, [], fail_starts=1000, block_at_end=True)
+    runners = [
+        _test_runner("kitchen", armed, FakeStt(clock, []), lines),
+        _test_runner("office", backing_off, FakeStt(clock, []), lines),
+    ]
+    task = asyncio.create_task(run_until_cancelled(runners))
+    for _ in range(5):
+        await settle()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    listen_id = armed.listen_id
+    assert armed.commands[-2:] == [
+        StopListening(listen_id, "shutdown"),
+        SetVisualState(VisualState.IDLE),
+    ]
+    assert armed.closes == 1
+    assert "[kitchen] stopped" in lines
+    # Not armed: closed only, no reconnect for the idle visual.
+    assert not any(isinstance(c, StopListening) for c in backing_off.commands)
+    assert backing_off.closes >= 1 and not backing_off.in_flight
+
+
+def test_shutdown_failure_still_closes() -> None:
+    asyncio.run(_test_shutdown_failure_still_closes())
+
+
+async def _test_shutdown_failure_still_closes() -> None:
+    clock, lines = Clock(), []
+    microphone = FakeMicrophone(clock, ["listening"], block_at_end=True)
+    microphone.fail_commands[StopListening] = MicrophoneUnavailable("connection lost")
+    runner = _test_runner("kitchen", microphone, FakeStt(clock, []), lines)
+    await _run_then_cancel([runner], [microphone])
+    assert lines[-1] == (
+        "[kitchen] shutdown: could not stop and go idle: MicrophoneUnavailable('connection lost')"
+    )
+    assert microphone.closes == 1
+
+
+def test_unexpected_error_rearms_that_satellite_only() -> None:
+    asyncio.run(_test_unexpected_error_rearms_that_satellite_only())
+
+
+async def _test_unexpected_error_rearms_that_satellite_only() -> None:
+    clock, lines = Clock(), []
+    broken = FakeMicrophone(
+        clock, ["listening", (1.0, RuntimeError("bug")), "listening"], block_at_end=True
+    )
+    healthy = FakeMicrophone(clock, ["listening", *segment("u1", 1.0, 2.0)], block_at_end=True)
+    stt = FakeStt(clock, [([], (2.3, "Ryszardzie, światło."))])
+    runners = [
+        _test_runner("kitchen", broken, FakeStt(clock, []), lines),
+        _test_runner("office", healthy, stt, lines),
+    ]
+    await _run_then_cancel(runners, [broken, healthy])
+    assert "[kitchen] unexpected error: RuntimeError('bug'); retry in 1 s" in lines
+    assert len([c for c in broken.commands if isinstance(c, StartListening)]) == 2
+    assert any(line.startswith("[office] final 'Ryszardzie, światło.': WAKE") for line in lines)
+
+
+def test_second_speech_start_with_a_segment_open_fails_loudly() -> None:
+    asyncio.run(_test_second_speech_start_with_a_segment_open_fails_loudly())
+
+
+async def _test_second_speech_start_with_a_segment_open_fails_loudly() -> None:
+    run = Run(
+        [
+            "listening",
+            (1.0, SpeechStarted("L", "u1", 16000, 2, 1)),
+            (1.1, SpeechStarted("L", "u2", 16000, 2, 1)),
+            "listening",
+        ],
+        [([], (0.0, "unused"))],
+    )
+    await run()
+    # pytest may rewrite the assert and append its explanation to the message.
+    [error] = [line for line in run.lines if "unexpected error" in line]
+    assert error.startswith("[kitchen] unexpected error: AssertionError(")
+    assert "segment u1 is still open" in error
+    assert error.endswith("; retry in 1 s")
+    [(_, _, session)] = run.stt.sessions
+    assert session.closed
