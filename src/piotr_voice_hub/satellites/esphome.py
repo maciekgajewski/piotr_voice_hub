@@ -8,7 +8,14 @@ recovery (a failure makes the driver unavailable until the session closes and re
 reconnects). Playback is T-014; its commands fail loudly until then.
 
 Every await on the device has a timeout. Failures raise `MicrophoneUnavailable` from
-`wait_for_event()`/`send_output_event()`; the session then calls `close()` and starts again.
+`wait_for_event()`/`send_output_event()`; the session then calls `close()` and starts again,
+with backoff (T-010). `close()` also wakes a reader blocked in `wait_for_event()`.
+
+`ListeningStarted` is sent only after the device has started its voice-assistant stream: a
+service call is fire-and-forget in aioesphomeapi, and a muted or busy device may never start.
+
+`SpeechEnded.reason` is `completed` (the VAD heard the end-of-speech silence) or `max_length`
+(the segment reached `max_segment_seconds`, counted including the ~1 s pre-roll).
 """
 
 import asyncio
@@ -16,6 +23,7 @@ import logging
 import math
 from collections import deque
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, Protocol, cast
 
@@ -53,6 +61,8 @@ from piotr_voice_hub.satellites.vad import FRAME_BYTES, FRAME_SECONDS, VadTransi
 API_PORT = 6053
 CLIENT_INFO = "piotr-voice-hub"
 CONNECT_TIMEOUT_SECONDS = 10.0
+# Longer than the BOX-3 firmware's 5 s wait for its speaker before it starts the stream.
+START_TIMEOUT_SECONDS = 8.0
 SERVICE_TIMEOUT_SECONDS = 5.0
 DISCONNECT_TIMEOUT_SECONDS = 5.0
 STOP_ACK_TIMEOUT_SECONDS = 2.0
@@ -75,17 +85,23 @@ VISUAL_STATE_SERVICES = {
 CUE_SERVICES = {
     CueType.UTTERANCE_ACCEPTED: "play_message_end_cue",
     CueType.TIMEOUT: "play_conversation_timeout_cue",
-    CueType.FOLLOW_UP_READY: "play_follow_up_ready_cue",  # new in the hub firmware (design §8)
+    CueType.FOLLOW_UP_READY: "play_follow_up_ready_cue",  # added by the P1 firmware work
 }
+REQUIRED_SERVICES = (
+    START_OPEN_MIC_LISTENING_SERVICE,
+    STOP_LISTENING_SERVICE,
+    *VISUAL_STATE_SERVICES.values(),
+    CUE_SERVICES[CueType.UTTERANCE_ACCEPTED],
+    CUE_SERVICES[CueType.TIMEOUT],
+)
+# Logged at connect when missing; the command is then skipped with a warning, never a crash.
+OPTIONAL_SERVICES = (RESET_OPEN_MIC_WAKE_CANDIDATE_SERVICE, CUE_SERVICES[CueType.FOLLOW_UP_READY])
 CAPTURE_EVENT_TYPES = (SpeechStarted, AudioChunk, SpeechEnded)
 EXPECTED_ERRORS = (APIConnectionError, OSError, TimeoutError)
 
 
 class Vad(Protocol):
     """What the driver needs from `SileroVad` (a fake in unit tests)."""
-
-    @property
-    def speaking(self) -> bool: ...
 
     def process_frame(self, pcm: bytes) -> tuple[float, VadTransition | None]: ...
 
@@ -129,6 +145,13 @@ def create_api_client(target: PlaybackTarget) -> EsphomeClient:
     return cast(EsphomeClient, client)
 
 
+@dataclass(frozen=True)
+class _Wake:
+    """Queued instead of an event: the reader must raise MicrophoneUnavailable(reason)."""
+
+    reason: str
+
+
 class EsphomeSatellite:
     """One Voice PE / S3-BOX-3 satellite. Implements `Microphone` (capture, cues, visuals)."""
 
@@ -145,8 +168,10 @@ class EsphomeSatellite:
         self._client_factory = client_factory
         self._max_segment_frames = math.ceil(round(config.max_segment_seconds / FRAME_SECONDS, 6))
         self._pre_roll: deque[bytes] = deque(maxlen=int(PRE_ROLL_SECONDS / FRAME_SECONDS))
-        self._events: asyncio.Queue[MicrophoneEvent | None] = asyncio.Queue(MAX_QUEUED_EVENTS)
-        self._client: EsphomeClient | None = None
+        self._events: asyncio.Queue[MicrophoneEvent | _Wake] = asyncio.Queue(MAX_QUEUED_EVENTS)
+        self._readers = 0  # tasks blocked in wait_for_event()
+        self._connect_lock = asyncio.Lock()
+        self._client: EsphomeClient | None = None  # published only once fully connected
         self._unsubscribe: Callable[[], None] | None = None
         self._services: dict[str, Any] = {}
         self._unavailable: str | None = None  # set on failure; cleared by close()
@@ -155,19 +180,25 @@ class EsphomeSatellite:
         self._utterance_id: str | None = None
         self._segment_frames = 0
         self._frame_buffer = bytearray()
-        self._run_active = False  # the device is streaming a voice-assistant run
+        self._run_active = False  # the device is streaming a voice-assistant run for us
+        self._stream_started = asyncio.Event()
         self._stream_stopped = asyncio.Event()
+        self._stale_stop: asyncio.Task[None] | None = None
         self._dropped_chunks = 0
 
     # Microphone interface
 
     async def wait_for_event(self) -> MicrophoneEvent:
         await self._ensure_connected()
-        event = await self._events.get()
-        if event is None or self._unavailable is not None:
-            raise MicrophoneUnavailable(self._unavailable or "unavailable")
-        self._logger.debug("event %s %s", event, self._state())
-        return event
+        self._readers += 1
+        try:
+            item = await self._events.get()
+        finally:
+            self._readers -= 1
+        if isinstance(item, _Wake):
+            raise MicrophoneUnavailable(item.reason)
+        self._logger.debug("event %s %s", item, self._state())
+        return item
 
     async def send_output_event(self, event: MicrophoneCommand) -> None:
         self._logger.debug("command %s %s", event, self._state())
@@ -185,20 +216,19 @@ class EsphomeSatellite:
             await self._call(VISUAL_STATE_SERVICES[event.state])
         elif isinstance(event, ResetWakeCandidate):
             assert event.listen_id == self._listen_id, (event.listen_id, self._listen_id)
-            if RESET_OPEN_MIC_WAKE_CANDIDATE_SERVICE in self._services:
-                await self._call(RESET_OPEN_MIC_WAKE_CANDIDATE_SERVICE)
-            else:
-                self._logger.warning(
-                    "firmware has no %s service", RESET_OPEN_MIC_WAKE_CANDIDATE_SERVICE
-                )
+            await self._call_optional(RESET_OPEN_MIC_WAKE_CANDIDATE_SERVICE)
         elif isinstance(event, PlayCue):
             assert self._listen_id is None, "cues play only while disarmed (MP-AUDIO-001)"
-            await self._call(CUE_SERVICES[event.cue_type])
-            self._logger.info("played cue %s cue_id=%s", event.cue_type.value, event.cue_id)
+            # Fire-and-forget: the cue may still be playing (T-014: a supports_response service).
+            if await self._call_optional(CUE_SERVICES[event.cue_type]):
+                self._logger.info("played cue %s cue_id=%s", event.cue_type.value, event.cue_id)
             self._emit(CueFinished(event.cue_id))
 
     async def close(self) -> None:
         """Disconnect and forget all state; the next call reconnects (session recovery)."""
+        if self._stale_stop is not None:
+            self._stale_stop.cancel()
+            self._stale_stop = None
         await self._drop_client()
         self._unavailable = None
         self._listen_id = None
@@ -206,32 +236,45 @@ class EsphomeSatellite:
         self._reset_capture()
         self._run_active = False
         self._drain_events()
+        for _ in range(self._readers):
+            self._events.put_nowait(_Wake("driver closed"))
         self._logger.info("closed")
 
     # Connection
 
     async def _ensure_connected(self) -> None:
+        if self._unavailable is None and self._client is None:
+            async with self._connect_lock:  # the reader and a command may both connect first
+                if self._unavailable is None and self._client is None:
+                    await self._connect()
         if self._unavailable is not None:
             raise MicrophoneUnavailable(self._unavailable)
-        if self._client is not None:
-            return
+
+    async def _connect(self) -> None:
         client = self._client_factory(self.playback_target)
-        self._client = client
         try:
             async with asyncio.timeout(CONNECT_TIMEOUT_SECONDS):
                 await client.connect(on_stop=partial(self._on_transport_stop, client), login=True)
                 _, services = await client.list_entities_services()
         except EXPECTED_ERRORS as error:
-            await self._drop_client()
+            self._logger.warning("connect to %s failed: %r", self._address(), error)
+            await self._disconnect(client)
             raise MicrophoneUnavailable(
                 f"connect to {self._address()} failed: {error!r}"
             ) from error
+        names = {service.name for service in services}
+        if missing := [name for name in REQUIRED_SERVICES if name not in names]:
+            await self._disconnect(client)
+            raise RuntimeError(f"ESPHome firmware at {self._address()} lacks services {missing}")
+        if absent := [name for name in OPTIONAL_SERVICES if name not in names]:
+            self._logger.warning("firmware lacks optional services %s", absent)
         self._services = {service.name: service for service in services}
         self._unsubscribe = client.subscribe_voice_assistant(
             handle_start=self._handle_start,
             handle_stop=self._handle_stop,
             handle_audio=self._handle_audio,
         )
+        self._client = client  # last: no caller ever sees a half-connected client
         self._logger.info("connected to %s", self._address())
 
     async def _on_transport_stop(self, client: EsphomeClient, expected_disconnect: bool) -> None:
@@ -246,8 +289,10 @@ class EsphomeSatellite:
         self._client, self._unsubscribe, self._services = None, None, {}
         if unsubscribe is not None:
             unsubscribe()
-        if client is None:
-            return
+        if client is not None:
+            await self._disconnect(client)
+
+    async def _disconnect(self, client: EsphomeClient) -> None:
         try:
             async with asyncio.timeout(DISCONNECT_TIMEOUT_SECONDS):
                 await client.disconnect()
@@ -267,7 +312,7 @@ class EsphomeSatellite:
         self._unavailable = reason
         self._armed = False
         self._drain_events()
-        self._events.put_nowait(None)
+        self._events.put_nowait(_Wake(reason))
 
     async def _lose_transport(self, reason: str) -> MicrophoneUnavailable:
         self._fail(reason)
@@ -278,22 +323,48 @@ class EsphomeSatellite:
         service = self._services.get(name)
         if service is None:
             raise RuntimeError(f"ESPHome firmware has no {name} service")
-        assert self._client is not None
+        client = self._client
+        if client is None:
+            raise MicrophoneUnavailable(self._unavailable or "not connected")
         try:
             async with asyncio.timeout(SERVICE_TIMEOUT_SECONDS):
-                await self._client.execute_service(service, {})
+                await client.execute_service(service, {})
         except EXPECTED_ERRORS as error:
             raise await self._lose_transport(f"service {name} failed: {error!r}") from error
         self._logger.debug("executed service %s", name)
+
+    async def _call_optional(self, name: str) -> bool:
+        if name not in self._services:
+            self._logger.warning("firmware has no %s service; skipped", name)
+            return False
+        await self._call(name)
+        return True
 
     # Listening
 
     async def _start_listening(self, listen_id: str) -> None:
         assert self._listen_id is None, "StartListening while armed"
+        if self._stale_stop is not None:
+            await self._stale_stop  # bounded by its own timeouts
+            self._stale_stop = None
+            if self._unavailable is not None:
+                raise MicrophoneUnavailable(self._unavailable)
         self._drain_events()
         self._reset_capture()
+        if self._dropped_chunks:
+            self._logger.debug("dropped %s audio chunks while disarmed", self._dropped_chunks)
+            self._dropped_chunks = 0
         self._listen_id, self._armed = listen_id, True
+        self._stream_started.clear()
         await self._call(START_OPEN_MIC_LISTENING_SERVICE)
+        try:
+            async with asyncio.timeout(START_TIMEOUT_SECONDS):
+                await self._stream_started.wait()
+        except TimeoutError as error:
+            raise await self._lose_transport(
+                f"device did not start streaming within {START_TIMEOUT_SECONDS} s "
+                "(muted, busy or wrong firmware?)"
+            ) from error
         self._logger.info("listening listen_id=%s", listen_id)
         self._emit(ListeningStarted(listen_id))
 
@@ -302,23 +373,37 @@ class EsphomeSatellite:
         self._armed = False
         self._drop_capture_events()  # MP-STOP-002
         self._reset_capture()
-        if self._run_active:
-            # MP-STOP-001: stop the device pipeline and wait for its own stop notification.
-            await self._call(STOP_LISTENING_SERVICE)
-            try:
-                async with asyncio.timeout(STOP_ACK_TIMEOUT_SECONDS):
-                    await self._stream_stopped.wait()
-            except TimeoutError as error:
-                raise await self._lose_transport(
-                    f"no stop acknowledgement within {STOP_ACK_TIMEOUT_SECONDS} s"
-                ) from error
-            self._send_run_end()
+        if self._run_active:  # always true after a confirmed start, unless the driver failed
+            await self._stop_device_stream("stop")
         self._listen_id = None
         self._logger.info("stopped listening listen_id=%s reason=%s", listen_id, reason)
         self._emit(ListeningStopped(listen_id, reason))
 
+    async def _stop_device_stream(self, what: str) -> None:
+        """MP-STOP-001: stop the device pipeline and wait for its own stop notification."""
+        self._stream_stopped.clear()
+        await self._call(STOP_LISTENING_SERVICE)
+        try:
+            async with asyncio.timeout(STOP_ACK_TIMEOUT_SECONDS):
+                await self._stream_stopped.wait()
+        except TimeoutError as error:
+            raise await self._lose_transport(
+                f"no {what} acknowledgement within {STOP_ACK_TIMEOUT_SECONDS} s"
+            ) from error
+        # A failure here marks the driver unavailable; the reader then gets that, not the
+        # ListeningStopped the caller emits (_emit drops events once unavailable).
+        self._send_run_end()
+
+    async def _stop_stale_stream(self) -> None:
+        self._logger.info("stopping a device stream that started while disarmed")
+        try:
+            await self._stop_device_stream("stale-stream stop")
+        except (MicrophoneUnavailable, RuntimeError) as error:
+            self._fail(f"stopping a stale device stream failed: {error}")
+
     def _send_run_end(self) -> None:
-        assert self._client is not None
+        if self._client is None:
+            return
         try:
             self._client.send_voice_assistant_event(
                 VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, None
@@ -338,19 +423,24 @@ class EsphomeSatellite:
             self._armed,
         )
         if not self._armed:
-            return 0  # stale start of a stopped generation; its audio is dropped
-        if self._utterance_id is not None:
-            self._end_segment("aborted")
+            # A start that arrives after StopListening (or with nothing armed) would stream
+            # forever in continuous mode: stop it (MP-STOP-001). Its audio is dropped meanwhile.
+            if self._stale_stop is None or self._stale_stop.done():
+                self._stale_stop = asyncio.ensure_future(self._stop_stale_stream())
+            return 0
+        if self._run_active:
+            self._fail("device started a second voice-assistant stream while listening")
+            return 0
         self._reset_capture()
         self._run_active = True
-        self._stream_stopped.clear()
+        self._stream_started.set()
         return 0  # 0: audio comes over the API connection
 
     async def _handle_stop(self, aborted: bool) -> None:
         self._logger.debug("device stream stop aborted=%s armed=%s", aborted, self._armed)
-        self._run_active = False
+        was_active, self._run_active = self._run_active, False
         self._stream_stopped.set()
-        if self._armed:
+        if self._armed and was_active:
             # Nobody asked it to stop: listening is dead, so fail loudly; the session re-arms.
             self._fail("device ended its voice-assistant stream while listening")
 
@@ -438,7 +528,7 @@ class EsphomeSatellite:
             self._events.get_nowait()
 
     def _drop_capture_events(self) -> None:
-        kept: list[MicrophoneEvent | None] = []
+        kept: list[MicrophoneEvent | _Wake] = []
         dropped = 0
         while not self._events.empty():
             event = self._events.get_nowait()

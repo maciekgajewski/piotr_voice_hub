@@ -60,12 +60,9 @@ class Hysteresis:
             return VadTransition.SPEECH_ENDED
         return None
 
-    def force_end(self) -> None:
-        """End the current segment now (max segment length); speech must start afresh."""
-        self.speaking, self._run = False, 0
-
     def reset(self) -> None:
-        """Forget everything (disarm, new stream)."""
+        """End any segment and forget the current run (max-segment cut, disarm, new stream);
+        the next segment needs a full start run."""
         self.speaking, self._run = False, 0
 
 
@@ -93,7 +90,7 @@ class SileroVad:
 
     def force_end(self) -> None:
         """End the current segment now (max segment length); keeps the model's context."""
-        self._hysteresis.force_end()
+        self._hysteresis.reset()
 
     @property
     def speaking(self) -> bool:

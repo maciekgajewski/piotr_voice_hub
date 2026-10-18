@@ -21,3 +21,16 @@ one PR (AGENTS.md). Order is the dependency order.
 | T-011 api | WebSocket API events only (commands such as speak/play/stop/release are P1) | planned |
 | T-012 main-compose | Hub main wiring and compose with the hub only | planned |
 | T-014 esphome-playback | ESPHome playback split from T-007: shared playback HTTP server, media_player announce, drain, PlaybackFinished | planned |
+
+## Carry-forwards
+
+- **T-010:** re-arm after `MicrophoneUnavailable` must back off (for example 1 s, doubling up to
+  30 s, reset after a successful arm), with one log line per attempt. The driver itself never
+  retries, and a refused connect fails in milliseconds (PR #9 review).
+- **T-014:** a true `CueFinished`. Make the firmware cue services `supports_response` (they
+  already `script.wait`) and call `execute_service(..., return_response=True, timeout=...)`.
+  Today `CueFinished` follows a fire-and-forget call, so the cue may still be playing.
+- **P1 (follow-up):** the `play_follow_up_ready_cue` firmware service (BOX-3 already has
+  `play_follow_up_listening_cue`, Voice PE `follow_up_listening_sound`) is needed when follow-up
+  lands, ahead of the rest of the P2 firmware work. Until then the driver logs it as missing at
+  connect and skips the cue with a warning.

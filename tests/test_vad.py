@@ -168,10 +168,10 @@ def test_frame_cost_is_small() -> None:
 ALARM_CLIP = Path(__file__).parent / "data" / "alarm_tone_16k.wav"
 
 
-def test_force_end_ends_the_segment_and_a_new_one_needs_a_full_start_run() -> None:
+def test_reset_ends_the_segment_and_a_new_one_needs_a_full_start_run() -> None:
     hysteresis = Hysteresis(0.8)
     assert feed(hysteresis, [0.9] * START_FRAMES) == [(START_FRAMES - 1, STARTED)]
-    hysteresis.force_end()  # the 15 s max-segment cut, while speech goes on
+    hysteresis.reset()  # the 15 s max-segment cut, while speech goes on
     assert not hysteresis.speaking
     assert feed(hysteresis, [0.9] * (START_FRAMES - 1)) == []
     assert feed(hysteresis, [0.9]) == [(0, STARTED)]

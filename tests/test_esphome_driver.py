@@ -77,10 +77,6 @@ class LoudnessVad:
     def __init__(self, end_silence_seconds: float) -> None:
         self._hysteresis = Hysteresis(end_silence_seconds)
 
-    @property
-    def speaking(self) -> bool:
-        return self._hysteresis.speaking
-
     def process_frame(self, pcm: bytes) -> tuple[float, VadTransition | None]:
         assert len(pcm) == FRAME_BYTES
         loud = np.abs(np.frombuffer(pcm, "<i2").astype(np.int32)).max() > 1000
@@ -91,7 +87,7 @@ class LoudnessVad:
         self._hysteresis.reset()
 
     def force_end(self) -> None:
-        self._hysteresis.force_end()
+        self._hysteresis.reset()
 
 
 class Service:
@@ -113,6 +109,9 @@ class FakeClient:
         self.connected = False
         self.disconnects = 0
         self.ack_stop = True
+        self.ignore_start = False  # a muted or busy device never starts its stream
+        self.connect_delay = 0.0
+        self.connect_error: Exception | None = None
         self.hang: set[str] = set()  # connect / service names that never return
         self.started = asyncio.Event()
         self.on_stop: Callable[[bool], Coroutine[Any, Any, None]] | None = None
@@ -122,6 +121,9 @@ class FakeClient:
     async def connect(self, on_stop: Any = None, login: bool = False) -> None:
         if "connect" in self.hang:
             await asyncio.Event().wait()
+        await asyncio.sleep(self.connect_delay)
+        if self.connect_error is not None:
+            raise self.connect_error
         self.on_stop = on_stop
         self.connected = True
 
@@ -136,7 +138,7 @@ class FakeClient:
         if service.name in self.hang:
             await asyncio.Event().wait()
         self.calls.append(service.name)
-        if service.name == "start_open_mic_listening":
+        if service.name == "start_open_mic_listening" and not self.ignore_start:
             self._later(self._start())  # the device answers after the service returns
         elif service.name == "stop_listening" and self.ack_stop:
             self._later(self.handlers["stop"](False))
@@ -171,10 +173,12 @@ class Clients:
     def __init__(self) -> None:
         self.made: list[FakeClient] = []
         self.services: tuple[str, ...] = ALL_SERVICES
+        self.setup: Callable[[FakeClient], None] = lambda _client: None
 
     def __call__(self, target: PlaybackTarget) -> FakeClient:
         assert target.address == "10.0.0.5" and target.api_key == "a2V5"
         client = FakeClient(self.services)
+        self.setup(client)
         self.made.append(client)
         return client
 
@@ -416,7 +420,9 @@ def test_missing_stop_ack_discards_the_generation_and_recovers_the_transport(
     asyncio.run(run())
 
 
-def test_late_start_and_audio_after_stop_are_dropped() -> None:
+def test_start_arriving_after_stop_is_stopped_and_its_audio_dropped() -> None:
+    """B2: a device start that comes after StopListening must not stream forever."""
+
     async def run() -> None:
         mic, clients = make()
         await arm(mic)
@@ -424,10 +430,137 @@ def test_late_start_and_audio_after_stop_are_dropped() -> None:
         assert await mic.wait_for_event() == ListeningStopped("listen-1", "x")
         client = clients.last
         assert await client.handlers["start"]("late", 0, None, None) == 0
-        await client.handlers["audio"](loud(1.0), None)
-        await client.handlers["stop"](False)  # stale stop while disarmed is harmless
-        await mic.send_output_event(PlayCue("cue-1", CueType.TIMEOUT))
-        assert await mic.wait_for_event() == CueFinished("cue-1")
+        await client.handlers["audio"](loud(1.0), None)  # dropped: disarmed
+        await arm(mic, "listen-2")  # waits for the stale stream's stop first
+        assert client.calls == [
+            "start_open_mic_listening",
+            "stop_listening",
+            "stop_listening",  # the late start, actively stopped
+            "start_open_mic_listening",
+        ]
+        assert len(client.va_events) == 2  # a RUN_END after each acknowledged stop
+        await mic.send_output_event(StopListening("listen-2", "y"))
+        assert await mic.wait_for_event() == ListeningStopped("listen-2", "y")
+        assert client.calls[-1] == "stop_listening"  # the stop is not skipped any more
+
+    asyncio.run(run())
+
+
+def test_unacknowledged_stop_of_a_late_start_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(esphome, "STOP_ACK_TIMEOUT_SECONDS", 0.05)
+
+    async def run() -> None:
+        mic, clients = make()
+        await mic.send_output_event(SetVisualState(VisualState.IDLE))  # connect
+        clients.last.ack_stop = False
+        await clients.last.handlers["start"]("stray", 0, None, None)
+        with pytest.raises(MicrophoneUnavailable, match="stale-stream stop acknowledgement"):
+            await mic.wait_for_event()
+
+    asyncio.run(run())
+
+
+def test_listening_started_waits_for_the_device_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B1: the service call is fire-and-forget; only the device's start confirms arming."""
+    monkeypatch.setattr(esphome, "START_TIMEOUT_SECONDS", 0.05)
+
+    async def run() -> None:
+        mic, clients = make()
+        clients.setup = lambda client: setattr(client, "ignore_start", True)
+        with pytest.raises(MicrophoneUnavailable, match="did not start streaming"):
+            await mic.driver.send_output_event(StartListening("listen-1"))
+        assert clients.last.disconnects == 1
+        with pytest.raises(MicrophoneUnavailable, match="did not start streaming"):
+            await mic.driver.wait_for_event()  # no ListeningStarted was queued
+
+    asyncio.run(run())
+
+
+def test_listening_started_comes_after_the_device_start() -> None:
+    async def run() -> None:
+        mic, clients = make()
+        await mic.send_output_event(StartListening("listen-1"))
+        assert clients.last.started.is_set()
+        assert await mic.wait_for_event() == ListeningStarted("listen-1")
+
+    asyncio.run(run())
+
+
+def test_second_device_start_while_listening_fails_loudly() -> None:
+    async def run() -> None:
+        mic, clients = make()
+        await arm(mic)
+        await clients.last.audio(loud(0.5))  # a segment is open
+        await clients.last.handlers["start"]("again", 0, None, None)
+        with pytest.raises(MicrophoneUnavailable, match="second voice-assistant stream"):
+            await mic.wait_for_event()
+
+    asyncio.run(run())
+
+
+def test_concurrent_first_calls_share_one_connection() -> None:
+    """B3: the reader and the startup SetVisualState(IDLE) both arrive before connect ends."""
+
+    async def run() -> None:
+        mic, clients = make()
+        clients.setup = lambda client: setattr(client, "connect_delay", 0.05)
+        reader = asyncio.create_task(mic.driver.wait_for_event())
+        await asyncio.sleep(0)
+        await mic.send_output_event(SetVisualState(VisualState.IDLE))
+        assert len(clients.made) == 1
+        assert clients.last.calls == ["set_visual_idle"]
+        await mic.close()  # wakes the reader
+        with pytest.raises(MicrophoneUnavailable, match="driver closed"):
+            await asyncio.wait_for(reader, TIMEOUT)
+
+    asyncio.run(run())
+
+
+def test_concurrent_first_calls_both_fail_when_connect_fails() -> None:
+    async def run() -> None:
+        mic, clients = make()
+
+        def setup(client: FakeClient) -> None:
+            client.connect_delay = 0.05
+            client.connect_error = OSError("refused")
+
+        clients.setup = setup
+        results = await asyncio.gather(
+            mic.driver.wait_for_event(),
+            mic.driver.send_output_event(SetVisualState(VisualState.IDLE)),
+            return_exceptions=True,
+        )
+        assert all(isinstance(r, MicrophoneUnavailable) for r in results), results
+        assert not any(c.calls for c in clients.made)
+
+    asyncio.run(run())
+
+
+def test_connect_failure_is_logged_at_warning(caplog: pytest.LogCaptureFixture) -> None:
+    async def run() -> None:
+        mic, clients = make()
+        clients.setup = lambda client: setattr(client, "connect_error", OSError("refused"))
+        with pytest.raises(MicrophoneUnavailable, match="refused"):
+            await mic.driver.send_output_event(SetVisualState(VisualState.IDLE))
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(run())
+    assert any(
+        r.levelno == logging.WARNING and "connect to 10.0.0.5:6053 failed" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_close_wakes_a_blocked_reader() -> None:
+    async def run() -> None:
+        mic, _ = make()
+        await mic.send_output_event(SetVisualState(VisualState.IDLE))
+        reader = asyncio.create_task(mic.driver.wait_for_event())
+        await asyncio.sleep(0.01)
+        await mic.close()
+        with pytest.raises(MicrophoneUnavailable, match="driver closed"):
+            await asyncio.wait_for(reader, TIMEOUT)
+        await arm(mic, "listen-after-close")  # no stale wake-up left in the queue
 
     asyncio.run(run())
 
@@ -524,22 +657,36 @@ def test_visual_states_cues_and_wake_candidate_reset_call_the_firmware_services(
     asyncio.run(run())
 
 
-def test_missing_required_service_fails_loudly_missing_reset_only_warns(
+def test_missing_required_service_fails_at_connect() -> None:
+    async def run() -> None:
+        mic, clients = make()
+        clients.services = tuple(n for n in ALL_SERVICES if n != "set_visual_idle")
+        with pytest.raises(RuntimeError, match="lacks services \\['set_visual_idle'\\]"):
+            await mic.driver.send_output_event(SetVisualState(VisualState.PROCESSING))
+        assert clients.last.calls == [] and clients.last.disconnects == 1
+
+    asyncio.run(run())
+
+
+def test_missing_optional_services_are_logged_at_connect_and_skipped(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def run() -> None:
         mic, clients = make()
-        clients.services = ("start_open_mic_listening", "stop_listening")
-        with pytest.raises(RuntimeError, match="no set_visual_idle service"):
-            await mic.driver.send_output_event(SetVisualState(VisualState.IDLE))
+        clients.services = tuple(n for n in ALL_SERVICES if n not in esphome.OPTIONAL_SERVICES)
+        await mic.send_output_event(SetVisualState(VisualState.IDLE))
+        assert "lacks optional services" in caplog.text
+        await mic.send_output_event(PlayCue("cue-1", CueType.FOLLOW_UP_READY))
+        assert await mic.wait_for_event() == CueFinished("cue-1")  # no crash, no sound
         await arm(mic)
         await clients.last.audio(loud(0.5) + silence(1.0))
         started, _, _ = await read_segment(mic)
-        with caplog.at_level(logging.WARNING):
-            await mic.send_output_event(ResetWakeCandidate("listen-1", started.utterance_id))
+        await mic.send_output_event(ResetWakeCandidate("listen-1", started.utterance_id))
         assert "firmware has no reset_open_mic_wake_candidate service" in caplog.text
+        assert "firmware has no play_follow_up_ready_cue service" in caplog.text
 
-    asyncio.run(run())
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(run())
 
 
 @pytest.mark.parametrize(

@@ -102,6 +102,8 @@ There is one listening mode, continuous open-mic: the driver detects zero or mor
 | `MicrophoneUnavailable` | operation correlation fields, `reason` | Current requested operation cannot continue temporarily |
 | `DriverClosed` | none | Driver is permanently closed |
 
+`SpeechEnded.reason` is `completed` (the driver's VAD detected the end of speech) or `max_length` (the segment reached the configured maximum length; a new segment may start right after).
+
 Capture events use `SpeechStarted` and `SpeechEnded`. Playback uses `PlaybackBegin`, `PlaybackChunk`, `PlaybackEnd`, and `PlaybackFinished`. The protocol MUST NOT overload `AudioStart` or `AudioEnd` across these boundaries. (`MP-EVENT-001`)
 
 ## Driver protocol states

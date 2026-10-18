@@ -75,3 +75,39 @@
   `test_model_error_after_close_is_still_fatal`; it fails on the old code.
 - `make check`: ruff and pyright clean, 370 passed, 1 skipped (the GPU test).
 - PR #8 re-review 2 (MERGE) nits: the first (fatal on an abandoned call's error) is the follow-up above; for the second, a comment in the partial skip path explains that a call hanging after `close()` makes partials skip until the next final times out and exits.
+
+## 2026-10-18: PR #9 review fixes (review 5564795070, CHANGES NEEDED)
+
+- B1: `ListeningStarted` waits for the device's start callback (`START_TIMEOUT_SECONDS` 8 s,
+  longer than the BOX-3's 5 s speaker wait). `execute_service` is fire-and-forget in 45.3.1, so
+  the service call alone proves nothing. On timeout the transport is dropped and
+  `MicrophoneUnavailable` names the likely causes (muted, busy, wrong firmware). The audio-liveness
+  check was not added: it needs a timer task per satellite, which isn't trivial. With B1 and the
+  stream-end failure, a deaf device is caught at arm time.
+- B2: a device start that arrives while disarmed is actively stopped (`stop_listening`, wait
+  for the ack, `RUN_END`) in a tracked task, and `StartListening` waits for that task first. A
+  missing ack makes the driver unavailable. The test that treated this as harmless is
+  replaced by one checking the extra stop, both RUN_ENDs, and that later stops are not skipped.
+- B3: connect runs under an `asyncio.Lock`, and `_client` is published only after connect,
+  service listing and subscribe have finished. Tests: concurrent reader plus
+  `SetVisualState(IDLE)` share one connection; both fail cleanly when connect fails.
+- B4: `tests/data/README.md` now has the CC BY 4.0 attribution for `alarm_tone_16k.wav`
+  (© 2024 Clayton Charles Tapp, Home Assistant Voice PE sounds, upstream URL at tag 26.4.0,
+  sha256), and says it was converted. The clip is copied only to `tests/data/`; the attribution
+  sits next to it there.
+- A second device start while armed is now a loud failure (no more `SpeechEnded("aborted")`).
+- Connect failures are logged at WARNING. Backoff on re-arm goes to T-010 (carry-forward in
+  docs/tasks/README.md).
+- Services are checked at connect: a missing required one raises `RuntimeError` there, so a
+  firmware mismatch shows at connect. Missing optional ones (`reset_open_mic_wake_candidate`,
+  `play_follow_up_ready_cue`) are logged at WARNING at connect, and the command is skipped with
+  a warning (a FOLLOW_UP_READY cue still completes), so there is no crash loop.
+- Carry-forwards (docs/tasks/README.md): T-014 a `supports_response` cue service for a true
+  `CueFinished`; P1 the `play_follow_up_ready_cue` firmware service.
+- Nits: `close()` wakes a reader blocked in `wait_for_event()` (it raises "driver closed"; no
+  stale wake-up is left behind). `SpeechEnded` reasons (`completed`, `max_length`, counted
+  including the pre-roll) are documented in the driver and in docs/microphone-protocol.md.
+  `Hysteresis.force_end()` is merged into `reset()`; `SileroVad.force_end()` resets only the
+  hysteresis, `reset()` also the model state. Also: the unused `Vad.speaking` was removed,
+  `_dropped_chunks` is logged and reset on arm, and the `_send_run_end` failure path has a
+  comment.
