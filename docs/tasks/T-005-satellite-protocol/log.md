@@ -74,3 +74,8 @@ Rebased onto `02a75fe` (T-004 merged). Fixed:
 - **P1:** `PlaybackBegin/Chunk/End` stream raw PCM, but design §4.1 step 6 / §6 `play` hands the
   satellite a URL (shared playback HTTP server, `media_player` announce). P1 needs a URL playback
   command or a rework of these messages.
+- **T-007 (ESPHome driver) plan, from the PR #6 (T-006) review:**
+  (a) VAD `Hysteresis` needs a `force_end()`/`reset()` for the 15 s max-segment cut;
+  (b) `SPEECH_STARTED` fires at least 256 ms after speech onset (8 frames), so the 1 s pre-roll
+  is required, and the `vad.py` docstring should say so;
+  (c) add a loud non-speech test clip (TV/music/clatter) if one is available.
