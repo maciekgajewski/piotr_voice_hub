@@ -31,7 +31,12 @@ from piotr_voice_hub.satellites.messages import (
     StopListening,
     VisualState,
 )
-from piotr_voice_hub.satellites.protocol import DriverState, MicrophoneProtocolState
+from piotr_voice_hub.satellites.protocol import (
+    RECENT_ID_WINDOW,
+    DriverState,
+    MicrophoneProtocolState,
+    ProtocolSnapshot,
+)
 
 
 def test_open_mic_generation_accepts_multiple_distinct_segments() -> None:
@@ -276,6 +281,32 @@ EVENT_LEGAL_STATES = {
 }
 
 
+# Next state after a legal command or event; None means "unchanged".
+COMMAND_NEXT_STATE: dict[str, DriverState | None] = {
+    "StartListening": DriverState.ARMING,
+    "StopListening": DriverState.STOPPING,
+    "SetVisualState": None,
+    "ResetWakeCandidate": None,
+    "PlayCue": DriverState.PLAYING_CUE,
+    "PlaybackBegin": DriverState.PLAYING_AUDIO,
+    "PlaybackChunk": None,
+    "PlaybackEnd": None,
+    "Close": DriverState.CLOSED,
+}
+EVENT_NEXT_STATE: dict[str, DriverState | None] = {
+    "ListeningStarted": DriverState.LISTENING,
+    "ListeningStopped": DriverState.DISARMED,
+    "SpeechStarted": DriverState.CAPTURING,
+    "AudioChunk": None,
+    "AudioProgress": None,
+    "SpeechEnded": DriverState.LISTENING,
+    "CueFinished": DriverState.DISARMED,
+    "PlaybackFinished": DriverState.DISARMED,
+    "MicrophoneUnavailable": DriverState.DISARMED,
+    "DriverClosed": DriverState.CLOSED,
+}
+
+
 @pytest.mark.parametrize("state", list(DriverState))
 @pytest.mark.parametrize("command_name", COMMAND_LEGAL_STATES)
 def test_complete_driver_state_command_matrix(
@@ -293,6 +324,7 @@ def test_complete_driver_state_command_matrix(
         return
     if state in COMMAND_LEGAL_STATES[command_name]:
         protocol.command(command)
+        assert protocol.snapshot.state is (COMMAND_NEXT_STATE[command_name] or state)
     else:
         with pytest.raises(AssertionError):
             protocol.command(command)
@@ -317,9 +349,74 @@ def test_complete_driver_state_event_matrix(
         return
     if state in EVENT_LEGAL_STATES[event_name]:
         protocol.event(event)
+        assert protocol.snapshot.state is (EVENT_NEXT_STATE[event_name] or state)
     else:
         with pytest.raises(AssertionError):
             protocol.event(event)
+
+
+def test_reconnect_after_failure_during_capture() -> None:
+    """MP-ERROR-001/MP-ID-003: after a failure, re-arm with a new id; old-generation events fail."""
+    protocol = _listening_protocol()
+    protocol.event(SpeechStarted("listen-1", "utterance-1", 16000, 2, 1))
+    protocol.event(
+        MicrophoneUnavailable("offline", listen_id="listen-1", utterance_id="utterance-1")
+    )
+    assert protocol.snapshot == ProtocolSnapshot(DriverState.DISARMED, None, None, None, None)
+
+    with pytest.raises(AssertionError, match="identifier reused"):
+        protocol.command(StartListening("listen-1"))
+    protocol.command(StartListening("listen-2"))
+    with pytest.raises(AssertionError, match="mismatched listen_id"):
+        protocol.event(ListeningStarted("listen-1"))
+    protocol.event(ListeningStarted("listen-2"))
+
+    with pytest.raises(AssertionError, match="AudioChunk invalid in listening"):
+        protocol.event(AudioChunk("listen-1", "utterance-1", b"late"))
+    with pytest.raises(AssertionError, match="mismatched listen_id"):
+        protocol.event(SpeechStarted("listen-1", "utterance-2", 16000, 2, 1))
+    protocol.event(SpeechStarted("listen-2", "utterance-3", 16000, 2, 1))
+    with pytest.raises(AssertionError, match="mismatched listen_id"):
+        protocol.event(SpeechEnded("listen-1", "utterance-3", "completed"))
+    assert protocol.snapshot.state is DriverState.CAPTURING
+
+
+def test_reconnect_after_failure_during_playback() -> None:
+    protocol = MicrophoneProtocolState()
+    protocol.command(PlaybackBegin("playback-1", 22050, 2, 1))
+    protocol.event(MicrophoneUnavailable("offline", playback_id="playback-1"))
+    assert protocol.snapshot.state is DriverState.DISARMED
+
+    with pytest.raises(AssertionError, match="PlaybackFinished invalid in disarmed"):
+        protocol.event(PlaybackFinished("playback-1"))
+    protocol.command(PlaybackBegin("playback-2", 22050, 2, 1))
+    protocol.command(PlaybackEnd("playback-2"))
+    with pytest.raises(AssertionError, match="mismatched playback_id"):
+        protocol.event(PlaybackFinished("playback-1"))
+    protocol.event(PlaybackFinished("playback-2"))
+
+
+def test_id_tracking_stays_bounded_under_continuous_listening() -> None:
+    """Rule 1: weeks of VAD segments must not grow memory; recent reuse is still rejected."""
+    protocol = _listening_protocol()
+    cycles = RECENT_ID_WINDOW * 5
+    for index in range(cycles):
+        utterance_id = f"utterance-{index}"
+        protocol.event(SpeechStarted("listen-1", utterance_id, 16000, 2, 1))
+        protocol.event(SpeechEnded("listen-1", utterance_id, "completed"))
+        assert len(protocol._used_ids) <= RECENT_ID_WINDOW
+        assert len(protocol._recent_ids) <= RECENT_ID_WINDOW
+
+    assert len(protocol._used_ids) == RECENT_ID_WINDOW
+    assert protocol.snapshot.state is DriverState.LISTENING
+    recent = f"utterance-{cycles - 1}"
+    protocol.command(ResetWakeCandidate("listen-1", recent))
+    with pytest.raises(AssertionError, match="identifier reused"):
+        protocol.event(SpeechStarted("listen-1", recent, 16000, 2, 1))
+    with pytest.raises(AssertionError, match="unknown utterance_id"):
+        protocol.command(ResetWakeCandidate("listen-1", "utterance-0"))  # evicted long ago
+    protocol.event(SpeechStarted("listen-1", f"utterance-{cycles}", 16000, 2, 1))
+    assert protocol.snapshot.state is DriverState.CAPTURING
 
 
 def _listening_protocol() -> MicrophoneProtocolState:

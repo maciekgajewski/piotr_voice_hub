@@ -41,3 +41,36 @@
 - Style only: `TypeAlias` unions became Python 3.12 `type` statements (ruff UP040); imports merged
   per ruff isort.
 - `make check` passes (191 tests). Status: pushed, PR to be opened.
+
+## 2026-10-18 (review of `8129395`: changes needed)
+
+Review: https://github.com/maciekgajewski/piotr_voice_hub/pull/5#pullrequestreview-5564362498.
+Rebased onto `02a75fe` (T-004 merged). Fixed:
+- **Blocker:** `MicrophoneProtocolState._used_ids` grew forever. Under continuous listening every
+  VAD segment claims an id, which on a healthy connection meant unbounded memory over weeks. Reuse
+  is now checked against the `RECENT_ID_WINDOW` = 1024 most recent ids (a deque plus a set; the
+  oldest is evicted). Process-wide uniqueness stays the id factory's job (monotonic ids).
+  `ResetWakeCandidate` only needs recent utterances, so it still works. New test: 5120 segment
+  cycles stay at <= 1024 tracked ids, a recent reuse still asserts, an evicted id is unknown to
+  `ResetWakeCandidate`. Documented in docs/microphone-protocol.md (MP-ID).
+- The matrix tests now also assert the next state of every legal command/event.
+- Reconnect tests: a failure during capture and during playback, then re-arm (or replay) with a
+  new id. Reusing the old id and old-generation events are rejected.
+- docs/microphone-protocol.md: new MP-STOP-002. After `StopListening` the driver drops queued or
+  late capture events of the stopped generation.
+- design.md §4.1 step 7: the follow-up ready cue plays while disarmed and listening re-arms after
+  it; on follow-up timeout the hub stops listening, plays the timeout cue, sets IDLE and re-arms.
+- Skipped as agreed: renaming the `MicrophoneUnavailable` exception/event pair (nit 6), and the
+  API-event cross-references in the doc (nit 7).
+
+### Carry-forwards
+
+- **T-007 (ESPHome driver) plan:** add a conformance check that capture events queued after
+  `StopListening` are dropped (MP-STOP-002), the way the source driver drains them
+  (`box3_esphome.py` around line 855).
+- **T-010 (session) plan:** the session must finish the final transcript and send any
+  `ResetWakeCandidate` before it consumes the next driver event. `ResetWakeCandidate` is legal
+  only in `LISTENING`, and back-to-back segments are common in continuous mode.
+- **P1:** `PlaybackBegin/Chunk/End` stream raw PCM, but design §4.1 step 6 / §6 `play` hands the
+  satellite a URL (shared playback HTTP server, `media_player` announce). P1 needs a URL playback
+  command or a rework of these messages.

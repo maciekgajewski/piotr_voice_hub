@@ -41,7 +41,7 @@ Names in event tables are protocol events. Uppercase names in state tables are p
 - Every playback stream MUST use a newly generated non-empty `playback_id`.
 - Every cue MUST use a newly generated non-empty `cue_id`.
 - Driver events MUST echo all applicable identifiers.
-- An identifier MUST NOT be reused during the process lifetime.
+- An identifier MUST NOT be reused during the process lifetime. Identifier factories guarantee this (monotonic ids); the protocol validator checks reuse against the 1024 most recent identifiers only, so its memory stays bounded under continuous listening.
 - A stale event MUST NOT mutate current state. A trusted driver emitting a stale event has violated the protocol. (`MP-ID-003`)
 
 Identifiers make delayed callbacks observable and prevent an old ESPHome run from changing a newer listening generation.
@@ -173,6 +173,8 @@ The table covers audio-state events. `SetVisualState` is independently valid in 
 Any command or event not allowed by this table is an internal protocol violation. A nested `SpeechStarted`, mismatched identifier, audio outside `CAPTURING`, or implicit driver re-arm MUST fail an invariant. (`MP-STATE-001`)
 
 For a device that streams capture through an independently running voice-assistant pipeline, handling `StopListening` MUST actively stop that device pipeline and wait for the device's stop notification before emitting `ListeningStopped`. A server-to-device run-end event alone MUST NOT be treated as a correlated stop acknowledgement. If the explicit stop notification does not arrive within a bounded implementation timeout, the driver MUST discard the stopped generation and recover the transport before completing stop. (`MP-STOP-001`)
+
+After `StopListening`, the driver MUST drop any capture events (`SpeechStarted`, `AudioChunk`, `AudioProgress`, `SpeechEnded`) of the stopped generation that are still queued or arrive late, instead of delivering them; in `STOPPING` they would violate `MP-STATE-001`. Only `ListeningStopped` (or `MicrophoneUnavailable`) completes the stop. (`MP-STOP-002`)
 
 ## Listening requirements
 

@@ -5,6 +5,7 @@ continuous (open-mic) listening mode: a completed speech segment always returns 
 Violations fail an assert (MP-STATE-001, MP-ERROR-001).
 """
 
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 
@@ -31,6 +32,12 @@ from piotr_voice_hub.satellites.messages import (
     StartListening,
     StopListening,
 )
+
+# Reuse is checked against this many most recent identifiers. Under continuous listening every
+# VAD segment claims one, so an unbounded set would grow for the whole connection lifetime.
+# Process-wide uniqueness is the identifier factory's job (monotonic ids); this window catches
+# delayed callbacks and reused recent ids (MP-ID-003).
+RECENT_ID_WINDOW = 1024
 
 
 class DriverState(Enum):
@@ -64,6 +71,7 @@ class MicrophoneProtocolState:
         self._playback_id: str | None = None
         self._playback_ended = False
         self._used_ids: set[str] = set()
+        self._recent_ids: deque[str] = deque()
 
     @property
     def snapshot(self) -> ProtocolSnapshot:
@@ -200,6 +208,9 @@ class MicrophoneProtocolState:
     def _claim_new_id(self, identifier: str) -> None:
         assert identifier, "correlation identifier must be non-empty"
         assert identifier not in self._used_ids, f"correlation identifier reused: {identifier}"
+        if len(self._recent_ids) == RECENT_ID_WINDOW:
+            self._used_ids.remove(self._recent_ids.popleft())
+        self._recent_ids.append(identifier)
         self._used_ids.add(identifier)
 
     def _require_not_closed(self, item: object) -> None:
