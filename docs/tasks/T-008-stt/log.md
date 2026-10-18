@@ -60,3 +60,74 @@ beam 1 partials every 0.75 s over 4 s).
   notes, i.e. any non-nested "(...)" or "[...]" group ("(muzyka)", "[MUZYKA]", "(śmiech)") with
   the whitespace before it, then collapses spaces. "Ryszardzie (muzyka)" becomes "Ryszardzie",
   so the matcher sees an empty remainder. Runs on partials and finals, before the copied rules.
+
+## 2026-10-18: review fixes (PR #8, review 5564592404) and old-project parity
+
+- **What piotr_the_ai_server @ a299643 did** (read with `git show`/`git grep`, nothing checked
+  out or changed):
+  - `ai_server/speech_to_text/faster_whisper.py`: `model.transcribe(wav, language=..., beam_size=...)`
+    and nothing else. So faster-whisper defaults: temperature fallback ladder,
+    `condition_on_previous_text=True`, default no-speech/log-prob/compression gates, no
+    `vad_filter`, **no `hotwords`, no `initial_prompt`**. Warm-up on all-zero audio.
+  - `ai_server/speech_to_text/transcript_preprocessor.py`: the five replacement rules only
+    (logged at INFO). No hallucination blocklist or bracket/♪ handling anywhere in
+    `speech_to_text/` or `microphones/` (`git grep` for hotword, initial_prompt, no_speech,
+    logprob, hallucin, amara, napisy, muzyka found nothing relevant). The only "dziękuję" list
+    is `orchestrator/orchestrator.py:_cancels_pending_clarification`, agent logic, not STT.
+  - Wake path, `ai_server/microphones/manager.py`: `_text_after_wake_phrase` is
+    `(?iu)(?:^|\b)Ryszardzie\b[\s,.:;!?-]*(.*)` anywhere in the text. Partials only set the
+    LISTENING visual (`_collect_open_mic_partials`); the final must have a non-empty remainder,
+    otherwise `ResetWakeCandidate` + IDLE.
+  - Silence and false wakes: the driver's peak gate (`drivers/box3_esphome.py`
+    `_observe_audio_level`, `SPEECH_PEAK_THRESHOLD = 500`, `SPEECH_START_SECONDS = 0.2`,
+    `end_silence_seconds` 0.9 in `config.example.yaml`) only opened a segment on loud audio, so
+    Whisper rarely saw silence. With no bias there was no echo to suppress.
+- **Hotwords: dropped (re-checked).** The old project never used a bias, so there was no
+  gate+bias combination to reproduce; the design's `hotwords`/`initial_prompt` line was new in
+  the hub. A gate can't fix it either: the echo also hit the first ~0.75 s of real speech
+  (measured above), which any gate lets through. Removed in code, tests, plan, design §4.1
+  step 3 and the §6 STT row (done in 9927fbc). Unbiased on piotr: silence and noise give no
+  "Ryszardzie".
+- **Decoding: back to the old project's call** (language + beam only). I had added
+  `temperature=0`, `condition_on_previous_text=False`, a no_speech/avg_logprob filter and a
+  hallucination blocklist; all removed before commit, as directed. Two deviations, both small:
+  the audio goes to the model as an array (no temp WAV), and the warm-up uses low-level seeded
+  noise instead of zeros (review nit: a realistic decode path for warm-up).
+- **Added, beyond the old project:** the preprocessor drops bracketed notes ("(muzyka)",
+  "[MUZYKA]") and returns "" for text with no letter or digit ("♪"). Reason: the hub accepts a
+  wake plus any non-empty remainder, and the follow-up window (§4.1 step 7) accepts any
+  non-empty text, so "Ryszardzie (muzyka)" or a bare "♪" must not count as a command. The old
+  exact-phrase matcher had the same exposure; it is two lines here.
+- Known and unchanged (as in the old project): Whisper's "Dziękuję." / "Dzięki za oglądanie!"
+  on silence/noise. VAD (T-006) keeps non-speech away; T-013 measures what is left live.
+- Reliability fixes:
+  - Timeouts: model load 900 s (first start downloads 1.6 GB), each warm-up call 120 s, each
+    transcription 30 s including the wait for the model lock, and the final's wait for the
+    partial worker 30 s. On timeout or a model exception: `log.critical` and `os._exit(70)`
+    (not `sys.exit`: a wedged executor thread would block shutdown); Docker restarts the hub.
+    The handler is injectable for tests.
+  - A partial failure is fatal as above; in tests (injected handler) it surfaces from
+    `receive_text()` and `transcribe_final()`. `close()` retrieves the task's exception.
+  - One `asyncio.Lock` per model: a partial skips its tick when the model is busy, a final
+    waits. Partials run only when new audio arrived since the last partial.
+  - The event queue is bounded (`ceil(max_audio / interval) + 2`), and `send_audio` asserts the
+    segment cap (`max_audio_seconds`, i.e. max_segment_seconds plus pre-roll).
+- Nits: `faster_whisper` imported at the top; preprocessor logs at DEBUG; docstring says VRAM is
+  freed only at process exit; types not moved (skipped, as directed).
+- `docs/tasks/README.md`: P0 task list with the new **T-013 wake-test runner** (after T-007,
+  T-008 and T-009 merge, before T-010; seed of T-012's main).
+
+### GPU results on piotr, 4 concurrent streams
+
+`tools/stt-gpu-test.sh` (now also samples device VRAM every 200 ms):
+
+- Load + warm-up 10.5 s. One stream: finals 0.18–0.31 s after segment end.
+- Four concurrent streams (speech, wake, noise, silence clips started together, like four
+  satellites finishing at once): finals 0.17–0.47 s, max 0.474 s. Partials were skipped while
+  the model was busy (e.g. none for the silence stream), and every final ran.
+- Device peak VRAM 2302 MiB (idle 12 MiB), the same as one stream: with the lock only one
+  decode runs at a time, so the design §4.3 "+0.3–0.5 GB concurrent partials" estimate is not
+  needed (design.md not changed here).
+- Unbiased transcripts: "O jest test pierwszy.", "Ryszardzie, jaka będzie jutro pogoda?";
+  noise/silence gave "Dziękuję." / "Dzięki za oglądanie!" / "Dziękuje za uwagę.", never
+  "Ryszardzie". `make check`: 285 passed, 1 skipped.

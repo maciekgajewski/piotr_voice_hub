@@ -1,8 +1,9 @@
-"""Fixed transcript cleanup.
+"""Fixed transcript cleanup for partials and finals.
 
-The replacement rules are copied verbatim from piotr_the_ai_server (hardware-tuned). New in the
-hub: bracketed Whisper notes such as "(muzyka)" or "[MUZYKA]" are dropped first, so they never
-become a command after the wake word.
+The replacement rules come from piotr_the_ai_server (hardware-tuned, unchanged). New in the hub:
+bracketed Whisper notes such as "(muzyka)" or "[MUZYKA]" are dropped, and a transcript with no
+letter or digit ("♪", "...") becomes "". Such text must never reach the wake matcher or the
+follow-up window as a command.
 """
 
 import logging
@@ -50,13 +51,17 @@ class TranscriptPreprocessor:
 
     def preprocess(self, text: str) -> str:
         processed, note_count = BRACKETED_NOTE.subn("", text)
+        processed = _SPACES.sub(" ", processed).strip()
         if note_count:
-            processed = _SPACES.sub(" ", processed).strip()
-            self._logger.info("dropped bracketed transcript notes count=%s", note_count)
+            self._logger.debug("dropped bracketed transcript notes count=%s", note_count)
+        if not any(c.isalnum() for c in processed):
+            if processed:
+                self._logger.debug("dropped symbol-only transcript text=%r", processed)
+            return ""
         for rule in TRANSCRIPT_REPLACEMENTS:
             processed, replacement_count = rule.pattern.subn(rule.replacement, processed)
             if replacement_count:
-                self._logger.info(
+                self._logger.debug(
                     "applied transcript replacement pattern=%r replacement=%r count=%s",
                     rule.pattern.pattern,
                     rule.replacement,
