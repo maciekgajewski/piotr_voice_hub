@@ -48,3 +48,58 @@
   restarted at 07:34 UTC, before this run started; that was not us.
 - `~/hub-wake.yaml`: the box3-office address was updated to `piotr-box3-01-cbfaA8.local`, in
   place, keeping mode 600.
+
+## 2026-10-19: PR #14 review 5568516304
+
+- **B1:** compose `logging: json-file`, `max-size: 10m`, `max-file: "5"`; verified live with
+  `docker inspect -f '{{.HostConfig.LogConfig}}'`: `{json-file map[max-file:5 max-size:10m]}`.
+- **B2 (decision a):** `hub/watchdog.py`. A heartbeat task stamps the time every 1 s; a daemon
+  thread checks every 1 s and, if the stamp is older than 30 s, logs CRITICAL and
+  `os._exit(1)`. The intervals and the stall action are injectable. Tests: a missing
+  heartbeat fires once with the CRITICAL line; a running loop stays quiet for five times the
+  limit and `stop()` ends the thread; a subprocess whose loop is blocked by `time.sleep`
+  exits 1 with the CRITICAL line (0.3 s limit); the hub's `run_until_signal` runs it and stops
+  it after cleanup. The heartbeat keeps running through the bounded cleanup and the watchdog
+  is stopped after it, so it can only fire if cleanup hangs the loop for 30 s (exit 1:
+  acceptable, documented in plan.md). The compose healthcheck comment now says Docker only
+  marks the container unhealthy; restarts come from the process exiting.
+- **B3:** checklist Stop step: `docker compose stop`, `docker compose logs --tail 20`,
+  `docker inspect -f '{{.State.ExitCode}}'` (0), `docker compose down`.
+- **n1:** wording now matches the code: a session failure is logged CRITICAL at once, then
+  the clean shutdown runs, then exit 1 (plan.md, PR body).
+- **n2:** `serve` calls `before_cleanup` first in its `finally`; `run_until_signal` passes the
+  handler removal (test: SIGTERM is back to `SIG_DFL` inside a session's `shutdown()`).
+- **n3:** `asyncio.wait(tasks, timeout=10 s)` in the cleanup; a `run()` still running is logged
+  and not shut down (its `shutdown()` would assert). Test with a session that keeps running
+  after being cancelled. `stop_grace_period` raised to 30 s (10 + 3 + 5 s of bounds).
+- **n4:** both bind mounts use `create_host_path: false`: a missing cache dir fails
+  `compose up` at once ("bind source path does not exist", checked on piotr), instead of
+  Docker creating a root-owned dir. The checklist does `mkdir -p` first.
+- **n5:** `USER 65534:65534` in the Dockerfile (compose's `user:` still sets HUB_USER). Base
+  images pinned by index digest: `nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d1…`
+  and `ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f36…` (from `docker buildx imagetools inspect`;
+  the CUDA one matches the local RepoDigest).
+- **n6:** design.md §9: the API binds 0.0.0.0 with no auth; the LAN/Tailscale perimeter is
+  the boundary.
+- **n7, n8:** checklist notes the exit-2 restart loop on an invalid config (check the logs),
+  and has `nvidia-smi` and `docker compose ps` steps.
+- Live config: voice-pe-bedroom and box3-office are commented out in `~/hub-wake.yaml` (still
+  mode 600); the full previous file is kept as `~/hub-wake.full.yaml` (mode 600).
+
+## 2026-10-19: live re-run on piotr (no speech)
+
+- Build with the pinned digests: OK. The image user is 65534:65534; the container runs as
+  1002:1002 (HUB_USER).
+- Healthy 11.5 s after `up`. `docker compose ps`: `Up 11 seconds (healthy)`. `/healthz`:
+  voice-pe-02 and voice-pe-03 connected and `idle`, nothing else. VRAM 2220 MiB for the hub
+  (2238 MiB in use, 12 MiB before and after).
+- Log config verified (above).
+- The hub ran about 6 minutes (08:04–08:10 UTC) with no restart and no CRITICAL, stalled or
+  Traceback lines: the watchdog stayed quiet. Ambient sound gave 11 segments, none with a wake
+  candidate, so there were no events.
+- The SSH connection to piotr stalled once during this run ("timed out during banner
+  exchange"). The control connection was restarted; the hub itself was unaffected.
+- Stop sequence: `docker compose stop` 0.3 s; the last 20 log lines end with `stopped
+  listening … reason=shutdown` for both satellites, `API closed`, `hub stopped`, `stopped by
+  signal`; `docker inspect -f '{{.State.ExitCode}}'` gave `0`; `docker compose down` removed
+  only our container. No other container was touched.

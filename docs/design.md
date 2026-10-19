@@ -275,7 +275,7 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
   | 10200 | Piper |
   | 6053 | Outbound to satellites |
 
-  Bind API ports to the LAN or Tailscale interface as the external security boundary.
+  The hub binds the API on all interfaces (`api.host: 0.0.0.0`, host network) and has no auth; the LAN/Tailscale perimeter (no port forwarding from the internet) is the security boundary.
 - **Exclusive ownership.** The hub is the only ESPHome API client of the configured satellites. Neither Piotr nor Home Assistant connects to them.
 - **Reliability:**
   - One supervised task per satellite, with the existing reconnect and boundary recovery.
@@ -283,6 +283,8 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
   - Bounded queues; a slow API client is disconnected rather than buffered.
   - STT warm-up before arming.
   - Process exit on invariant failure (the existing assert policy), so Docker restarts it.
+  - An event-loop watchdog thread exits the process when the loop stalls for 30 s: Docker's healthcheck only marks a container unhealthy, it never restarts it (T-012).
+  - Container logs: `json-file`, 5 × 10 MB.
 
 ## 10. Testing
 

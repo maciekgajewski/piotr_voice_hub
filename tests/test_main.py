@@ -4,10 +4,13 @@ import asyncio
 import logging
 import os
 import signal
+import time
 
 import pytest
 
+from piotr_voice_hub.hub import main as main_module
 from piotr_voice_hub.hub.main import EXIT_FAILED, EXIT_OK, run_until_signal, serve
+from piotr_voice_hub.hub.watchdog import Watchdog
 
 TIMEOUT = 2.0
 
@@ -173,4 +176,97 @@ def test_a_session_failure_under_run_until_signal_exits_1() -> None:
     log = Log()
     stt, api, sessions, names = build(log, fail="a")
     assert asyncio.run(run_until_signal(stt, api, sessions, names)) == EXIT_FAILED
+    assert_ordered_shutdown(log.calls)
+
+
+def test_signal_handlers_are_removed_when_cleanup_starts() -> None:
+    log = Log()
+    stt, api, sessions, names = build(log)
+    seen: list[object] = []
+
+    async def shutdown() -> None:
+        seen.append(signal.getsignal(signal.SIGTERM))
+        log("a.shutdown")
+
+    sessions[0].shutdown = shutdown  # type: ignore[method-assign]
+
+    async def scenario() -> int:
+        task = asyncio.create_task(run_until_signal(stt, api, sessions, names))
+        await sessions[1].started.wait()
+        os.kill(os.getpid(), signal.SIGTERM)
+        return await task
+
+    assert asyncio.run(scenario()) == EXIT_OK
+    assert seen == [signal.SIG_DFL]  # a second SIGTERM during cleanup ends the process
+
+
+class SlowToStopSession(FakeSession):
+    """run() keeps going after it is cancelled, until the test releases it."""
+
+    def __init__(self, name: str, log: Log) -> None:
+        super().__init__(name, log)
+        self.release = asyncio.Event()
+
+    async def run(self) -> None:
+        self.log(f"{self.name}.run")
+        self.running = True
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await self.release.wait()
+            raise
+        finally:
+            self.running = False
+
+
+def test_a_run_that_does_not_stop_in_time_is_not_shut_down(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(main_module, "RUN_CANCEL_TIMEOUT_SECONDS", 0.05)
+    log = Log()
+    slow = SlowToStopSession("a", log)
+    sessions = [slow, FakeSession("b", log)]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(serve(FakeStt(log), FakeApi(log), sessions, ["a", "b"]))
+        await slow.started.wait()
+        await sessions[1].started.wait()
+        task.cancel()
+        async with asyncio.timeout(TIMEOUT):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        slow.release.set()  # let it end so asyncio.run can finish
+        await asyncio.sleep(0.01)
+
+    asyncio.run(scenario())
+    assert "session a did not stop within 0.05 s" in caplog.text
+    assert "a.shutdown" not in log.calls
+    assert log.calls[-2:] == ["b.shutdown", "api.close"]
+
+
+def test_the_watchdog_runs_with_the_hub_and_stops_after_cleanup() -> None:
+    log = Log()
+    stt, api, sessions, names = build(log)
+    fired: list[bool] = []
+    watchdog = Watchdog(stale_seconds=5.0, check_seconds=0.01, on_stall=lambda: fired.append(True))
+    beats: list[float] = []
+    original = watchdog.beat
+
+    def beat() -> None:
+        beats.append(time.monotonic())
+        original()
+
+    watchdog.beat = beat  # type: ignore[method-assign]
+
+    async def scenario() -> int:
+        task = asyncio.create_task(run_until_signal(stt, api, sessions, names, watchdog))
+        await sessions[1].started.wait()
+        assert watchdog._thread.is_alive()
+        os.kill(os.getpid(), signal.SIGTERM)
+        return await task
+
+    assert asyncio.run(scenario()) == EXIT_OK
+    assert beats and not fired
+    assert not watchdog._thread.is_alive()
     assert_ordered_shutdown(log.calls)
