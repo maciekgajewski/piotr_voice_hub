@@ -1,0 +1,11 @@
+# T-015: the Piper service image (docker/piper.Dockerfile). Compile with
+#   uv pip compile docker/piper/requirements.in --generate-hashes --no-emit-package onnxruntime \
+#     --python-version 3.12 --python-platform x86_64-manylinux_2_28 -o docker/piper/requirements.txt
+# piper-tts depends on the CPU `onnxruntime`; it is left out of requirements.txt
+# (--no-emit-package) and the image installs with --no-deps, so the only onnxruntime is
+# onnxruntime-gpu. 1.26.0 is the newest CUDA 12 build; 1.28+ are CUDA 13 and fall back to CPU
+# on the CUDA 12.8 image (T-003).
+wyoming-piper==2.5.2
+piper-tts==1.8.0
+wyoming==1.10.2
+onnxruntime-gpu==1.26.0

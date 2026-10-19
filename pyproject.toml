@@ -46,4 +46,4 @@ typeCheckingMode = "standard"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers"
-markers = ["gpu: needs a CUDA GPU and the real Whisper model (tools/stt-gpu-test.sh)"]
+markers = ["gpu: needs piotr's GPU (tools/stt-gpu-test.sh, tools/piper-gpu-test.sh)"]

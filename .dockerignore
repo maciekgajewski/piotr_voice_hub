@@ -1,7 +1,9 @@
-# Only pyproject.toml, uv.lock, README.md and src/ go into the hub image.
+# Only pyproject.toml, uv.lock, README.md and src/ go into the hub image; the Piper image
+# (T-015) also takes docker/piper/.
 *
 !pyproject.toml
 !uv.lock
 !README.md
 !src/
+!docker/piper/
 **/__pycache__
