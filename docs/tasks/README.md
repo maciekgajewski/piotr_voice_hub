@@ -18,8 +18,8 @@ one PR (AGENTS.md). Order is the dependency order.
 | T-009 wake-matcher | Wake-phrase matcher ("Ryszardzie", vocative only) | merged |
 | **T-013 wake-test-runner** | Minimal CLI: connect to the configured satellites, run VAD, STT and the wake matcher, print wake and final transcripts with timings, so Maciej can test "Ryszardzie" live on piotr. Runs right after T-007, T-008 and T-009 merge, before T-010. Throwaway: T-012's main is built on T-010's session, not on this loop. | merged |
 | T-010 session | Per-satellite session state machine with the wake matcher (accept, cancel, reply timeout); follow-up and busy handling are P1 | merged |
-| T-011 api | WebSocket API events only (commands such as speak/play/stop/release are P1) | in progress |
-| T-012 main-compose | Hub main wiring and compose with the hub only | planned |
+| T-011 api | WebSocket API events only (commands such as speak/play/stop/release are P1) | merged |
+| T-012 main-compose | Hub main wiring and compose with the hub only | in progress |
 | T-014 esphome-playback | ESPHome playback split from T-007: shared playback HTTP server, media_player announce, drain, PlaybackFinished | planned |
 
 ## Carry-forwards
@@ -36,12 +36,12 @@ one PR (AGENTS.md). Order is the dependency order.
 - **Driver follow-up (done in T-010):** a half-open connection is closed when the reader is
   cancelled mid-connect (`_connect` cancelled after `client.connect()` but before the client is
   published), so no orphaned API connection stays open (PR #9 review).
-- **T-012:** on shutdown, main must cancel each `SatelliteSession.run()` task, wait for it,
+- **T-012 (done in T-012):** on shutdown, main must cancel each `SatelliteSession.run()` task, wait for it,
   then call `SatelliteSession.shutdown()` for all of them (stop listening, idle visual, close;
   bounded; `shutdown()` asserts `run()` is not running).
   Also raise the `aioesphomeapi` logger to ERROR: it logs its own WARNING per failed connect,
   next to the session's one (PR #12 review).
-- **T-012:** create the `ApiServer` (T-011) from `api.host`/`api.port`, pass its `publish` as
+- **T-012 (done in T-012):** create the `ApiServer` (T-011) from `api.host`/`api.port`, pass its `publish` as
   every session's `emit`, start it before the sessions and close it after their `shutdown()`.
   Consider raising the `websockets.server` logger to WARNING: it logs each `/healthz`
   request at INFO ("connection rejected (200 OK)").

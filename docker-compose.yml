@@ -1,0 +1,30 @@
+# T-012: the P0 hub (design.md §9): one service. Piper and speaker recognition join in P1.
+# Usage (on piotr, from the repo root; see the T-012 PR checklist):
+#   HUB_CONFIG=~/hub.yaml HUB_USER="$(id -u):$(id -g)" docker compose up -d --build
+# HUB_CONFIG holds the satellites' API keys: keep it mode 600. The container runs as HUB_USER,
+# the config's owner, so it can read the file without loosening its permissions.
+name: piotr-voice-hub
+
+services:
+  hub:
+    build:
+      context: .
+      dockerfile: docker/hub.Dockerfile
+    image: piotr-voice-hub:latest
+    restart: unless-stopped
+    init: true  # forwards SIGTERM; reaps; `docker compose stop` → clean shutdown, exit 0
+    stop_grace_period: 20s  # shutdown is bounded: sessions 3 s, API 5 s
+    network_mode: host  # satellites on the LAN, .local names via zeroconf; API on api.port
+    gpus: all
+    user: "${HUB_USER:?set HUB_USER=$(id -u):$(id -g), the owner of HUB_CONFIG}"
+    volumes:
+      - "${HUB_CONFIG:?set HUB_CONFIG to the hub config path}:/config/hub.yaml:ro"
+      - "${HUB_CACHE:-${HOME}/.cache/piotr_voice_hub/huggingface}:/hf"
+    healthcheck:
+      # Liveness (design.md §6): /healthz answers once the model is warm and the API is up.
+      test: ["CMD", "piotr-voice-hub-healthcheck", "--config", "/config/hub.yaml"]
+      start_period: 180s
+      start_interval: 2s
+      interval: 30s
+      timeout: 5s
+      retries: 3

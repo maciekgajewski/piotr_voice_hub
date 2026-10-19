@@ -576,3 +576,90 @@ async def _test_a_slow_client_is_closed_within_the_bound_even_if_it_never_reads(
         async with asyncio.timeout(0.2 + 1.0):  # the client still does not read
             await client.connection.wait_closed()
         stuck.close()
+
+
+# Log hygiene (PR #13 re-review)
+
+
+class FakeMonotonic:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def _raw_exchange(server: ApiServer, data: bytes) -> None:
+    """Connect, send `data` (maybe nothing), half-close, and wait for the server to close."""
+    loop = asyncio.get_running_loop()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setblocking(False)
+    await loop.sock_connect(sock, ("127.0.0.1", server.port))
+    if data:
+        await loop.sock_sendall(sock, data)
+    sock.shutdown(socket.SHUT_WR)
+    await until_closed_by_server(sock)
+
+
+BAD_HANDSHAKES = {
+    "eof": b"",  # a port scan: connect and go away
+    "garbage": b"\x16\x03\x01\x00\xa5\x01\x00\x00\xa1\x03\x03",  # e.g. a TLS ClientHello
+    "half a request": b"GET /ws HTTP/1.1\r\nHost: x\r\n",
+    "no upgrade": b"GET /ws HTTP/1.1\r\nHost: x\r\n\r\n",
+}
+
+
+@pytest.mark.parametrize("data", BAD_HANDSHAKES.values(), ids=BAD_HANDSHAKES.keys())
+def test_a_failed_handshake_logs_one_warning_line_without_a_traceback(
+    data: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+
+    async def scenario() -> None:
+        async with running_server() as server:
+            await _raw_exchange(server, data)
+            await asyncio.sleep(0.05)  # let the connection handler finish and log
+
+    asyncio.run(scenario())
+    records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(records) == 1, [r.getMessage() for r in records]
+    (record,) = records
+    assert record.levelno == logging.WARNING
+    assert record.getMessage().startswith("API: opening handshake failed from ('127.0.0.1', ")
+    assert record.exc_info is None and record.exc_text is None
+    assert "Traceback" not in caplog.text
+
+
+def test_refused_clients_are_logged_at_most_once_a_minute(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(api_module, "MAX_CLIENTS", 1)
+    asyncio.run(_test_refused_clients_are_logged_at_most_once_a_minute())
+    refused = [r.getMessage() for r in caplog.records if "refusing" in r.getMessage()]
+    assert len(refused) == 2, refused
+    assert refused[0].endswith("1 clients connected (0 more refused since the last warning)")
+    assert refused[1].endswith("1 clients connected (2 more refused since the last warning)")
+
+
+async def _test_refused_clients_are_logged_at_most_once_a_minute() -> None:
+    monotonic = FakeMonotonic()
+    server = ApiServer("127.0.0.1", 0, Clock(), monotonic)
+    await server.start()
+    try:
+        async with connect(url(server)):
+            await until(lambda: server.client_count == 1)
+
+            async def refused() -> None:
+                with pytest.raises(InvalidStatus) as error:
+                    await connect(url(server))
+                assert error.value.response.status_code == 503
+
+            await refused()  # logged
+            monotonic.now += 59.9
+            await refused()  # suppressed
+            await refused()  # suppressed
+            monotonic.now += 0.1
+            await refused()  # logged, with the count
+    finally:
+        await server.close()
+    await assert_no_tasks_left()

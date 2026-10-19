@@ -10,6 +10,7 @@ bounded send; a client that falls behind is disconnected, never fed a gapped str
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -42,10 +43,34 @@ SHUTDOWN_ABORT_SECONDS = 1.0  # ... then every connection is aborted: close() <=
 MAX_CLIENT_MESSAGE_BYTES = 64 * 1024
 PING_INTERVAL_SECONDS = 20.0
 PING_TIMEOUT_SECONDS = 20.0
+REFUSED_LOG_INTERVAL_SECONDS = 60.0  # at most one 'refusing' WARNING per interval
 
 Clock = Callable[[], datetime]
 
 _logger = logging.getLogger(__name__)
+
+
+class _OneLineHandshakeFailures(logging.Filter):
+    """websockets logs a failed opening handshake (a port scan, a TCP probe, garbage) at ERROR
+    with a traceback. Rewrite it to one WARNING line, so a LAN scan cannot flood the log."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.msg == "opening handshake failed" and record.exc_info:
+            error = record.exc_info[1]
+            reason = repr(error)
+            if error is not None and error.__cause__ is not None:
+                reason += f" (from {error.__cause__!r})"
+            peer = getattr(getattr(record, "websocket", None), "remote_address", None)
+            record.msg, record.args = "API: opening handshake failed from %s: %s", (peer, reason)
+            record.levelno, record.levelname = logging.WARNING, "WARNING"
+            record.exc_info, record.exc_text = None, None
+        return True
+
+
+# The logger websockets uses for our server (main sets it to WARNING: INFO is one line per
+# /healthz).
+_ws_logger = logging.getLogger(f"{__name__}.websockets")
+_ws_logger.addFilter(_OneLineHandshakeFailures())
 
 
 def utc_now() -> datetime:
@@ -107,7 +132,13 @@ class _Client:
 class ApiServer:
     """`start()`, then `publish()` from the sessions, then `close()` (T-012 main)."""
 
-    def __init__(self, host: str, port: int, clock: Clock = utc_now) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        clock: Clock = utc_now,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._host = host
         self._port = port
         self._clock = clock
@@ -118,6 +149,9 @@ class ApiServer:
         # The last `satellite` event of each satellite and its message (for new clients).
         self._statuses: dict[str, tuple[SatelliteStatus, str]] = {}
         self._connections = 0
+        self._monotonic = monotonic
+        self._refused_logged_at: float | None = None
+        self._refused_unlogged = 0  # refusals since the last 'refusing' WARNING
 
     @property
     def port(self) -> int:
@@ -141,6 +175,7 @@ class ApiServer:
             ping_timeout=PING_TIMEOUT_SECONDS,
             open_timeout=OPEN_TIMEOUT_SECONDS,
             close_timeout=CLOSE_TIMEOUT_SECONDS,
+            logger=_ws_logger,
         )
         _logger.info("API listening on ws://%s:%d%s", self._host, self.port, WS_PATH)
 
@@ -177,6 +212,9 @@ class ApiServer:
                 async with asyncio.timeout(SHUTDOWN_ABORT_SECONDS):
                     await server.wait_closed()
             except TimeoutError:
+                # Only a connection handler that ignores cancellation and transport loss could
+                # get here. Its task (and websockets' own close task) stays pending; asyncio.run
+                # cancels what is left when the hub's loop ends, just before the process exits.
                 _logger.error("API: connections still open after aborting them")
                 return
         _logger.info("API closed")
@@ -203,9 +241,7 @@ class ApiServer:
         connection is closed, so handshakes in flight count too and a failed handshake frees
         its slot."""
         if len(self._admitted) >= MAX_CLIENTS:
-            _logger.warning(
-                "API: refusing %s: %d clients connected", connection.remote_address, MAX_CLIENTS
-            )
+            self._log_refused(connection)
             return connection.respond(HTTPStatus.SERVICE_UNAVAILABLE, "too many clients\n")
         self._admitted.add(connection)
         watcher = asyncio.create_task(connection.wait_closed())
@@ -217,6 +253,20 @@ class ApiServer:
 
         watcher.add_done_callback(release)
         return None
+
+    def _log_refused(self, connection: ServerConnection) -> None:
+        now = self._monotonic()
+        last = self._refused_logged_at
+        if last is not None and now - last < REFUSED_LOG_INTERVAL_SECONDS:
+            self._refused_unlogged += 1
+            return
+        unlogged, self._refused_unlogged, self._refused_logged_at = self._refused_unlogged, 0, now
+        _logger.warning(
+            "API: refusing %s: %d clients connected (%d more refused since the last warning)",
+            connection.remote_address,
+            MAX_CLIENTS,
+            unlogged,
+        )
 
     async def _serve_client(self, connection: ServerConnection) -> None:
         self._connections += 1
