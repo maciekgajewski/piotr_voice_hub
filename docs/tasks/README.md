@@ -20,7 +20,7 @@ one PR (AGENTS.md). Order is the dependency order.
 | T-010 session | Per-satellite session state machine with the wake matcher (accept, cancel, reply timeout); follow-up and busy handling are P1 | merged |
 | T-011 api | WebSocket API events only (commands such as speak/play/stop/release are P1) | merged |
 | T-012 main-compose | Hub main wiring and compose with the hub only | merged |
-| T-014 esphome-playback | ESPHome playback split from T-007: shared playback HTTP server, media_player announce, drain, PlaybackFinished | planned |
+| T-014 esphome-playback | ESPHome playback split from T-007: shared playback HTTP server, media_player announce, drain, PlaybackFinished | in review (PR #16) |
 
 P0 is done except T-014 (playback): the hub runs on piotr under compose, and the acceptance test
 (PR #14 manual checklist) has no audible reply yet, only the reply-timeout cue.
@@ -53,9 +53,39 @@ P0 is done except T-014 (playback): the hub runs on piotr under compose, and the
 - **P2 (soak):** an audio-liveness check before the soak: while armed, no audio from the device
   for a bounded time is `MicrophoneUnavailable`, so a silent stall is not mistaken for a quiet
   room (PR #9 review, B1).
-- **T-014:** a true `CueFinished`. Make the firmware cue services `supports_response` (they
-  already `script.wait`) and call `execute_service(..., return_response=True, timeout=...)`.
-  Today `CueFinished` follows a fire-and-forget call, so the cue may still be playing.
+- **T-014 (driver side done in T-014):** a true `CueFinished`. The driver calls a cue service
+  with `return_response` when the firmware declares `supports_response`, and is otherwise
+  fire-and-forget as before.
+- **P2 (firmware):** make each cue action answer once its cue has played. ESPHome sends a
+  service response only from an explicit `api.respond` action: declaring `supports_response`
+  alone makes every cue wait out the driver's 8 s and drop the connection (PR #16 review B2).
+  Use status mode, and end the action with `api.respond` after `script.wait`:
+  ```yaml
+  api:
+    actions:
+      - action: play_message_end_cue
+        supports_response: status
+        then:
+          - script.execute: play_message_end_cue
+          - script.wait: play_message_end_cue
+          - api.respond:
+              success: true
+  ```
+  Do the same for `play_conversation_timeout_cue`, and for `play_follow_up_ready_cue` when it is
+  added; then reflash. The driver calls status-mode actions with `return_response=False` and
+  waits at most 8 s. Until then `CueFinished` follows the call, so the cue may still be playing
+  (T-014 decision Q1).
+- **P1 (session, playback):** bound the time from `PlaybackBegin` to `PlaybackEnd` (TTS
+  synthesis) in the session. Neither the driver nor the playback HTTP writer, which waits for
+  the next chunk without a bound of its own, limits it; the drain's bounds start at
+  `PlaybackEnd` (PR #16 review nit 1).
+- **P1 (hardware test):** compare T-014's playback-end estimate (the stream fully sent, plus the
+  rest of the audio, plus 0.2 s, as the old driver did) with the media player's own
+  `ANNOUNCING` → `IDLE` state, on Voice PE and BOX-3. Switch to the state only if the estimate
+  cuts replies off or re-arms too early (T-014 decision Q2).
+- **P1 (API commands):** `play` with a consumer URL (design §4.1 step 6) needs its own driver
+  command and its end from the media player state; T-014 only streams PCM, which `speak` needs
+  (T-014 decision Q3).
 - **P1 (follow-up):** the `play_follow_up_ready_cue` firmware service (BOX-3 already has
   `play_follow_up_listening_cue`, Voice PE `follow_up_listening_sound`) is needed when follow-up
   lands, ahead of the rest of the P2 firmware work. Until then the driver logs it as missing at

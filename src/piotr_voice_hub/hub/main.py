@@ -147,6 +147,7 @@ async def run_hub(config: HubConfig) -> int:
     covered by the live check, T-012 log)."""
     # Imported here so --help and the unit tests do not load onnxruntime or faster-whisper.
     from piotr_voice_hub.hub.api import ApiServer
+    from piotr_voice_hub.hub.playback_http import PlaybackHttpServer
     from piotr_voice_hub.hub.session import SatelliteSession
     from piotr_voice_hub.satellites.esphome import EsphomeSatellite
     from piotr_voice_hub.satellites.vad import SileroVad, load_session
@@ -154,12 +155,24 @@ async def run_hub(config: HubConfig) -> int:
 
     stt = FasterWhisperSpeechToText(config.stt)
     api = ApiServer(config.api.host, config.api.port)
+    # All interfaces, like the API (design §9): the satellites fetch from the host's LAN IP.
+    playback = PlaybackHttpServer("0.0.0.0", config.playback_http.port)
     vad_session = load_session()
     sessions = [
         SatelliteSession(
-            s, EsphomeSatellite(s, SileroVad(vad_session, s.end_silence_seconds)), stt, api.publish
+            s,
+            EsphomeSatellite(
+                s, SileroVad(vad_session, s.end_silence_seconds), playback_server=playback
+            ),
+            stt,
+            api.publish,
         )
         for s in config.satellites
     ]
     names = [s.id for s in config.satellites]
-    return await run_until_signal(stt, api, sessions, names, Watchdog())
+    # Started before and closed after everything else; nothing streams before the sessions.
+    await playback.start()
+    try:
+        return await run_until_signal(stt, api, sessions, names, Watchdog())
+    finally:
+        await playback.close()
