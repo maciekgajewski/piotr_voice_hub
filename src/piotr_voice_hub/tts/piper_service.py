@@ -29,6 +29,7 @@ restarts a merely unhealthy container.
 """
 
 import argparse
+import faulthandler
 import importlib.metadata
 import logging
 import os
@@ -49,28 +50,44 @@ ORT_GPU_VERSION = "1.26.0"
 ORT_CPU = "onnxruntime"
 CUDA_PROVIDER = (CUDA, {"cudnn_conv_algo_search": "HEURISTIC"})
 SAMPLES_PER_CHUNK = 1024  # as the old project ran it: 46 ms at 22050 Hz
-# One short and one long sentence (about 200 characters), so the first real request of either
-# kind is not the first inference.
-WARMUP_TEXTS = (
-    "Dzień dobry, tu Ryszard.",
+# A short, a long (about 200 characters) and a near-cap sentence (950 characters, one
+# sentence, so one ONNX call), so the first real request of any length is not the first
+# inference: CUDA loads kernels lazily, so a much longer input can still need one-time work.
+WARM_CHECK_TEXT = (
     "Jutro w Warszawie będzie pochmurno, rano około dwunastu stopni, a po południu przelotny "
     "deszcz i umiarkowany wiatr z zachodu, więc przed wyjściem z domu warto zabrać parasol i "
-    "cieplejszą kurtkę.",
+    "cieplejszą kurtkę."
 )
+NEAR_CAP_TEXT = (
+    "Kiedy wieczorem wrócisz do domu po długim dniu w pracy, zostawisz buty w przedpokoju, "
+    "odwiesisz mokrą kurtkę na wieszak przy drzwiach i zapalisz światło w kuchni, przypomnę ci,"
+    " że w lodówce czeka jeszcze wczorajsza zupa pomidorowa, że na balkonie trzeba podlać "
+    "pomidory i bazylię, które od trzech dni nie widziały wody, że w łazience kończy się pasta "
+    "do zębów, a w szafce pod zlewem brakuje płynu do naczyń, że jutro rano o wpół do ósmej "
+    "przyjeżdża kurier z paczką od cioci Basi z Krakowa, więc ktoś musi być w domu albo "
+    "zostawić kartkę na drzwiach, że w sobotę są urodziny Kasi, na które obiecałeś upiec sernik"
+    " z rodzynkami według przepisu babci, że pralka skończyła już pranie i ręczniki trzeba "
+    "rozwiesić, zanim zaczną pachnieć, że rachunek za prąd trzeba zapłacić do piątku, a "
+    "samochód zawieźć do mechanika na wymianę opon na zimowe, i że prognoza na jutro mówi o "
+    "porannym przymrozku, gęstej mgle nad rzeką i silnym wietrze przez całe popołudnie."
+)
+WARMUP_TEXTS = ("Dzień dobry, tu Ryszard.", WARM_CHECK_TEXT, NEAR_CAP_TEXT)
 # Per warm-up sentence: the first inference in a new container is a one-time CUDA compile
 # for sm_120, about 48 s (T-003, T-015).
 WARMUP_TIMEOUT_SECONDS = 120.0
-# Re-timed once warm: the long warm-up sentence took 0.14-0.18 s on CUDA (T-015); on CPU it
-# would be several times slower, so over this the voice is not really on the GPU.
-WARM_LIMIT_SECONDS = 1.0
+# Re-timed once warm: the ~200-character sentence took 0.11-0.18 s on CUDA (T-015); on CPU it
+# would be several times slower, so over this the voice is not really on the GPU. 2 s leaves
+# room for Ollama time-slicing the GPU at startup (#18 review N3).
+WARM_LIMIT_SECONDS = 2.0
 # Per synthesis call while serving (wyoming-piper calls the voice once per sentence). Longer
 # text is refused with a Wyoming `error`: one huge "sentence" would block the service and take
-# VRAM next to Ollama. The hub's client (T-016) splits text at sentence ends into calls of at
-# most this many characters, so this is the second guard.
+# VRAM next to Ollama. The hub's client (T-016) rejects a whole text over this many
+# characters before sending it, so this is the second guard.
 MAX_TEXT_CHARS = 1000
 # Per synthesis call while serving: 191 characters take 0.18 s warm (T-015), so a call of
 # MAX_TEXT_CHARS takes about 1 s. A call still running after this is a wedged CUDA call, which
-# cannot be cancelled: the process exits and Docker restarts it.
+# cannot be cancelled: faulthandler dumps every thread's stack and exits the process, and
+# Docker restarts it.
 SYNTHESIS_TIMEOUT_SECONDS = 30.0
 # onnxruntime's run-time failures. A CUDA error (an illegal address after an OOM, say) is
 # sticky: every later run fails too, so the process exits and Docker restarts it. Errors about
@@ -130,6 +147,15 @@ def create_session(
     return session
 
 
+def _arm_watchdog(timeout: float) -> None:
+    """faulthandler's watchdog: a C thread that needs no GIL, so it fires even when the
+    synthesis holds the GIL (a hang in piper's espeak bridge, say); it writes every thread's
+    stack to stderr (the container log) and calls _exit(1). It has one slot per process,
+    which fits: wyoming-piper runs one synthesis at a time (`_VOICE_LOCK`, on its event-loop
+    thread), and nothing else in this process uses it."""
+    faulthandler.dump_traceback_later(timeout, exit=True)
+
+
 def _exit_now(code: int) -> NoReturn:
     os._exit(code)  # a wedged CUDA call cannot be cancelled; sys.exit would wait for it
 
@@ -140,9 +166,10 @@ def _timed_synthesis(
     timeout: float,
     clock: Callable[[], float],
     exit_now: Callable[[int], NoReturn],
+    label: str,
 ) -> float:
     """Synthesize `text` once; returns the seconds it took. An error raises; a call that runs
-    past `timeout` exits the process at once."""
+    past `timeout` exits the process at once. `label` names the step in the logs."""
     result: dict[str, float | BaseException] = {}
 
     def run() -> None:
@@ -152,21 +179,21 @@ def _timed_synthesis(
             result["error"] = error
 
     start = clock()
-    thread = threading.Thread(target=run, name="piper-warm-up", daemon=True)
+    thread = threading.Thread(target=run, name=f"piper-{label.replace(' ', '-')}", daemon=True)
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
-        logger.critical("warm-up synthesis did not finish within %g s", timeout)
+        logger.critical("%s synthesis did not finish within %g s", label, timeout)
         exit_now(1)
     elapsed = clock() - start
     failure = result.get("error")
     if isinstance(failure, BaseException):
-        raise RuntimeError(f"warm-up synthesis failed: {failure!r}") from failure
+        raise RuntimeError(f"{label} synthesis failed: {failure!r}") from failure
     audio = result["audio"]
     assert isinstance(audio, float)
     if audio <= 0:
-        raise RuntimeError(f"warm-up synthesis gave no audio for {text!r}")
-    logger.info("warm-up: %d characters, %.2f s of audio in %.2f s", len(text), audio, elapsed)
+        raise RuntimeError(f"{label} synthesis gave no audio for {text[:40]!r}...")
+    logger.info("%s: %d characters, %.2f s of audio in %.2f s", label, len(text), audio, elapsed)
     return elapsed
 
 
@@ -179,19 +206,23 @@ def warm_up(
 ) -> list[float]:
     """Synthesize each text once; returns the seconds each took. An error raises; a call that
     runs past `timeout` exits the process at once."""
-    return [_timed_synthesis(synthesize, text, timeout, clock, exit_now) for text in texts]
+    return [
+        _timed_synthesis(synthesize, text, timeout, clock, exit_now, "warm-up") for text in texts
+    ]
 
 
 def check_warm(
     synthesize: Callable[[str], float],
-    text: str = WARMUP_TEXTS[-1],
+    text: str = WARM_CHECK_TEXT,
     limit: float = WARM_LIMIT_SECONDS,
     clock: Callable[[], float] = time.monotonic,
     exit_now: Callable[[int], NoReturn] = _exit_now,
 ) -> float:
-    """Re-time the long warm-up sentence once warm; raises if it took over `limit` (a run-time
-    guard against the model running on CPU after all)."""
-    elapsed = _timed_synthesis(synthesize, text, WARMUP_TIMEOUT_SECONDS, clock, exit_now)
+    """Re-time the ~200-character warm-up sentence once warm; raises if it took over `limit`
+    (a run-time guard against the model running on CPU after all)."""
+    elapsed = _timed_synthesis(
+        synthesize, text, WARMUP_TIMEOUT_SECONDS, clock, exit_now, "warm check"
+    )
     if elapsed > limit:
         raise RuntimeError(
             f"warm synthesis of {len(text)} characters took {elapsed:.2f} s, over {limit:g} s: "
@@ -210,9 +241,10 @@ class GuardedVoice:
 
     wyoming-piper 2.5.2 calls `synthesize_wav(text, wav_writer, syn_config)` on its event-loop
     thread, once per sentence, with no bound. Each call here: refuses text over `max_chars`
-    (an exception, which wyoming-piper turns into an `error` event); arms a watchdog that logs
-    CRITICAL and exits the process if the call runs past `timeout`; and exits the process on
-    an onnxruntime run-time error. wyoming-piper also reads `.config` (speaker ids)."""
+    (an exception, which wyoming-piper turns into an `error` event); arms a watchdog
+    (`_arm_watchdog`) that dumps every thread's stack and exits the process if the call runs
+    past `timeout`; and exits the process on an onnxruntime run-time error. wyoming-piper also
+    reads `.config` (speaker ids)."""
 
     def __init__(
         self,
@@ -220,11 +252,15 @@ class GuardedVoice:
         max_chars: int = MAX_TEXT_CHARS,
         timeout: float = SYNTHESIS_TIMEOUT_SECONDS,
         exit_now: Callable[[int], NoReturn] = _exit_now,
+        arm: Callable[[float], None] = _arm_watchdog,
+        disarm: Callable[[], None] = faulthandler.cancel_dump_traceback_later,
     ) -> None:
         self.voice = voice
         self._max_chars = max_chars
         self._timeout = timeout
         self._exit_now = exit_now
+        self._arm = arm
+        self._disarm = disarm
 
     @property
     def config(self) -> Any:
@@ -236,24 +272,14 @@ class GuardedVoice:
             raise TextTooLongError(
                 f"text is {len(text)} characters, the limit per call is {self._max_chars}"
             )
-        timer = threading.Timer(self._timeout, self._expired, (len(text),))
-        timer.daemon = True
-        timer.start()
+        self._arm(self._timeout)
         try:
             self.voice.synthesize_wav(text, wav_file, syn_config)
         except ORT_RUNTIME_ERRORS as error:
             logger.critical("onnxruntime failed during a synthesis, exiting: %r", error)
             self._exit_now(1)
         finally:
-            timer.cancel()
-
-    def _expired(self, chars: int) -> None:
-        logger.critical(
-            "synthesis of %d characters did not finish within %g s, exiting",
-            chars,
-            self._timeout,
-        )
-        self._exit_now(1)
+            self._disarm()
 
 
 class OnlyThePreloadedVoice:

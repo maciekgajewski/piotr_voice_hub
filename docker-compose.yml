@@ -51,8 +51,9 @@ services:
   # T-015: the hub's own wyoming-piper on the GPU (docker/piper.Dockerfile), on port 10201
   # (`tts.uri`), next to the old project's Piper on 10200. It warms the voice up before it
   # listens, so healthy means warm. It listens on 127.0.0.1 only: the hub, also on the host
-  # network, is its only client, and wyoming has no limit on a message's size. Start it alone with `docker compose up -d --build piper`
-  # (compose still needs HUB_CONFIG and HUB_USER set to read this file).
+  # network, is its only client, and wyoming has no limit on a message's size. Start it alone
+  # with `docker compose up -d --build piper` (compose still needs HUB_CONFIG and HUB_USER set
+  # to read this file).
   piper:
     build:
       context: .

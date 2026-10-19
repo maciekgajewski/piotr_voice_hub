@@ -1,7 +1,9 @@
 """T-015: startup of the Piper service (tts/piper_service.py), with fakes for piper,
 wyoming-piper and the GPU. The real thing is tests/test_piper_gpu.py."""
 
+import faulthandler
 import importlib.metadata
+import logging
 import subprocess
 import sys
 import textwrap
@@ -134,9 +136,20 @@ def test_warm_up_synthesizes_each_text_in_order() -> None:
 
     took = ps.warm_up(synthesize)
     assert seen == list(ps.WARMUP_TEXTS)
-    assert len(took) == 2
-    assert len(ps.WARMUP_TEXTS[0]) < 40
-    assert 180 <= len(ps.WARMUP_TEXTS[1]) <= 220
+    assert len(took) == 3
+    short, check, near_cap = ps.WARMUP_TEXTS
+    assert len(short) < 40
+    assert 180 <= len(check) <= 220
+    assert check == ps.WARM_CHECK_TEXT
+    # One sentence near the cap: a single ONNX call as long as a serving call can be.
+    assert 900 <= len(near_cap) <= ps.MAX_TEXT_CHARS
+    assert [c for c in near_cap if c in ".?!"] == ["."] and near_cap.endswith(".")
+
+
+def test_warm_up_logs_each_time(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO):
+        ps.warm_up(lambda text: 2.0, texts=["a" * 949], clock=ticking_clock(1.0, 1.5))
+    assert "warm-up: 949 characters, 2.00 s of audio in 0.50 s" in caplog.text
 
 
 def test_warm_up_error_raises() -> None:
@@ -190,8 +203,34 @@ def test_a_warm_voice_passes_the_warm_check() -> None:
 
     took = ps.check_warm(synthesize, clock=ticking_clock(10.0, 10.18))
     assert took == pytest.approx(0.18)
-    assert seen == [ps.WARMUP_TEXTS[-1]]
-    assert ps.WARM_LIMIT_SECONDS == 1.0
+    assert seen == [ps.WARM_CHECK_TEXT]
+    assert ps.WARM_LIMIT_SECONDS == 2.0
+
+
+def test_the_warm_check_names_itself_in_its_logs(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO):
+        ps.check_warm(lambda text: 12.0, clock=ticking_clock(10.0, 10.18))
+    assert f"warm check: {len(ps.WARM_CHECK_TEXT)} characters" in caplog.text
+    assert "warm check passed" in caplog.text
+    assert "warm-up" not in caplog.text
+
+
+def test_a_hung_warm_check_names_itself(caplog: pytest.LogCaptureFixture) -> None:
+    release = threading.Event()
+
+    def exit_now(code: int) -> NoReturn:
+        raise Exited
+
+    def synthesize(text: str) -> float:
+        release.wait(5)
+        return 1.0
+
+    try:
+        with pytest.raises(Exited):
+            ps._timed_synthesis(synthesize, "a", 0.05, time.monotonic, exit_now, "warm check")
+    finally:
+        release.set()
+    assert "warm check synthesis did not finish within 0.05 s" in caplog.text
 
 
 def test_a_slow_warm_voice_fails_the_warm_check() -> None:
@@ -227,38 +266,64 @@ class ExitRecorder:
             raise Exited
 
 
+class Watchdog:
+    """Records arm/disarm calls, with what the voice was doing at each."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def arm(self, timeout: float) -> None:
+        self.events.append(f"arm {timeout:g}")
+
+    def disarm(self) -> None:
+        self.events.append("disarm")
+
+
+def guarded(inner: FakeVoice, watchdog: Watchdog, **kwargs: Any) -> ps.GuardedVoice:
+    return ps.GuardedVoice(inner, arm=watchdog.arm, disarm=watchdog.disarm, **kwargs)
+
+
 def test_guarded_voice_passes_calls_and_config_through() -> None:
-    inner = FakeVoice()
-    exits = ExitRecorder(raises=False)
-    voice = ps.GuardedVoice(inner, timeout=0.05, exit_now=exits)
+    watchdog = Watchdog()
+    inner = FakeVoice(lambda: watchdog.events.append("synthesize"))
+    exits = ExitRecorder()
+    voice = guarded(inner, watchdog, timeout=0.05, exit_now=exits)
     voice.synthesize_wav("Dzień dobry.", "writer", "config")
     assert inner.calls == [("Dzień dobry.", "writer", "config")]
     assert voice.config is FakeVoice.config
-    time.sleep(0.15)  # the watchdog was cancelled
+    assert watchdog.events == ["arm 0.05", "synthesize", "disarm"]
     assert exits.codes == []
+
+
+def test_the_default_watchdog_is_faulthandler() -> None:
+    voice = ps.GuardedVoice(FakeVoice())
+    assert voice._arm is ps._arm_watchdog
+    assert voice._disarm is faulthandler.cancel_dump_traceback_later
 
 
 def test_guarded_voice_refuses_text_over_the_cap() -> None:
     inner = FakeVoice()
-    voice = ps.GuardedVoice(inner, max_chars=10)
+    watchdog = Watchdog()
+    voice = guarded(inner, watchdog, max_chars=10)
     voice.synthesize_wav("a" * 10, "writer")
     with pytest.raises(ps.TextTooLongError, match="11 characters, the limit per call is 10"):
         voice.synthesize_wav("a" * 11, "writer")
     assert [call[0] for call in inner.calls] == ["a" * 10]
+    assert watchdog.events == ["arm 30", "disarm"]  # the refused call never arms it
     assert ps.MAX_TEXT_CHARS == 1000
     assert ps.SYNTHESIS_TIMEOUT_SECONDS == 30.0
 
 
-def test_a_hung_synthesis_exits_the_process(caplog: pytest.LogCaptureFixture) -> None:
-    exits = ExitRecorder(raises=False)
+@pytest.mark.parametrize("error", [ValueError("phonemizer"), Exited()])
+def test_the_watchdog_is_disarmed_when_the_call_fails(error: Exception) -> None:
+    watchdog = Watchdog()
 
-    def hang() -> None:
-        assert exits.called.wait(5)  # the call "ends" only when the watchdog has fired
+    def fail() -> None:
+        raise error
 
-    voice = ps.GuardedVoice(FakeVoice(hang), timeout=0.05, exit_now=exits)
-    voice.synthesize_wav("Dzień dobry.", "writer")
-    assert exits.codes == [1]
-    assert "did not finish within 0.05 s" in caplog.text
+    with pytest.raises(type(error)):
+        guarded(FakeVoice(fail), watchdog).synthesize_wav("Dzień dobry.", "writer")
+    assert watchdog.events == ["arm 30", "disarm"]
 
 
 @pytest.mark.parametrize("error", [Fail("CUDA failure 700"), RuntimeException("CUDA error")])
@@ -267,7 +332,7 @@ def test_an_onnxruntime_runtime_error_exits_the_process(error: Exception) -> Non
         raise error
 
     exits = ExitRecorder()
-    voice = ps.GuardedVoice(FakeVoice(fail), exit_now=exits)
+    voice = guarded(FakeVoice(fail), Watchdog(), exit_now=exits)
     with pytest.raises(Exited):
         voice.synthesize_wav("Dzień dobry.", "writer")
     assert exits.codes == [1]
@@ -279,7 +344,7 @@ def test_other_errors_go_back_to_the_client(error: Exception) -> None:
         raise error
 
     exits = ExitRecorder()
-    voice = ps.GuardedVoice(FakeVoice(fail), exit_now=exits)
+    voice = guarded(FakeVoice(fail), Watchdog(), exit_now=exits)
     with pytest.raises(type(error)):
         voice.synthesize_wav("Dzień dobry.", "writer")
     assert exits.codes == []
@@ -306,11 +371,15 @@ finally:
 
 
 @pytest.mark.parametrize(
-    ("hang", "message"),
-    [(True, "did not finish within 0.2 s"), (False, "onnxruntime failed during a synthesis")],
+    ("hang", "expected"),
+    [
+        # faulthandler's own dump: the timeout, then the stack of the stuck call.
+        (True, ["Timeout (0:00:00.200000)!", "synthesize_wav"]),
+        (False, ["CRITICAL:piper_service:", "onnxruntime failed during a synthesis"]),
+    ],
     ids=["hang", "onnxruntime-error"],
 )
-def test_the_guard_really_exits_the_process(hang: bool, message: str) -> None:
+def test_the_guard_really_exits_the_process(hang: bool, expected: list[str]) -> None:
     start = time.monotonic()
     done = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(EXIT_SCRIPT.format(hang=hang))],
@@ -320,8 +389,8 @@ def test_the_guard_really_exits_the_process(hang: bool, message: str) -> None:
         check=False,
     )
     assert done.returncode == 1
-    assert "CRITICAL:piper_service:" in done.stderr
-    assert message in done.stderr
+    for text in expected:
+        assert text in done.stderr
     assert "not exited" not in done.stdout  # os._exit: no finally, no cleanup
     assert time.monotonic() - start < 15
 
@@ -485,6 +554,7 @@ def test_main_checks_loads_warms_installs_then_serves(tmp_path: Path) -> None:
         f"load {VOICE}.onnx.json session",
         "synthesize",
         "synthesize",
+        "synthesize",  # the three warm-up texts
         "synthesize",  # the warm check
         "serve",
     ]
