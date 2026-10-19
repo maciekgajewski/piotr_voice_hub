@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 
 import pytest
 
+from piotr_voice_hub.tts.piper_service import MAX_TEXT_CHARS
+
 URI = os.environ.get("PIOTR_VOICE_HUB_PIPER_URI", "")
 pytestmark = [
     pytest.mark.gpu,
@@ -117,16 +119,13 @@ def test_service_synthesizes_polish_as_22050_hz_16_bit_mono(
         assert result.total_seconds < 5.0  # warm: T-003 measured 0.1 s per inference
 
 
-def test_another_voice_is_refused_without_a_download() -> None:
-    async def other_voice() -> tuple[str, dict]:
+def first_event(synthesize: dict) -> tuple[str, dict]:
+    async def request() -> tuple[str, dict]:
         uri = urlparse(URI)
         assert uri.hostname and uri.port
         reader, writer = await asyncio.open_connection(uri.hostname, uri.port)
         try:
-            event = {
-                "type": "synthesize",
-                "data": {"text": SHORT, "voice": {"name": "en_US-lessac-medium"}},
-            }
+            event = {"type": "synthesize", "data": synthesize}
             writer.write(json.dumps(event).encode() + b"\n")
             await writer.drain()
             kind, data, _ = await read_event(reader)
@@ -134,6 +133,21 @@ def test_another_voice_is_refused_without_a_download() -> None:
         finally:
             writer.close()
 
-    kind, data = asyncio.run(asyncio.wait_for(other_voice(), TIMEOUT_SECONDS))
+    return asyncio.run(asyncio.wait_for(request(), TIMEOUT_SECONDS))
+
+
+def test_another_voice_is_refused_without_a_download() -> None:
+    kind, data = first_event({"text": SHORT, "voice": {"name": "en_US-lessac-medium"}})
     assert kind == "error"
     assert "only the preloaded voice" in data["text"]
+
+
+def test_text_over_the_cap_is_refused() -> None:
+    # One "sentence" (no sentence end) over the cap: wyoming-piper passes it in one call.
+    text = ("bardzo " * (MAX_TEXT_CHARS // 7 + 10)).strip()
+    assert len(text) > MAX_TEXT_CHARS
+    kind, data = first_event({"text": text})
+    assert kind == "error"
+    assert data["code"] == "TextTooLongError"
+    assert f"the limit per call is {MAX_TEXT_CHARS}" in data["text"]
+    assert run(SHORT).audio_seconds > 1.0  # and the service still works

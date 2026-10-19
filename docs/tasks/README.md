@@ -80,7 +80,8 @@ Task notes (they go into each task's plan.md):
   so the hub's startup step is only a reachability check: a Wyoming `describe` → `info` round
   trip, bounded, before any satellite is armed. A failure exits 1. The text cap: split long
   text at sentence ends into calls of at most N characters, so every call has a bounded
-  length.
+  length. The service refuses a call over 1000 characters (T-015, `MAX_TEXT_CHARS`), so
+  N ≤ 1000.
 - **T-017 hardware checklist:** the first audible reply. Includes the T-014 playback-end
   comparison below.
 - **T-018 (ports):** listen on 2141 (decided above); T-018 updates design.md §7, §9 and
@@ -94,8 +95,9 @@ Task notes (they go into each task's plan.md):
   `start_follow_up_listening`, which also starts the on-device follow-up listening that the
   hub does not use (P2 removes it), so T-020 must not call it. The cue services both devices
   expose are `play_message_end_cue` (the `accepted` cue) and `play_conversation_timeout_cue`.
-  T-020's plan picks the substitute from these (or the `LISTENING` visual alone) and documents
-  it; this is the T-020 design question.
+  **Decided (Maciej, 2026-10-19):** until the P2 firmware adds the real
+  `play_follow_up_ready_cue`, the follow-up-ready state plays **no sound** and shows only the
+  `LISTENING` visual; neither substitute cue is used.
 
 ## P2 (design.md §11), for reference
 
@@ -169,8 +171,7 @@ Not numbered yet: firmware trimmed to continuous mode and reflashed (including t
   `play_follow_up_listening_cue`, Voice PE `follow_up_listening_sound`) is needed when follow-up
   lands, ahead of the rest of the P2 firmware work. Until then the driver logs it as missing at
   connect and skips the cue with a warning. **Decided:** the firmware import stays in P2;
-  T-020 uses a documented substitute from the cues the devices already have (T-020 note
-  above).
+  until then T-020 plays no sound and shows only the `LISTENING` visual (T-020 note above).
 - **P1 → T-017, T-019, T-020, T-021 (from T-010, T-011):** busy handling (T-019), follow-up
   (T-020) and the commands `speak`/`release` (T-017), `stop` (T-019) and `play` (T-021) were
   left out of P0.

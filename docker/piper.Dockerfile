@@ -1,6 +1,8 @@
 # T-015: the hub's own wyoming-piper on the GPU (design.md §9). Build context: the repo root
 # (docker-compose.yml, service `piper`). Same pinned CUDA 12.8 + cuDNN 9 base as the hub; the
 # only onnxruntime is onnxruntime-gpu 1.26.0 (the newest CUDA 12 build, T-003).
+# Licences: the image contains GPL-3.0 components (piper-tts and the espeak-ng it bundles), so
+# it is for local builds only and must not be published to a registry without GPL compliance.
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc
 
 COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /usr/local/bin/uv
@@ -38,4 +40,6 @@ RUN python /opt/piper/entrypoint.py --check-install
 WORKDIR /tmp
 USER 65534:65534
 ENTRYPOINT ["python", "/opt/piper/entrypoint.py"]
-CMD ["--uri", "tcp://0.0.0.0:10201", "--voice", "pl_PL-bass-high", "--data-dir", "/opt/piper/voices"]
+# Loopback only: the hub (host network) is the only client, and wyoming reads any message size
+# a client announces, so the LAN must not reach it (PR #18 review B2).
+CMD ["--uri", "tcp://127.0.0.1:10201", "--voice", "pl_PL-bass-high", "--data-dir", "/opt/piper/voices"]

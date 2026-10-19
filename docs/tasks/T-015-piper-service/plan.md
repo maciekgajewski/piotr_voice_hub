@@ -99,7 +99,8 @@ deploying (T-022). The running hub, its checkout and Maciej's containers are not
    (`PiperVoice` built from our session, synthesis into an in-memory WAV).
 4. **Compose service `piper`** in `docker-compose.yml`: `network_mode: host`, `gpus: all`,
    `restart: unless-stopped`, `init: true`, json-file logs 5 × 10 MB, a healthcheck with
-   `wyoming_piper.health_check` on 127.0.0.1:10201, `--uri tcp://0.0.0.0:10201`.
+   `wyoming_piper.health_check` on 127.0.0.1:10201, `--uri tcp://127.0.0.1:10201` (loopback
+   only, review B2).
 5. **Port 10201:** `config/hub.example.yaml`, design.md §4 diagram, §7 and §9 port table.
 
 ## Tests
@@ -146,3 +147,33 @@ deploying (T-022). The running hub, its checkout and Maciej's containers are not
 
 A request with another voice name gets a Wyoming `error` (the service serves exactly one
 voice).
+
+## Review 5569806153 (2026-10-19)
+
+- **B1, bounds while serving:** wyoming-piper 2.5.2 synthesizes on its single event-loop
+  thread with no timeout or text cap, and Docker never restarts an unhealthy container. No
+  fork: `install_voice` puts a `GuardedVoice` wrapper into `handler._VOICE` (it exposes
+  `.config` like the real voice). Each `synthesize_wav` call (wyoming-piper calls it once per
+  sentence):
+  - refuses text over `MAX_TEXT_CHARS = 1000` characters with `TextTooLongError`, which
+    wyoming-piper sends to the client as an `error` event (T-016 splits at ≤ 1000, so this is
+    the second guard);
+  - arms a watchdog timer, `SYNTHESIS_TIMEOUT_SECONDS = 30` (191 characters take 0.18 s warm,
+    so 1000 take about 1 s); when it fires it logs CRITICAL and calls `os._exit(1)`;
+  - exits the same way on an onnxruntime run-time error (`Fail`, `RuntimeException`,
+    `EPFail`, `EngineError`): a CUDA error is sticky, and a restart (`unless-stopped`) is the
+    fix. Input errors (`InvalidArgument`, …) and our own errors go back to the client.
+- **B2, loopback:** `--uri tcp://127.0.0.1:10201` in the compose `command` and the Dockerfile
+  `CMD`. The hub and the service both use `network_mode: host`, so the hub's
+  `tts.uri: tcp://127.0.0.1:10201` still reaches it; the LAN does not (wyoming reads any
+  announced message size).
+- **Startup checks:** the imported module must be `onnxruntime.__version__ == "1.26.0"` with
+  `get_device() == "GPU"` (another dist can provide the package). After the warm-up the long
+  sentence is re-timed and must take at most `WARM_LIMIT_SECONDS = 1.0` (0.14–0.18 s
+  measured): a run-time guard against CPU placement.
+- **Licences:** the image contains GPL-3.0 components (piper-tts 1.8.0 and the espeak-ng it
+  bundles; wyoming-piper and wyoming are MIT, the voice Apache-2.0). It is built and run
+  locally and must not be published to a registry without GPL compliance (Dockerfile comment,
+  design §9).
+- Describe/Info lists the whole bundled `voices.json` catalog as installed, though only one
+  voice is served (comment in `install_voice`).

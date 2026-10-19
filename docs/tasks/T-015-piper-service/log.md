@@ -78,3 +78,44 @@
   also exists (`satellites/esphome.py`, the driver's 5 s fetch wait). The README now names
   both, with their files.
 - README row T-015: in review (PR #18).
+- Review 5569806153 (independent reviewer, at 58092db): CHANGES NEEDED, two blockers and
+  nits. Fixed on the same branch:
+  - **B1 (no bound while serving):** `install_voice` now caches a `GuardedVoice` wrapper
+    (exposes `.config`), no fork of wyoming-piper. Per `synthesize_wav` call: text over
+    `MAX_TEXT_CHARS = 1000` is refused with `TextTooLongError` (wyoming-piper sends it as an
+    `error`; the same 1000 as the hub-side cap in T-016, PR #19); a watchdog
+    `threading.Timer(SYNTHESIS_TIMEOUT_SECONDS = 30)` logs CRITICAL and `os._exit(1)`s (warm
+    191 characters take 0.18 s, so 1000 take about 1 s); an onnxruntime run-time error
+    (`Fail`, `RuntimeException`, `EPFail`, `EngineError`) logs CRITICAL and exits, so a sticky
+    CUDA error is restarted by Docker (`unless-stopped`). Input errors (`InvalidArgument`, the
+    phonemizer, ...) still go back to the client. Unit tests: the cap, the timer (injected
+    thresholds and exit), the ORT exit, other errors not exiting, and a subprocess test of the
+    real `os._exit(1)` for both the hang and the ORT error.
+  - **B2 (LAN exposure):** `--uri tcp://127.0.0.1:10201` in the compose `command` and the
+    Dockerfile `CMD`; a unit test checks both, and that piper and the hub both use
+    `network_mode: host`, so the hub's `tts.uri: tcp://127.0.0.1:10201` still reaches it.
+  - Nit 2: startup also checks the imported module: `onnxruntime.__version__ == "1.26.0"` and
+    `get_device() == "GPU"`.
+  - Nit 1: after the warm-up, the long sentence is re-timed (`check_warm`) and startup fails
+    over `WARM_LIMIT_SECONDS = 1.0` (0.14-0.18 s measured), a guard against CPU placement.
+  - Nit 7: the image contains GPL-3.0 piper-tts and espeak-ng; it must not be published to a
+    registry without GPL compliance (Dockerfile comment, plan.md, design §9).
+  - Nit 8: design §4.3 Piper row: the first inference is a one-time CUDA compile (~48 s),
+    cached per container; a restart is healthy in about 5 s.
+  - Nit 9: comment in `install_voice`: Describe/Info lists the whole bundled catalog as
+    installed; its contents are unchanged.
+  - README: the T-020 note records Maciej's decision (no sound, only the `LISTENING` visual
+    for the follow-up-ready state until the P2 firmware adds the real cue); the T-016 note says
+    the service refuses calls over 1000 characters.
+- Live check on piotr, separate compose project `-p piotr-voice-hub-t015`, only our `piper`
+  service (the hub `piotr-voice-hub-hub-1` and Maciej's containers untouched, no exec):
+  - New container → healthy in about 51 s: session 1.21 s, warm-up short 48.37 s (first
+    inference), long 0.15 s, warm check 0.11 s (limit 1 s), "warm in 49.85 s".
+  - `ss -ltnp`: `127.0.0.1:10201` only; a connect to the LAN address 192.168.0.3:10201 is
+    refused.
+  - `tools/piper-gpu-test.sh`: 4 passed, twice. Warm latency unchanged: 41 chars 0.053-0.086 s,
+    191 chars 0.176-0.237 s (before: 0.052-0.084 s and 0.179-0.180 s). A 1064-character text
+    without a sentence end gets `error` `TextTooLongError` (the service logs "refused a
+    synthesis of 1064 characters"), and the next request works; restart count 0.
+  - Stopped and removed (`docker compose -p piotr-voice-hub-t015 down`).
+- `make check` green 3× (547 passed, 5 skipped: the GPU tests).

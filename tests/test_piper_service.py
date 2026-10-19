@@ -2,16 +2,25 @@
 wyoming-piper and the GPU. The real thing is tests/test_piper_gpu.py."""
 
 import importlib.metadata
+import subprocess
+import sys
+import textwrap
 import threading
+import time
 import types
 from pathlib import Path
 from typing import Any, NoReturn
 
 import pytest
+import yaml
+from onnxruntime.capi.onnxruntime_pybind11_state import Fail, InvalidArgument, RuntimeException
 
 from piotr_voice_hub.tts import piper_service as ps
 
 VOICE = "pl_PL-bass-high"
+URI = "tcp://127.0.0.1:10201"
+ROOT = Path(__file__).resolve().parent.parent
+GPU_ORT = types.SimpleNamespace(__version__="1.26.0", get_device=lambda: "GPU")
 
 
 def versions(**installed: str):
@@ -28,7 +37,20 @@ GPU_ONLY = versions(onnxruntime_gpu="1.26.0")
 
 
 def test_install_with_only_onnxruntime_gpu_1_26_passes() -> None:
-    ps.check_install(GPU_ONLY)
+    ps.check_install(GPU_ONLY, GPU_ORT)
+
+
+@pytest.mark.parametrize(("version", "device"), [("1.26.1", "GPU"), ("1.26.0", "CPU")])
+def test_install_check_rejects_another_imported_onnxruntime(version: str, device: str) -> None:
+    # Another dist (onnxruntime-openvino, ort-nightly-gpu, ...) can provide the same package.
+    ort = types.SimpleNamespace(__version__=version, get_device=lambda: device)
+    with pytest.raises(ps.InstallError, match="the imported onnxruntime"):
+        ps.check_install(GPU_ONLY, ort)
+
+
+def test_the_hub_onnxruntime_module_fails_the_module_check() -> None:
+    with pytest.raises(ps.InstallError, match="the imported onnxruntime"):
+        ps.check_install(GPU_ONLY)
 
 
 @pytest.mark.parametrize(
@@ -154,6 +176,156 @@ def test_a_hung_warm_up_exits_the_process() -> None:
     assert codes == [1]
 
 
+def ticking_clock(*times: float):
+    values = iter(times)
+    return lambda: next(values)
+
+
+def test_a_warm_voice_passes_the_warm_check() -> None:
+    seen: list[str] = []
+
+    def synthesize(text: str) -> float:
+        seen.append(text)
+        return 12.0
+
+    took = ps.check_warm(synthesize, clock=ticking_clock(10.0, 10.18))
+    assert took == pytest.approx(0.18)
+    assert seen == [ps.WARMUP_TEXTS[-1]]
+    assert ps.WARM_LIMIT_SECONDS == 1.0
+
+
+def test_a_slow_warm_voice_fails_the_warm_check() -> None:
+    with pytest.raises(RuntimeError, match="not running on the GPU"):
+        ps.check_warm(lambda text: 12.0, limit=1.0, clock=ticking_clock(10.0, 11.5))
+
+
+class FakeVoice:
+    config = types.SimpleNamespace(speaker_id_map={})
+
+    def __init__(self, run: Any = None) -> None:
+        self.calls: list[tuple[str, Any, Any]] = []
+        self.run = run
+
+    def synthesize_wav(self, text: str, wav_file: Any, syn_config: Any = None) -> None:
+        self.calls.append((text, wav_file, syn_config))
+        if self.run is not None:
+            self.run()
+
+
+class ExitRecorder:
+    """A fake `os._exit`. In the watchdog's own thread it must not raise (`raises=False`)."""
+
+    def __init__(self, raises: bool = True) -> None:
+        self.codes: list[int] = []
+        self.called = threading.Event()
+        self.raises = raises
+
+    def __call__(self, code: int) -> Any:
+        self.codes.append(code)
+        self.called.set()
+        if self.raises:
+            raise Exited
+
+
+def test_guarded_voice_passes_calls_and_config_through() -> None:
+    inner = FakeVoice()
+    exits = ExitRecorder(raises=False)
+    voice = ps.GuardedVoice(inner, timeout=0.05, exit_now=exits)
+    voice.synthesize_wav("Dzień dobry.", "writer", "config")
+    assert inner.calls == [("Dzień dobry.", "writer", "config")]
+    assert voice.config is FakeVoice.config
+    time.sleep(0.15)  # the watchdog was cancelled
+    assert exits.codes == []
+
+
+def test_guarded_voice_refuses_text_over_the_cap() -> None:
+    inner = FakeVoice()
+    voice = ps.GuardedVoice(inner, max_chars=10)
+    voice.synthesize_wav("a" * 10, "writer")
+    with pytest.raises(ps.TextTooLongError, match="11 characters, the limit per call is 10"):
+        voice.synthesize_wav("a" * 11, "writer")
+    assert [call[0] for call in inner.calls] == ["a" * 10]
+    assert ps.MAX_TEXT_CHARS == 1000
+    assert ps.SYNTHESIS_TIMEOUT_SECONDS == 30.0
+
+
+def test_a_hung_synthesis_exits_the_process(caplog: pytest.LogCaptureFixture) -> None:
+    exits = ExitRecorder(raises=False)
+
+    def hang() -> None:
+        assert exits.called.wait(5)  # the call "ends" only when the watchdog has fired
+
+    voice = ps.GuardedVoice(FakeVoice(hang), timeout=0.05, exit_now=exits)
+    voice.synthesize_wav("Dzień dobry.", "writer")
+    assert exits.codes == [1]
+    assert "did not finish within 0.05 s" in caplog.text
+
+
+@pytest.mark.parametrize("error", [Fail("CUDA failure 700"), RuntimeException("CUDA error")])
+def test_an_onnxruntime_runtime_error_exits_the_process(error: Exception) -> None:
+    def fail() -> None:
+        raise error
+
+    exits = ExitRecorder()
+    voice = ps.GuardedVoice(FakeVoice(fail), exit_now=exits)
+    with pytest.raises(Exited):
+        voice.synthesize_wav("Dzień dobry.", "writer")
+    assert exits.codes == [1]
+
+
+@pytest.mark.parametrize("error", [InvalidArgument("bad input"), ValueError("phonemizer")])
+def test_other_errors_go_back_to_the_client(error: Exception) -> None:
+    def fail() -> None:
+        raise error
+
+    exits = ExitRecorder()
+    voice = ps.GuardedVoice(FakeVoice(fail), exit_now=exits)
+    with pytest.raises(type(error)):
+        voice.synthesize_wav("Dzień dobry.", "writer")
+    assert exits.codes == []
+
+
+EXIT_SCRIPT = """
+import logging, time
+from onnxruntime.capi.onnxruntime_pybind11_state import Fail
+from piotr_voice_hub.tts import piper_service as ps
+
+class Voice:
+    config = None
+    def synthesize_wav(self, text, wav_file, syn_config=None):
+        if {hang!r}:
+            time.sleep(30)
+        raise Fail("CUDA failure 700: an illegal memory access was encountered")
+
+logging.basicConfig()
+try:
+    ps.GuardedVoice(Voice(), timeout=0.2).synthesize_wav("Dzień dobry.", None)
+finally:
+    print("not exited")
+"""
+
+
+@pytest.mark.parametrize(
+    ("hang", "message"),
+    [(True, "did not finish within 0.2 s"), (False, "onnxruntime failed during a synthesis")],
+    ids=["hang", "onnxruntime-error"],
+)
+def test_the_guard_really_exits_the_process(hang: bool, message: str) -> None:
+    start = time.monotonic()
+    done = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(EXIT_SCRIPT.format(hang=hang))],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert done.returncode == 1
+    assert "CRITICAL:piper_service:" in done.stderr
+    assert message in done.stderr
+    assert "not exited" not in done.stdout  # os._exit: no finally, no cleanup
+    assert time.monotonic() - start < 15
+
+
 def fake_handler() -> types.ModuleType:
     handler = types.ModuleType("wyoming_piper.handler")
     attributes = {"_VOICE": None, "_VOICE_NAME": None, "PiperVoice": object}
@@ -167,7 +339,9 @@ def test_install_voice_fills_the_cache_and_refuses_other_voices() -> None:
     handler = fake_handler()
     voice = object()
     ps.install_voice(handler, voice, VOICE)
-    assert getattr(handler, "_VOICE") is voice  # noqa: B009
+    cached = getattr(handler, "_VOICE")  # noqa: B009
+    assert isinstance(cached, ps.GuardedVoice)
+    assert cached.voice is voice
     assert getattr(handler, "_VOICE_NAME") == VOICE  # noqa: B009
     loader = getattr(handler, "PiperVoice")  # noqa: B009
     with pytest.raises(RuntimeError, match="only the preloaded voice"):
@@ -186,13 +360,13 @@ def test_install_voice_fails_on_another_wyoming_piper(missing: str) -> None:
 
 
 def test_wyoming_argv_uses_cuda_and_never_updates_voices() -> None:
-    argv = ps.wyoming_argv("tcp://0.0.0.0:10201", VOICE, Path("/opt/piper/voices"))
+    argv = ps.wyoming_argv(URI, VOICE, Path("/opt/piper/voices"))
     assert argv == [
         "wyoming-piper",
         "--voice",
         VOICE,
         "--uri",
-        "tcp://0.0.0.0:10201",
+        URI,
         "--data-dir",
         "/opt/piper/voices",
         "--download-dir",
@@ -211,7 +385,7 @@ def voice_dir(tmp_path: Path) -> Path:
 
 
 def args(data_dir: Path) -> list[str]:
-    return ["--uri", "tcp://0.0.0.0:10201", "--voice", VOICE, "--data-dir", str(data_dir)]
+    return ["--uri", URI, "--voice", VOICE, "--data-dir", str(data_dir)]
 
 
 class Recorder:
@@ -247,6 +421,7 @@ class Recorder:
             handler=self.handler,
             serve=self.serve,
             version_of=version_of,
+            ort=GPU_ORT,
             session_factory=self.session,
         )
 
@@ -265,10 +440,11 @@ def test_main_checks_loads_warms_installs_then_serves(tmp_path: Path) -> None:
         f"load {VOICE}.onnx.json session",
         "synthesize",
         "synthesize",
+        "synthesize",  # the warm check
         "serve",
     ]
-    assert getattr(rec.handler, "_VOICE") is rec.voice  # noqa: B009
-    assert rec.argv == ps.wyoming_argv("tcp://0.0.0.0:10201", VOICE, tmp_path)
+    assert getattr(rec.handler, "_VOICE").voice is rec.voice  # noqa: B009
+    assert rec.argv == ps.wyoming_argv(URI, VOICE, tmp_path)
 
 
 def test_main_check_install_only(tmp_path: Path) -> None:
@@ -307,4 +483,18 @@ def test_main_refuses_extra_args_from_the_environment(
 def test_main_requires_uri_voice_and_data_dir() -> None:
     rec = Recorder()
     with pytest.raises(SystemExit):
-        rec.main(["--uri", "tcp://0.0.0.0:10201"])
+        rec.main(["--uri", URI])
+
+
+def test_the_service_listens_on_loopback_only() -> None:
+    # The hub (host network) is the only client; wyoming reads any announced message size, so
+    # the service must not be reachable from the LAN (PR #18 review B2).
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    piper, hub = compose["services"]["piper"], compose["services"]["hub"]
+    assert piper["network_mode"] == hub["network_mode"] == "host"
+    command = piper["command"]
+    assert command[command.index("--uri") + 1] == URI
+    dockerfile = (ROOT / "docker" / "piper.Dockerfile").read_text(encoding="utf-8")
+    assert f'CMD ["--uri", "{URI}",' in dockerfile
+    assert "0.0.0.0" not in dockerfile
+    assert "tcp://127.0.0.1:10201" in (ROOT / "config" / "hub.example.yaml").read_text("utf-8")

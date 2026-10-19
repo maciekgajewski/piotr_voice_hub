@@ -125,7 +125,7 @@ The hub shares the GPU with Ollama (§4.3), but the measured footprint of `large
 | faster-whisper `large-v3-turbo` float16 | **2.1 GB loaded, 2.3 GB peak** (beam 1 and 5, one stream; CUDA context included) | **Measured** in the hub's CUDA 12.8 container, T-003 (2085 / 2289 MiB over an idle GPU). A host-venv run with per-process `nvidia-smi` gave 2.1 / 2.2 GB |
 | faster-whisper `medium` int8_float16 (fallback) | **1.06 GB loaded, 1.13 GB peak** | **Measured** on the host (per-process `nvidia-smi`); not re-measured in the container |
 | Concurrent partials from several satellites | about +0.3–0.5 GB | Estimate. One shared model; extra activation buffers per in-flight decode |
-| Piper `pl_PL-bass-high` on CUDA (wyoming-piper) | **0.3 GB loaded, 1.2 GB peak** | **Measured**, T-003: onnxruntime-gpu 1.26.0, the real voice model, 400 random phoneme ids (about 11 s of audio). The first inference took 48 s (cuDNN algorithm search) and later ones 0.1 s, so Piper needs a warm-up at startup |
+| Piper `pl_PL-bass-high` on CUDA (wyoming-piper) | **0.3 GB loaded, 1.2 GB peak** | **Measured**, T-003: onnxruntime-gpu 1.26.0, the real voice model, 400 random phoneme ids (about 11 s of audio). The first inference is a one-time CUDA compile for sm_120 (about 48 s, cached per container; measured in T-015, not the cuDNN algorithm search) and later ones take 0.1 s, so Piper warms up before it listens; a restart of the same container is healthy in about 5 s |
 | ECAPA speaker recognition | **0 GB** (CPU) | Decision: keep today's `--device cpu` default. ECAPA is about 20M parameters, so a few seconds of audio embed quickly on the Ryzen 5 5600. On CUDA it would cost about 0.4–0.7 GB, mostly CUDA context (estimate) |
 | **Hub total** | **about 4 GB** (3.8–4.0 GB: hub process 2.6–2.8 GB with partials, plus Piper 1.2 GB) | The driver also reserves 0.46 GB of the device. That leaves about 11.8 GB for Ollama when it runs |
 
@@ -262,7 +262,7 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
 
 - **One compose file, three services**, all `network_mode: host` and `restart: unless-stopped`. Host networking lets satellites fetch the playback stream from the host IP. `.local` names are resolved by aioesphomeapi itself (zeroconf), so no Avahi or `libnss-mdns` is needed in the image (T-012). P0 (T-012) has the `hub` service only.
   - `hub` (CUDA 12.8 base, GPU): `docker/hub.Dockerfile` (adapted from the old `docker/ai-server.Dockerfile`), with only the hub's dependencies. It runs as the config owner's uid, so the config stays mode 600. It uses CPU `onnxruntime` (Silero, via faster-whisper) and must never also install `onnxruntime-gpu`.
-  - `piper` (GPU, wyoming-piper `--use-cuda`, T-015): `docker/piper.Dockerfile`, on port 10201. The image installs only `onnxruntime-gpu` (1.26.0), not `onnxruntime` too (the old `piotr-wyoming-piper` container has both, so it runs on CPU), and the build fails otherwise. The voice is baked in, pinned by revision and SHA-256. The service creates the voice's session itself (CUDA EP, HEURISTIC cuDNN search), fails unless CUDA is its first provider (onnxruntime otherwise falls back to CPU silently), and warms up before it listens.
+  - `piper` (GPU, wyoming-piper `--use-cuda`, T-015): `docker/piper.Dockerfile`, on port 10201. The image installs only `onnxruntime-gpu` (1.26.0), not `onnxruntime` too (the old `piotr-wyoming-piper` container has both, so it runs on CPU), and the build fails otherwise. The voice is baked in, pinned by revision and SHA-256. The service creates the voice's session itself (CUDA EP, HEURISTIC cuDNN search), fails unless CUDA is its first provider (onnxruntime otherwise falls back to CPU silently), and warms up before it listens. It listens on 127.0.0.1 only (the hub is its only client). While serving, each synthesis call is capped at 1000 characters (an `error` back to the client) and bounded at 30 s; a call over the bound or an onnxruntime run-time error exits the process, so Docker restarts it. The image contains GPL-3.0 components (piper-tts, espeak-ng): it is built locally and must not be published to a registry without GPL compliance.
   - `speaker-recognition` (CPU): from `docker-compose.speaker-recognition.yml`, unchanged `--device cpu`.
 - **Ollama coexists.** It keeps running on the host for unrelated tasks and is *not* in the hub's compose file. The two share the GPU within the budget in §4.3.
 - **Ports:**
@@ -272,7 +272,7 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
   | 8750 | API |
   | 8751 | Playback HTTP |
   | 2140 | Speaker recognition |
-  | 10201 | Piper (ours, T-015; the old project's Piper keeps 10200) |
+  | 10201 | Piper (ours, T-015, 127.0.0.1 only; the old project's Piper keeps 10200) |
   | 6053 | Outbound to satellites |
 
   The hub binds the API on all interfaces (`api.host: 0.0.0.0`, host network) and has no auth; the LAN/Tailscale perimeter (no port forwarding from the internet) is the security boundary.
