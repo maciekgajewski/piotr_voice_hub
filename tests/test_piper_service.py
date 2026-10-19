@@ -359,6 +359,49 @@ def test_install_voice_fails_on_another_wyoming_piper(missing: str) -> None:
         ps.install_voice(handler, object(), VOICE)
 
 
+def catalog_info(*names: str) -> types.SimpleNamespace:
+    voices = [types.SimpleNamespace(name=name) for name in names]
+    return types.SimpleNamespace(tts=[types.SimpleNamespace(voices=voices)])
+
+
+def fake_server(*names: str) -> types.ModuleType:
+    server = types.ModuleType("wyoming_piper.__main__")
+    calls: list[tuple[Any, ...]] = []
+
+    def piper_info(*args: Any) -> types.SimpleNamespace:
+        calls.append(args)
+        return catalog_info(*names)  # a fresh Info per call, as wyoming-piper builds it
+
+    setattr(server, ps.SERVER_INFO_ATTRIBUTE, piper_info)
+    setattr(server, "calls", calls)  # noqa: B010
+    return server
+
+
+def advertised(server: types.ModuleType) -> list[str]:
+    info = getattr(server, ps.SERVER_INFO_ATTRIBUTE)("args", {"voices": "info"})
+    return [voice.name for program in info.tts for voice in program.voices]
+
+
+def test_describe_lists_only_the_served_voice() -> None:
+    server = fake_server("en_US-lessac-medium", VOICE, "pl_PL-gosia-medium")
+    ps.advertise_only(server, VOICE)
+    assert advertised(server) == [VOICE]
+    assert advertised(server) == [VOICE]  # on every Describe, not only the first
+    assert getattr(server, "calls") == [("args", {"voices": "info"})] * 2  # noqa: B009
+
+
+def test_a_voice_missing_from_the_info_fails() -> None:
+    server = fake_server("en_US-lessac-medium", "pl_PL-gosia-medium")
+    ps.advertise_only(server, VOICE)
+    with pytest.raises(RuntimeError, match="Describe would list"):
+        advertised(server)
+
+
+def test_advertise_only_fails_on_another_wyoming_piper() -> None:
+    with pytest.raises(RuntimeError, match="not the pinned wyoming-piper"):
+        ps.advertise_only(types.ModuleType("wyoming_piper.__main__"), VOICE)
+
+
 def test_wyoming_argv_uses_cuda_and_never_updates_voices() -> None:
     argv = ps.wyoming_argv(URI, VOICE, Path("/opt/piper/voices"))
     assert argv == [
@@ -393,6 +436,7 @@ class Recorder:
         self.steps: list[str] = []
         self.voice = object()
         self.handler = fake_handler()
+        self.server = fake_server("en_US-lessac-medium", VOICE)
         self.argv: list[str] = []
 
     def session(self, model: Path) -> str:
@@ -419,6 +463,7 @@ class Recorder:
             load_voice=self.load_voice,
             synthesize=self.synthesize,
             handler=self.handler,
+            server=self.server,
             serve=self.serve,
             version_of=version_of,
             ort=GPU_ORT,
@@ -444,6 +489,7 @@ def test_main_checks_loads_warms_installs_then_serves(tmp_path: Path) -> None:
         "serve",
     ]
     assert getattr(rec.handler, "_VOICE").voice is rec.voice  # noqa: B009
+    assert advertised(rec.server) == [VOICE]
     assert rec.argv == ps.wyoming_argv(URI, VOICE, tmp_path)
 
 

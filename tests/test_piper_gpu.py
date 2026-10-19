@@ -136,6 +136,25 @@ def first_event(synthesize: dict) -> tuple[str, dict]:
     return asyncio.run(asyncio.wait_for(request(), TIMEOUT_SECONDS))
 
 
+def test_describe_lists_only_the_served_voice() -> None:
+    async def describe() -> tuple[str, dict]:
+        uri = urlparse(URI)
+        assert uri.hostname and uri.port
+        reader, writer = await asyncio.open_connection(uri.hostname, uri.port)
+        try:
+            writer.write(json.dumps({"type": "describe"}).encode() + b"\n")
+            await writer.drain()
+            kind, data, _ = await read_event(reader)
+            return kind, data
+        finally:
+            writer.close()
+
+    kind, data = asyncio.run(asyncio.wait_for(describe(), TIMEOUT_SECONDS))
+    assert kind == "info"
+    voices = [voice["name"] for program in data["tts"] for voice in program["voices"]]
+    assert voices == ["pl_PL-bass-high"]
+
+
 def test_another_voice_is_refused_without_a_download() -> None:
     kind, data = first_event({"text": SHORT, "voice": {"name": "en_US-lessac-medium"}})
     assert kind == "error"

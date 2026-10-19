@@ -37,6 +37,7 @@ if __name__ == "__main__":
             load_voice=load_voice,
             synthesize=synthesize,
             handler=wyoming_handler,
+            server=wyoming_main,
             serve=wyoming_main.run,
         )
     )

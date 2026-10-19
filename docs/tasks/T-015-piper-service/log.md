@@ -119,3 +119,17 @@
     synthesis of 1064 characters"), and the next request works; restart count 0.
   - Stopped and removed (`docker compose -p piotr-voice-hub-t015 down`).
 - `make check` green 3× (547 passed, 5 skipped: the GPU tests).
+- Follow-up decided on PR #18 (manager): Describe lists only the served voice, so the hub's
+  startup describe check (T-016) fails on a wrong `tts.voice`. No fork: `advertise_only`
+  wraps `wyoming_piper.__main__._piper_info` (wyoming-piper builds Info with it once at
+  startup and on every Describe, looked up in the module), keeps only the configured voice
+  and fails startup if the Info would not list exactly that voice. The nit-9 comment is
+  replaced; plan.md and design §9 updated. Unit tests: only the configured voice on every
+  Describe, a voice missing from the Info fails, another wyoming-piper fails, and `main()`
+  installs the filter. `tests/test_piper_gpu.py` gained a Describe test.
+- Live re-check on piotr (`-p piotr-voice-hub-t015`, only `piper`; hub and Maciej's
+  containers untouched): healthy (warm in 49.65 s, warm check 0.11 s), `127.0.0.1:10201`
+  only; `tools/piper-gpu-test.sh` 5 passed: Describe lists exactly `["pl_PL-bass-high"]`,
+  synthesis works (41 chars 0.027-0.087 s, 191 chars 0.175-0.183 s), the other-voice and
+  over-1000-character `error`s as before; restart count 0. Stopped and removed (`down`).
+- `make check` green 3× (550 passed, 6 skipped: the GPU tests).

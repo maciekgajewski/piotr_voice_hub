@@ -175,5 +175,8 @@ voice).
   bundles; wyoming-piper and wyoming are MIT, the voice Apache-2.0). It is built and run
   locally and must not be published to a registry without GPL compliance (Dockerfile comment,
   design §9).
-- Describe/Info lists the whole bundled `voices.json` catalog as installed, though only one
-  voice is served (comment in `install_voice`).
+- Describe/Info listed the whole bundled `voices.json` catalog as installed, though only one
+  voice is served. **Decided after review (manager, 2026-10-19):** Describe lists only the
+  served voice (`advertise_only` wraps `wyoming_piper.__main__._piper_info`, no fork), so the
+  hub's startup describe check (T-016) fails on a wrong `tts.voice`; startup fails if the voice
+  is not in the Info.

@@ -18,7 +18,8 @@ Before wyoming-piper serves anything, `main()`:
    only when warm; then re-times the long sentence and fails if it is not fast (CPU placement);
 4. hands the voice to wyoming-piper's one-voice cache, wrapped in `GuardedVoice` (a text cap,
    a watchdog per synthesis, exit on an onnxruntime run-time error), and makes any other voice
-   fail before it is downloaded or loaded (the voice is baked into the image, pinned);
+   fail before it is downloaded or loaded (the voice is baked into the image, pinned), and
+   makes Describe list only that voice (so a client asking for another one fails its check);
 5. runs wyoming-piper with `--use-cuda` and without `--update-voices`.
 
 Any failure at startup raises, so the process exits 1 and Docker restarts it. While serving,
@@ -77,6 +78,8 @@ SYNTHESIS_TIMEOUT_SECONDS = 30.0
 ORT_RUNTIME_ERRORS = (Fail, RuntimeException, EPFail, EngineError)
 # wyoming-piper 2.5.2 internals this module relies on (checked at startup).
 HANDLER_ATTRIBUTES = ("_VOICE", "_VOICE_NAME", "PiperVoice", "ensure_voice_exists")
+# wyoming_piper.__main__: builds the Describe answer (Info) from the bundled catalog.
+SERVER_INFO_ATTRIBUTE = "_piper_info"
 WYOMING_PIPER_ARGS_ENV = "WYOMING_PIPER_ARGS"
 
 logger = logging.getLogger("piper_service")
@@ -270,11 +273,8 @@ def refuse_download(name: str, *args: object, **kwargs: object) -> NoReturn:
 
 def install_voice(handler: ModuleType, voice: object, name: str) -> None:
     """Put the warmed voice, wrapped in `GuardedVoice`, into wyoming-piper's one-voice cache;
-    any other voice fails before wyoming-piper downloads or loads it.
-
-    Note: Describe (wyoming-piper's Info) still lists the whole bundled voices.json catalog as
-    installed, though only this voice is served; the hub asks for a fixed voice, so do not
-    trust that list."""
+    any other voice fails before wyoming-piper downloads or loads it. Describe lists only this
+    voice too (`advertise_only`)."""
     missing = [attr for attr in HANDLER_ATTRIBUTES if not hasattr(handler, attr)]
     if missing:
         raise RuntimeError(
@@ -284,6 +284,31 @@ def install_voice(handler: ModuleType, voice: object, name: str) -> None:
     setattr(handler, "_VOICE_NAME", name)  # noqa: B010
     setattr(handler, "PiperVoice", OnlyThePreloadedVoice)  # noqa: B010
     setattr(handler, "ensure_voice_exists", refuse_download)  # noqa: B010
+
+
+def advertise_only(server: ModuleType, name: str) -> None:
+    """Make wyoming-piper's Describe answer (Info) list only the served voice, not its whole
+    bundled voices.json catalog, so a client's describe check fails on a wrong voice name.
+
+    wyoming-piper 2.5.2 builds Info with `__main__._piper_info(args, voices_info)`, once at
+    startup and again on every Describe; both calls look the name up in the module, so this
+    wraps it there. If the voice is not in the Info at all, startup fails."""
+    if not hasattr(server, SERVER_INFO_ATTRIBUTE):
+        raise RuntimeError(
+            f"{server.__name__} has no {SERVER_INFO_ATTRIBUTE}: not the pinned wyoming-piper 2.5.2"
+        )
+    build_info = getattr(server, SERVER_INFO_ATTRIBUTE)
+
+    def only_the_served_voice(*args: Any, **kwargs: Any) -> Any:
+        info = build_info(*args, **kwargs)
+        for program in info.tts:
+            program.voices = [voice for voice in program.voices if voice.name == name]
+        advertised = [voice.name for program in info.tts for voice in program.voices]
+        if advertised != [name]:
+            raise RuntimeError(f"Describe would list {advertised}, not exactly {name!r}")
+        return info
+
+    setattr(server, SERVER_INFO_ATTRIBUTE, only_the_served_voice)
 
 
 def wyoming_argv(uri: str, voice: str, data_dir: Path) -> list[str]:
@@ -323,6 +348,7 @@ def main(
     load_voice: Callable[[Path, Any], Any],
     synthesize: Callable[[Any, str], float],
     handler: ModuleType,
+    server: ModuleType,
     serve: Callable[[], None],
     version_of: Callable[[str], str] = importlib.metadata.version,
     ort: Any = onnxruntime,
@@ -349,6 +375,7 @@ def main(
     warm_up(lambda text: synthesize(voice, text))
     check_warm(lambda text: synthesize(voice, text))
     install_voice(handler, voice, args.voice)
+    advertise_only(server, args.voice)
     logger.info("warm in %.2f s; serving on %s", time.monotonic() - start, args.uri)
     sys.argv = wyoming_argv(args.uri, args.voice, args.data_dir)
     serve()
