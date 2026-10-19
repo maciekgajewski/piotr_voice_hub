@@ -20,6 +20,9 @@ services:
     stop_grace_period: 30s  # shutdown is bounded: run() 10 s, sessions 3 s, API 5 s
     network_mode: host  # satellites on the LAN, .local names via zeroconf; API on api.port
     gpus: all
+    # The hub checks Piper at startup and exits 1 without it (T-016); wait for it to be warm.
+    depends_on:
+      piper: {condition: service_healthy}
     user: "${HUB_USER:?set HUB_USER=$(id -u):$(id -g), the owner of HUB_CONFIG}"
     volumes:
       - type: bind
@@ -48,8 +51,9 @@ services:
   # T-015: the hub's own wyoming-piper on the GPU (docker/piper.Dockerfile), on port 10201
   # (`tts.uri`), next to the old project's Piper on 10200. It warms the voice up before it
   # listens, so healthy means warm. It listens on 127.0.0.1 only: the hub, also on the host
-  # network, is its only client, and wyoming has no limit on a message's size. Start it alone with `docker compose up -d --build piper`
-  # (compose still needs HUB_CONFIG and HUB_USER set to read this file).
+  # network, is its only client, and wyoming has no limit on a message's size. Start it alone
+  # with `docker compose up -d --build piper` (compose still needs HUB_CONFIG and HUB_USER set
+  # to read this file).
   piper:
     build:
       context: .

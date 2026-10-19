@@ -34,7 +34,7 @@ thing Maciej can hear on hardware (after T-017).
 | Task | Scope | Depends on | Status |
 | --- | --- | --- | --- |
 | T-015 piper-service | The hub's own `wyoming-piper` compose service on the GPU (port 10201): an image with only `onnxruntime-gpu` 1.26.0 (no `onnxruntime`), the voice pinned by revision and hash, a CUDA-first provider check (no silent CPU fallback), HEURISTIC cuDNN algorithm search, warm-up before it listens; smoke test on piotr | T-003, T-012 | in review (PR #18) |
-| T-016 tts-client | `tts/`: Wyoming Piper client (old `PiperTextToSpeech.synthesize`), streamed PCM chunks, a timeout on every wait, a text-length cap per call; warm-up at hub startup before arming | T-004, T-015 | planned |
+| T-016 tts-client | `tts/`: Wyoming Piper client (old `PiperTextToSpeech.synthesize`), streamed PCM chunks, a timeout on every wait, a text-length cap per call; warm-up at hub startup before arming | T-004, T-015 | in review (PR #19) |
 | T-017 speak-release | API commands `speak` and `release` (`ack`/`error`) for a satellite in `PROCESSING`; session plays TTS through T-014 (`speaking` state, `playback_finished`, re-arm) with a bound on `PlaybackBegin` → `PlaybackEnd`; anything else is `busy` | T-014, T-016 | planned |
 | T-018 speaker-hint | Speaker-recognition service in the compose file (port 2141) and the HTTP client (`speaker/`); `transcript_final` carries `speaker` | T-012; can run in parallel with T-015–T-017 | planned |
 | T-019 announce-busy-stop | `speak` to an idle satellite (announcement: stop listening, play, re-arm), the full busy policy (design §6), and `stop` | T-017 | planned |
@@ -78,10 +78,10 @@ Task notes (they go into each task's plan.md):
     Both are configurable.
 - **T-016 (warm-up):** **decided:** the Piper service warms itself before it listens (T-015),
   so the hub's startup step is only a reachability check: a Wyoming `describe` → `info` round
-  trip, bounded, before any satellite is armed. A failure exits 1. The text cap: split long
-  text at sentence ends into calls of at most N characters, so every call has a bounded
-  length. The service refuses a call over 1000 characters (T-015, `MAX_TEXT_CHARS`), so
-  N ≤ 1000.
+  trip, bounded, before any satellite is armed. A failure exits 1. The text cap: **decided
+  (T-016 brief, design.md is silent):** reject text over the cap (1000 characters) with a
+  clear error, no splitting; wyoming-piper still splits each call into sentences. The same
+  limit as the service's own refusal (T-015, `MAX_TEXT_CHARS`).
 - **T-017 hardware checklist:** the first audible reply. Includes the T-014 playback-end
   comparison below.
 - **T-018 (ports):** listen on 2141 (decided above); T-018 updates design.md §7, §9 and
@@ -183,3 +183,9 @@ Not numbered yet: firmware trimmed to continuous mode and reflashed (including t
   uses a low rate (PR #16 re-review 5569307179). This is the close, not the 5 s request read
   (`REQUEST_READ_TIMEOUT_SECONDS`, `hub/playback_http.py`) or the driver's 5 s fetch wait
   (`STREAM_REQUEST_TIMEOUT_SECONDS`, `satellites/esphome.py`); neither depends on the rate.
+- **P1 → T-022 (or the P2 soak): measure the wake miss rate.** Maciej's live test on the
+  deployed hub (main 48b5f70, voice-pe-02 and voice-pe-03, 2026-10-19) passed: most
+  "Ryszardzie" utterances woke it and nothing woke it falsely, but the misses were not
+  counted (T-010 log). Count them over a fixed set of utterances per satellite (and the false
+  wakes over a quiet period) in T-022's acceptance run, or in the 72 h soak if T-022 has no
+  room.

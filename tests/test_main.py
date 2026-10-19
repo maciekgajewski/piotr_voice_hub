@@ -5,12 +5,14 @@ import logging
 import os
 import signal
 import time
+from typing import Any
 
 import pytest
 
 from piotr_voice_hub.hub import main as main_module
-from piotr_voice_hub.hub.main import EXIT_FAILED, EXIT_OK, run_until_signal, serve
+from piotr_voice_hub.hub.main import EXIT_FAILED, EXIT_OK, check_tts, run_until_signal, serve
 from piotr_voice_hub.hub.watchdog import Watchdog
+from piotr_voice_hub.tts.interfaces import TtsError
 
 TIMEOUT = 2.0
 
@@ -270,3 +272,43 @@ def test_the_watchdog_runs_with_the_hub_and_stops_after_cleanup() -> None:
     assert beats and not fired
     assert not watchdog._thread.is_alive()
     assert_ordered_shutdown(log.calls)
+
+
+class FakeTts:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.started = 0
+
+    async def start(self) -> None:
+        self.started += 1
+        if self.error is not None:
+            raise self.error
+
+    def synthesize(self, text: str) -> Any:
+        raise AssertionError("not used at startup")
+
+
+def test_the_tts_check_passes_when_piper_describes_the_voice() -> None:
+    tts = FakeTts()
+    assert asyncio.run(check_tts(tts)) is True
+    assert tts.started == 1
+
+
+def test_a_wrong_voice_fails_the_tts_check_with_a_critical_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    error = TtsError(
+        "tts.voice is 'pl_PL-gosia-medium', but Piper at 127.0.0.1:10201 "
+        "describes ['pl_PL-bass-high']"
+    )
+    assert asyncio.run(check_tts(FakeTts(error))) is False
+    record = caplog.records[-1]
+    assert record.levelno == logging.CRITICAL
+    assert "TTS startup check failed, exiting" in record.getMessage()
+    assert "pl_PL-gosia-medium" in record.getMessage()
+    assert "['pl_PL-bass-high']" in record.getMessage()
+
+
+def test_other_errors_in_the_tts_check_propagate() -> None:
+    with pytest.raises(LookupError):
+        asyncio.run(check_tts(FakeTts(LookupError())))
