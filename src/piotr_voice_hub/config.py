@@ -280,13 +280,24 @@ def _parse_tts(raw: dict[str, Any]) -> TtsConfig:
 
 
 def parse_tcp_uri(uri: str) -> tuple[str, int]:
-    """`tcp://host:port` → (host, port); anything else is a ValueError."""
+    """`tcp://host:port` → (host, port); anything else is a ValueError. A URI with user info
+    is rejected without echoing it (it may hold a password)."""
     parts = urlsplit(uri)
+    if "@" in parts.netloc:
+        raise ValueError("expected tcp://host:port, without user info")
     try:
         port = parts.port
     except ValueError as error:
         raise ValueError(f"{uri!r}: {error}") from None
-    if parts.scheme != "tcp" or not parts.hostname or port is None or parts.path not in ("", "/"):
+    if (
+        parts.scheme != "tcp"
+        or not parts.hostname
+        or port is None
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
+        or uri.endswith(("?", "#"))
+    ):
         raise ValueError(f"{uri!r}: expected tcp://host:port")
     return parts.hostname, port
 

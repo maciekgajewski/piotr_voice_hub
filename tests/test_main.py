@@ -12,7 +12,7 @@ import pytest
 from piotr_voice_hub.hub import main as main_module
 from piotr_voice_hub.hub.main import EXIT_FAILED, EXIT_OK, check_tts, run_until_signal, serve
 from piotr_voice_hub.hub.watchdog import Watchdog
-from piotr_voice_hub.tts.interfaces import TtsError
+from piotr_voice_hub.tts.interfaces import TtsError, TtsUnavailableError
 
 TIMEOUT = 2.0
 
@@ -312,3 +312,82 @@ def test_a_wrong_voice_fails_the_tts_check_with_a_critical_message(
 def test_other_errors_in_the_tts_check_propagate() -> None:
     with pytest.raises(LookupError):
         asyncio.run(check_tts(FakeTts(LookupError())))
+
+
+class SequenceTts(FakeTts):
+    """Raises the given errors in turn, then succeeds."""
+
+    def __init__(self, *errors: Exception) -> None:
+        super().__init__()
+        self.errors = list(errors)
+
+    async def start(self) -> None:
+        self.started += 1
+        if self.errors:
+            raise self.errors.pop(0)
+
+
+class FakeTime:
+    def __init__(self) -> None:
+        self.now = 100.0
+        self.sleeps: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def check(tts: FakeTts, fake_time: FakeTime, **kwargs: float) -> bool:
+    return asyncio.run(check_tts(tts, clock=fake_time.clock, sleep=fake_time.sleep, **kwargs))
+
+
+def test_the_tts_check_waits_for_an_unreachable_piper(caplog: pytest.LogCaptureFixture) -> None:
+    refused = TtsUnavailableError("connect to 127.0.0.1:10201 failed: ConnectionRefusedError")
+    tts = SequenceTts(refused, refused, refused)
+    fake_time = FakeTime()
+    with caplog.at_level(logging.INFO):
+        assert check(tts, fake_time) is True
+    assert tts.started == 4
+    assert fake_time.sleeps == [main_module.TTS_STARTUP_RETRY_SECONDS] * 3
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert [w.getMessage().split(":")[0] for w in warnings] == [
+        "waiting for Piper (attempt 1, 0 s of 120 s)",
+        "waiting for Piper (attempt 2, 2 s of 120 s)",
+        "waiting for Piper (attempt 3, 4 s of 120 s)",
+    ]
+    assert "Piper reachable after 4 attempts, 6.0 s" in caplog.text
+    assert not [r for r in caplog.records if r.levelno == logging.CRITICAL]
+
+
+def test_the_tts_check_gives_up_after_its_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    refused = TtsUnavailableError("connect failed")
+    tts = SequenceTts(*[refused] * 100)
+    fake_time = FakeTime()
+    assert check(tts, fake_time, retry_seconds=2.0, timeout_seconds=10.0) is False
+    assert tts.started == 6  # at 0, 2, 4, 6, 8 and 10 s; a seventh at 12 s is past the bound
+    assert sum(fake_time.sleeps) == 10.0
+    record = caplog.records[-1]
+    assert record.levelno == logging.CRITICAL
+    assert record.getMessage() == (
+        "TTS startup check failed, exiting: Piper not reachable within 10 s (6 attempts): "
+        "connect failed"
+    )
+
+
+def test_a_wrong_voice_after_waiting_is_critical_at_once(caplog: pytest.LogCaptureFixture) -> None:
+    wrong = TtsError("tts.voice is 'x', but Piper at 127.0.0.1:10201 describes ['y']")
+    tts = SequenceTts(TtsUnavailableError("refused"), wrong)
+    fake_time = FakeTime()
+    assert check(tts, fake_time) is False
+    assert tts.started == 2
+    assert fake_time.sleeps == [main_module.TTS_STARTUP_RETRY_SECONDS]
+    assert caplog.records[-1].levelno == logging.CRITICAL
+    assert "describes ['y']" in caplog.records[-1].getMessage()
+
+
+def test_the_tts_check_defaults() -> None:
+    assert main_module.TTS_STARTUP_RETRY_SECONDS == 2.0
+    assert main_module.TTS_STARTUP_TIMEOUT_SECONDS == 120.0

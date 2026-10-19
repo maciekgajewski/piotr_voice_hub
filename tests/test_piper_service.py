@@ -395,6 +395,42 @@ def test_the_guard_really_exits_the_process(hang: bool, expected: list[str]) -> 
     assert time.monotonic() - start < 15
 
 
+DISARM_SCRIPT = """
+import faulthandler, logging, time
+from piotr_voice_hub.tts import piper_service as ps
+
+calls = []
+real_cancel = faulthandler.cancel_dump_traceback_later
+
+def cancel():
+    calls.append("cancel")
+    real_cancel()
+
+class Voice:
+    config = None
+    def synthesize_wav(self, text, wav_file, syn_config=None):
+        pass  # a fast, successful synthesis
+
+logging.basicConfig()
+ps.GuardedVoice(Voice(), timeout=0.2, disarm=cancel).synthesize_wav("Dzień dobry.", None)
+time.sleep(0.6)  # three times the watchdog's timeout
+print("alive", calls)
+"""
+
+
+def test_the_real_watchdog_is_disarmed_after_a_successful_synthesis() -> None:
+    done = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(DISARM_SCRIPT)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "alive ['cancel']" in done.stdout
+    assert "Timeout" not in done.stderr
+
+
 def fake_handler() -> types.ModuleType:
     handler = types.ModuleType("wyoming_piper.handler")
     attributes = {"_VOICE": None, "_VOICE_NAME": None, "PiperVoice": object}

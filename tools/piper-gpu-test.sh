@@ -1,6 +1,7 @@
 #!/bin/bash
-# T-015/T-016: run the Piper integration tests (the service, and the hub's client) against the running `piper` service
-# (docker compose up -d --build piper; it listens on 10201 once warm).
+# T-015/T-016: run the Piper integration tests (the service, and the hub's client) against
+# the running `piper` service (docker compose up -d --build piper; it listens on 10201 once
+# warm).
 # Usage: tools/piper-gpu-test.sh [tcp://127.0.0.1:10201]
 set -euo pipefail
 
