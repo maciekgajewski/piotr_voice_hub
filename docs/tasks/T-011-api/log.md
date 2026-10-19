@@ -28,3 +28,35 @@
 - box3-office host fixed in `config/hub.example.yaml` and design.md §7
   (`piotr-box3-01-cbfaA8.local`); README carry-forward records it as done, plus a T-012 item for
   wiring the API.
+
+## 2026-10-19: PR #13 review 5568211407
+
+- Confirmed by the review: snapshot on connect, `/healthz`, client messages discarded in P0,
+  `websockets.server` logger level left to T-012.
+- **B1:** `MAX_CLIENTS = 16`. `_route` returns HTTP 503 for the 17th `/ws` request, before the
+  handshake. A slot is held from admission until `connection.wait_closed()` returns (one watcher
+  task per connection), so handshakes in flight count and a failed handshake frees its slot.
+  Test: 16 connected, the 17th gets 503, `/healthz` still answers, a slot frees after a
+  disconnect, and all 16 then receive events.
+- **B2:** `open_timeout` 3 s. `close()` waits 4 s for the 1001 closes, then aborts every
+  connection in `server.handlers` (websockets' `close()` skips handshaking ones and
+  `server.connections` lists only open ones), then waits at most 1 s more: 5 s in total.
+  Tests: a TCP client that never sends its request is dropped at `open_timeout`; with such a
+  client connected `close()` takes the abort path, finishes within grace + abort, and leaves
+  no tasks. Swapping `server.handlers` for `server.connections` makes that test fail.
+- **Also bounded: a blocked send.** Reading websockets 15: its keepalive ping, sent while the
+  connection is open, waits for the same full socket buffer, so it does not bound a stuck
+  `send()`. Added `SEND_TIMEOUT_SECONDS = 10`: a send blocked that long drops the client as too
+  slow (test with a client that never reads and fewer events than the queue).
+- **N4:** the 2 s bound on the 1008 close is not redundant. Without it, a slow client that never
+  reads kept its connection open 20.0 s after the drop (probe on piotr; closed only when the
+  keepalive fired), with it 2.0 s. websockets' `close_timeout` only covers waiting for the
+  peer's close frame. The comment says so and a new test fails without the bound.
+- **N1, N6:** design.md §6 and plan.md: ordering is per connection (a mid-utterance joiner may
+  see partials or the final without the wake), the 16-client cap, the slow-client rule, and
+  `/healthz` is liveness (200 even with every satellite offline).
+- **N2** comment on `send()`'s bounds; **N3** `assert_never` in `event_message`; **N5** one
+  `_statuses` dict of (event, message).
+- **N7:** the PR #13 CI annotation was a GitHub notice, not ours: "The ubuntu-latest label will
+  migrate to Ubuntu 26 beginning October 19, 2026" (actions/runner-images#14748). Pinned
+  `runs-on: ubuntu-24.04` so the CI image does not change under us.

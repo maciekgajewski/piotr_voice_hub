@@ -434,9 +434,9 @@ async def _test_close_sends_going_away_and_releases_the_port() -> None:
 def test_close_is_bounded_with_a_stuck_client(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setattr(api_module, "SHUTDOWN_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(api_module, "SHUTDOWN_GRACE_SECONDS", 0.3)
     asyncio.run(_test_close_is_bounded_with_a_stuck_client())
-    assert "clients did not close in time; aborting them" in caplog.text
+    assert "1 connections did not close in time; aborting" in caplog.text
 
 
 async def _test_close_is_bounded_with_a_stuck_client() -> None:
@@ -450,7 +450,129 @@ async def _test_close_is_bounded_with_a_stuck_client() -> None:
     loop = asyncio.get_running_loop()
     started = loop.time()
     await server.close()
-    assert loop.time() - started < 0.3 + 1.0
+    assert loop.time() - started < 0.3 + api_module.SHUTDOWN_ABORT_SECONDS
     assert server.client_count == 0
     await until_closed_by_server(stuck)
     await assert_no_tasks_left()
+
+
+async def silent_client(server: ApiServer) -> socket.socket:
+    """A TCP connection that never sends its HTTP request."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setblocking(False)
+    await asyncio.get_running_loop().sock_connect(sock, ("127.0.0.1", server.port))
+    return sock
+
+
+def test_a_handshake_that_never_completes_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api_module, "OPEN_TIMEOUT_SECONDS", 0.2)
+    asyncio.run(_test_a_handshake_that_never_completes_is_dropped())
+
+
+async def _test_a_handshake_that_never_completes_is_dropped() -> None:
+    async with running_server() as server:
+        sock = await silent_client(server)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await until_closed_by_server(sock)
+        assert 0.15 < loop.time() - started < 0.2 + 1.0
+
+
+def test_close_is_bounded_with_a_connection_that_never_sends_its_request(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # OPEN_TIMEOUT_SECONDS (3 s) is longer than the grace: the abort path must end it.
+    monkeypatch.setattr(api_module, "SHUTDOWN_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(api_module, "SHUTDOWN_ABORT_SECONDS", 0.5)
+    asyncio.run(_test_close_is_bounded_with_a_connection_that_never_sends_its_request())
+    assert "1 connections did not close in time; aborting" in caplog.text
+
+
+async def _test_close_is_bounded_with_a_connection_that_never_sends_its_request() -> None:
+    server = ApiServer("127.0.0.1", 0, Clock())
+    await server.start()
+    sock = await silent_client(server)
+    async with connect(url(server)) as client:
+        await until(lambda: server.client_count == 1)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await server.close()
+        assert loop.time() - started < 0.2 + 0.5
+        with pytest.raises(ConnectionClosed) as closed:
+            await client.recv()
+        assert closed.value.rcvd is not None and closed.value.rcvd.code == 1001
+    await until_closed_by_server(sock)
+    await assert_no_tasks_left()
+
+
+def test_a_send_blocked_too_long_disconnects_the_client(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(api_module, "SEND_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(api_module, "CLOSE_TIMEOUT_SECONDS", 0.2)
+    asyncio.run(_test_a_send_blocked_too_long_disconnects_the_client())
+    assert caplog.text.count("too slow (a send blocked for 0.2 s); disconnecting") == 1
+
+
+async def _test_a_send_blocked_too_long_disconnects_the_client() -> None:
+    async with running_server() as server:
+        stuck = await stuck_client(server)
+        await until(lambda: server.client_count == 1)
+        for i in range(100):  # about 6 MB, fewer events than the queue holds
+            server.publish(TranscriptPartial("voice-pe-02", f"u{i}", "a" * 60_000))
+            await asyncio.sleep(0)
+        await until(lambda: server.client_count == 0)
+        await until_closed_by_server(stuck)
+
+
+# Client cap
+
+
+def test_the_17th_client_gets_503_until_a_slot_frees(caplog: pytest.LogCaptureFixture) -> None:
+    asyncio.run(_test_the_17th_client_gets_503_until_a_slot_frees())
+    assert caplog.text.count("clients connected") == 1
+
+
+async def _test_the_17th_client_gets_503_until_a_slot_frees() -> None:
+    assert api_module.MAX_CLIENTS == 16
+    async with running_server() as server:
+        clients = [await connect(url(server)) for _ in range(16)]
+        await until(lambda: server.client_count == 16)
+        with pytest.raises(InvalidStatus) as refused:
+            await connect(url(server))
+        assert refused.value.response.status_code == 503
+        base = f"http://127.0.0.1:{server.port}"
+        assert (await asyncio.to_thread(_get, base + "/healthz"))[0] == 200  # not capped
+        await clients.pop().close()
+        await until(lambda: len(server._admitted) == 15)
+        clients.append(await connect(url(server)))
+        await until(lambda: server.client_count == 16)
+        server.publish(Wake("voice-pe-02", "u1"))
+        for client in clients:
+            assert utterance_ids(await receive(client, 1)) == ["u1"]
+        for client in clients:
+            await client.close()
+
+
+def test_a_slow_client_is_closed_within_the_bound_even_if_it_never_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api_module, "CLIENT_QUEUE_EVENTS", 4)
+    monkeypatch.setattr(api_module, "CLOSE_TIMEOUT_SECONDS", 0.2)
+    asyncio.run(_test_a_slow_client_is_closed_within_the_bound_even_if_it_never_reads())
+
+
+async def _test_a_slow_client_is_closed_within_the_bound_even_if_it_never_reads() -> None:
+    async with running_server() as server:
+        stuck = await stuck_client(server)
+        await until(lambda: server.client_count == 1)
+        (client,) = server._clients
+        published = 0
+        async with asyncio.timeout(TIMEOUT):
+            while server.client_count == 1:
+                server.publish(TranscriptPartial("voice-pe-02", f"u{published}", "a" * 60_000))
+                published += 1
+                await asyncio.sleep(0)
+        async with asyncio.timeout(0.2 + 1.0):  # the client still does not read
+            await client.connection.wait_closed()
+        stuck.close()

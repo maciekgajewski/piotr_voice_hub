@@ -16,7 +16,11 @@ P0 only (README): events. Commands (`speak`/`play`/`stop`/`release`, `ack`/`erro
   what we use. design.md §5 is updated.
 - **Endpoints:** `ws://<host>:<port>/ws` for events; `GET /healthz` returns
   `{"satellites": {id: {area, connected, state}}}` from the last `satellite` event of each
-  satellite; any other path is 404.
+  satellite; any other path is 404. `/healthz` is liveness: 200 whenever the server serves,
+  even with every satellite offline (readiness is not P0).
+- **Client cap (PR #13 review B1):** `MAX_CLIENTS = 16`. The 17th `/ws` request gets HTTP 503
+  before the handshake. A slot is held from admission until the TCP connection is closed, so
+  handshakes in flight count and a failed handshake frees its slot. `/healthz` is not capped.
 - **Envelope:** `{"type", "satellite", "ts", "data"}`. `ts` is the publish time, UTC, ISO 8601
   with milliseconds and `Z` (`2026-10-18T16:40:12.120Z`). `data` is the event's fields without
   `satellite`: `satellite` → `{area, connected, state}`; `wake`/`wake_cancelled` →
@@ -24,14 +28,17 @@ P0 only (README): events. Commands (`speak`/`play`/`stop`/`release`, `ack`/`erro
   `{utterance_id, text, raw_text, follow_up, speaker: {name, confidence} | null, audio_ms}`.
   States are §6's: `idle`, `listening`, `processing`, `error` (`speaking` is P1).
 - **Publish:** `publish(event)` is synchronous (the session's `emit`): it serializes once and
-  puts the text on every client's bounded queue, so all clients see all events in publish order.
-  One sender task per client writes its queue in order.
+  puts the text on every client's bounded queue. One sender task per client writes its queue
+  in order. The order guarantee is per connection, from the moment it connects: a client that
+  joins mid-utterance may see `transcript_partial` or `transcript_final` without its `wake`.
 - **Connect:** a new client first gets the last `satellite` event of each satellite (with its
   original `ts`), queued in the same step that registers it, so nothing is missed or duplicated;
   `satellite` is otherwise sent only on change.
-- **Slow client: disconnect, not drop.** When a client's queue (256 events) is full it is
-  removed at once and closed with 1008 "too slow" (bounded; the transport is aborted if the
-  close handshake does not finish). Dropping events would silently break the per-utterance
+- **Slow client: disconnect, not drop.** When a client's queue (256 events) is full, or one
+  send has been blocked for 10 s (`SEND_TIMEOUT_SECONDS`; the peer stopped reading), it is
+  removed at once and closed with 1008 "too slow", bounded at 2 s, then the transport is
+  aborted. websockets' own `close_timeout` does not cover writing the close frame into a full
+  buffer, and its keepalive ping waits for the same buffer, so both bounds are ours. Dropping events would silently break the per-utterance
   guarantees (every `wake` ends with one `transcript_final` or `wake_cancelled`), so a consumer
   could act on a half-seen utterance; a disconnect is visible and the consumer reconnects and
   gets the snapshot. design.md §9 already says "a slow API client is disconnected rather than
@@ -39,10 +46,13 @@ P0 only (README): events. Commands (`speak`/`play`/`stop`/`release`, `ack`/`erro
 - **Client messages:** P0 has no commands. Incoming messages are read (so pings and close
   frames keep flowing) and discarded, logged once per client at INFO. Max incoming message
   64 KiB.
-- **Shutdown:** `close()` stops accepting, closes every client with 1001, and waits a bounded
-  time, aborting what is left.
+- **Handshake:** `open_timeout` 3 s; a connection that never completes its handshake (e.g.
+  never sends its HTTP request) is dropped then.
+- **Shutdown (PR #13 review B2):** `close()` stops accepting and closes every client with
+  1001. After 4 s it aborts every accepted connection, handshaking ones included
+  (websockets' `close()` skips those), and waits at most 1 s more: `close()` takes at most 5 s.
 - **Liveness:** websockets' pings (20 s interval, 20 s timeout) drop dead peers.
-- No auth (§6); the bind address is the boundary (§9). No connection limit in P0.
+- No auth (§6); the bind address is the boundary (§9).
 
 ## PR #12 re-review nits
 
@@ -70,6 +80,10 @@ fixed in `config/hub.example.yaml` and design.md §7 here (trivial).
   within a bound.
 - Ignored client messages; `/healthz`; 404.
 - Server shutdown: clients see 1001, the port is released, close is bounded with a stuck client.
+- Review fixes: the 17th client gets 503 and a slot frees after a disconnect; a TCP client
+  that never sends its request is dropped at `open_timeout` and does not hold up `close()`
+  (abort path, no tasks left); a blocked send drops the client; a slow client that never reads
+  is closed within the 1008 bound.
 - Session nits: `shutdown()` while `run()` is running raises; an `AssertionError` from a command
   during `shutdown()` is logged and the driver is still closed.
 

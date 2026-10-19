@@ -164,7 +164,10 @@ Proposed package layout in `piotr_voice_hub/`:
 
 ## 6. API (WebSocket JSON, no auth)
 
-**Endpoint:** `ws://<host>:8750/ws`. Every connected client receives every event, and any client may send commands. `GET /healthz` returns satellite states.
+**Endpoint:** `ws://<host>:8750/ws`. Every connected client receives every event, and any client may send commands. `GET /healthz` returns satellite states; it is a liveness check, so it returns 200 whenever the hub serves, even with every satellite offline.
+- At most 16 clients; more get HTTP 503 before the WebSocket handshake.
+- Ordering is per connection: a client gets the events in the order the hub emitted them, from the moment it connects. On connect it first gets the current `satellite` state of each satellite. A client that joins mid-utterance may see `transcript_partial` or `transcript_final` without the `wake` before it.
+- A client that falls behind (its queue of 256 events is full, or one send is blocked for 10 s) is disconnected with close code 1008, never sent a stream with gaps (§9).
 
 **Envelope:**
 ```json
