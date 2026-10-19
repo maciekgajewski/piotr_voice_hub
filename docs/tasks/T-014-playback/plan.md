@@ -98,10 +98,18 @@ playback, instead of one server per playback on a random port.
      more than for an unknown id). At most 8 connections at once from other addresses; more
      are aborted at once. A satellite with an open stream is never refused.
    - Bounds: reading the request takes at most 5 s, closing at most 5 s (then abort).
+     - The 5 s close is tight at 8 kHz mono: flushing a full 64 KiB write buffer takes about
+       4 s, and an abort then drops the tail of a stream already counted as complete. Piper's
+       22050 Hz is safe; scaling it with the rate is a P1 carry-forward (T-017,
+       docs/tasks/README.md; PR #16 re-review 5569307179, nit 2).
      - Audio is written in slices of at most 16 KiB, each with its own 10 s write limit (write
-       plus drain). A device that reads at exactly the audio rate needs at most about 0.37 s
-       per slice (22050 Hz mono), whatever the chunk size. One limit for a whole chunk would
-       cut off a healthy device for any chunk over about 10 s of audio (PR #16 re-review B1).
+       plus drain). One limit for a whole chunk would cut off a healthy device for any chunk
+       over about 10 s of audio (PR #16 re-review B1).
+     - The real wait per slice is set by asyncio's write-buffer watermarks, not by the slice
+       size: once the buffer passes 64 KiB, `drain()` waits until it is below 16 KiB, i.e.
+       about 48 KiB at the audio rate. For a device that reads at exactly the audio rate that
+       is about 1.1 s at 22050 Hz mono and about 3 s at 8 kHz mono, well inside 10 s, whatever
+       the chunk size (PR #16 re-review 5569307179, nit 1).
      - A device that stops reading mid-stream fills the socket buffers. The next slice then
        blocks and is cut off after 10 s, so the GET ends incomplete. On that error path the
        connection is aborted, not closed: `close()` would first flush to the stalled peer.

@@ -33,10 +33,12 @@ WAV_HEADER_BYTES = 44
 WAV_STREAM_DATA_BYTES = 0x7FFFFFF0  # "endless": the real length is unknown while streaming
 REQUEST_READ_TIMEOUT_SECONDS = 5.0
 # One slice blocked this long: the device stopped reading. A playing device reads at least at
-# the audio rate, and a slice is at most 16 KiB (about 0.37 s of 22050 Hz mono, 0.085 s of
-# 48 kHz stereo), so a healthy write never waits anywhere near this.
+# the audio rate. One wait is set by asyncio's write-buffer watermarks, not the slice size:
+# past 64 KiB, drain() waits until under 16 KiB, about 48 KiB of audio (about 1.1 s at
+# 22050 Hz mono, 3 s at 8 kHz mono), so a healthy write stays well inside this.
 SEND_TIMEOUT_SECONDS = 10.0
 SEND_SLICE_BYTES = 16 * 1024
+# Tight at 8 kHz mono: flushing a full 64 KiB buffer takes about 4 s (P1 carry-forward, T-017).
 CLOSE_TIMEOUT_SECONDS = 5.0
 MAX_STREAM_SECONDS = 300.0  # of audio buffered per stream; more fails loudly
 MAX_CONNECTIONS = 8  # one GET per playback and at most a few satellites; more is not ours
