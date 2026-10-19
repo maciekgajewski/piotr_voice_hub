@@ -11,7 +11,7 @@ import time
 import pytest
 
 from piotr_voice_hub.config import TtsConfig
-from piotr_voice_hub.tts.interfaces import AudioFormat, TtsTextError
+from piotr_voice_hub.tts.interfaces import AudioFormat, TtsError, TtsTextError
 from piotr_voice_hub.tts.wyoming_piper import MAX_TEXT_CHARS, WyomingPiperTts
 
 URI = os.environ.get("PIOTR_VOICE_HUB_PIPER_URI", "")
@@ -72,5 +72,8 @@ def test_client_against_the_service() -> None:
         )
         with pytest.raises(TtsTextError):
             await measure(tts, "x" * (MAX_TEXT_CHARS + 1))
+        wrong = WyomingPiperTts(TtsConfig(uri=URI, voice="pl_PL-gosia-medium", volume=1.0))
+        with pytest.raises(TtsError, match=r"describes \['pl_PL-bass-high'\]"):
+            await wrong.start()
 
     asyncio.run(asyncio.wait_for(run(), TIMEOUT_SECONDS))

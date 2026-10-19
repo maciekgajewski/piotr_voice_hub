@@ -129,32 +129,38 @@ def test_start_ok_sends_describe(caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.INFO):
             await tts.start()
 
-    fake = run(sends(info_event([("other", True), (VOICE, True)])), test)
+    fake = run(sends(info_event([(VOICE, True)])), test)
     assert [e.type for e in fake.requests] == [Describe().event().type]
     assert "Piper reachable" in caplog.text
 
 
 @pytest.mark.parametrize(
-    ("voices", "message"),
+    ("voices", "listed"),
     [
-        ([("other", True)], "does not list voice"),
-        ([(VOICE, False)], "does not list voice"),
-        ([], "does not list voice"),
+        ([("pl_PL-gosia-medium", True)], "['pl_PL-gosia-medium']"),
+        ([("other", True), (VOICE, True)], f"['other', '{VOICE}']"),
+        ([(VOICE, True), (VOICE, True)], f"['{VOICE}', '{VOICE}']"),
+        ([(VOICE, False)], "[]"),
+        ([], "[]"),
     ],
+    ids=["another-voice", "two-voices", "listed-twice", "not-installed", "no-voices"],
 )
-def test_start_fails_without_the_installed_voice(
-    voices: list[tuple[str, bool]], message: str
+def test_start_fails_unless_exactly_the_configured_voice_is_described(
+    voices: list[tuple[str, bool]], listed: str
 ) -> None:
     async def test(tts: WyomingPiperTts, _fake: FakePiper) -> None:
-        with pytest.raises(TtsError, match=message):
+        with pytest.raises(TtsError) as raised:
             await tts.start()
+        message = str(raised.value)
+        assert f"tts.voice is '{VOICE}'" in message
+        assert f"describes {listed}" in message
 
     run(sends(info_event(voices)), test)
 
 
 def test_start_fails_without_a_tts_program() -> None:
     async def test(tts: WyomingPiperTts, _fake: FakePiper) -> None:
-        with pytest.raises(TtsError, match="does not list voice"):
+        with pytest.raises(TtsError, match=r"describes \[\]"):
             await tts.start()
 
     run(sends(Info().event()), test)

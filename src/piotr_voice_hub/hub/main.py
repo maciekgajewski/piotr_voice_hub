@@ -9,6 +9,7 @@ from typing import Protocol
 
 from piotr_voice_hub.config import HubConfig
 from piotr_voice_hub.hub.watchdog import Watchdog, heartbeat
+from piotr_voice_hub.tts.interfaces import TextToSpeech, TtsError
 
 EXIT_OK = 0
 EXIT_FAILED = 1  # a session or startup failed: Docker restarts the container (§9)
@@ -142,6 +143,17 @@ async def run_until_signal(
             watchdog.stop()
 
 
+async def check_tts(tts: TextToSpeech) -> bool:
+    """The startup TTS check: Piper is reachable and describes exactly `tts.voice`. The
+    service warms itself before it listens, so this is only a reachability check."""
+    try:
+        await tts.start()
+    except TtsError as error:
+        logger.critical("TTS startup check failed, exiting: %s", error)
+        return False
+    return True
+
+
 async def run_hub(config: HubConfig) -> int:
     """Build the real components and run them (not unit-tested: it needs the GPU and the LAN;
     covered by the live check, T-012 log)."""
@@ -154,10 +166,10 @@ async def run_hub(config: HubConfig) -> int:
     from piotr_voice_hub.stt.whisper import FasterWhisperSpeechToText
     from piotr_voice_hub.tts.wyoming_piper import WyomingPiperTts
 
-    # First, before anything is built or armed: a missing Piper service exits 1 (T-016). The
-    # service warms itself before it listens, so this is only a reachability check.
+    # First, before anything is built or armed (T-016).
     tts = WyomingPiperTts(config.tts)
-    await tts.start()
+    if not await check_tts(tts):
+        return EXIT_FAILED
     stt = FasterWhisperSpeechToText(config.stt)
     api = ApiServer(config.api.host, config.api.port)
     # All interfaces, like the API (design §9): the satellites fetch from the host's LAN IP.

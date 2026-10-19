@@ -1,8 +1,9 @@
 # T-016: Wyoming Piper TTS client: plan
 
-**Status:** implemented as below (2026-10-19). Based on `t-015-piper-service` (PR #18), which
-it needs for the compose service and `tts.uri` on 10201; the PR's base is `main`, and it is
-rebased after #18 merges. No design question changes the implementation (see the end).
+**Status:** implemented as below (2026-10-19). First based on `t-015-piper-service` (PR #18);
+rebased onto `main` after #18 merged (e8a5679). No design question changes the
+implementation (see the end). The PR also carries the #18 review nits N1–N4 (a separate
+commit, see the end) and a wake-test log entry for T-013.
 
 ## Scope (docs/tasks/README.md)
 
@@ -53,10 +54,10 @@ speaker hint (T-018).
    to `bad_request`); the `TextToSpeech` and `Speech` protocols.
 3. **`tts/wyoming_piper.py`, `WyomingPiperTts(config: TtsConfig)`:**
    - `start()`: the startup reachability check: connect, `describe`, read `info` within the
-     bounds; it fails unless `info` lists a TTS program with the configured voice installed.
-     (Found live: wyoming-piper lists its whole catalogue as installed, so this cannot catch a
-     `tts.voice` other than the service's pinned one; that is a `TtsError` at the first
-     synthesis, from the service's `error` event. See the questions.)
+     bounds; it fails unless `info` lists exactly the configured voice, installed. Our service
+     describes only the voice it serves (#18's `advertise_only`; stock wyoming-piper lists its
+     whole catalogue as installed, found live before #18's final version), so a wrong
+     `tts.voice` fails here, before anything is armed, with both voices in the message.
    - `synthesize(text)` is an async context manager:
      ```python
      async with tts.synthesize(text) as speech:
@@ -88,25 +89,29 @@ speaker hint (T-018).
    - **No retries.** One log line per synthesis: characters, audio seconds, first-audio and
      total time.
 4. **Config:** `tts.uri` must be `tcp://host:port` (a `ConfigError`, exit 2, otherwise).
-5. **Hub startup:** `run_hub` awaits `tts.start()` before anything else (before the playback
-   server, the STT warm-up and the sessions), so a missing Piper exits 1 before any satellite
-   is armed. The client is not used further until T-017.
+5. **Hub startup:** `run_hub` runs `check_tts` (`tts.start()`) before anything else (before
+   the playback server, the STT warm-up and the sessions). A `TtsError` (Piper missing, slow,
+   or describing another voice) logs one CRITICAL line, "TTS startup check failed, exiting:
+   tts.voice is …, but Piper at … describes [...]", and exits 1 before any satellite is armed. The client is not used further until T-017.
 6. **Compose:** the `hub` service `depends_on: piper: condition: service_healthy`, so a
    deploy starts Piper first and the hub's check does not crash-loop during its 50 s cold
    start.
 
 ## Tests
 
-- Unit (`tests/test_tts.py`, a fake Wyoming server on loopback): describe ok, voice missing,
-  no TTS program, no answer (timeout), closed; synthesize: format and chunks in order, the
+- Unit (`tests/test_tts.py`, a fake Wyoming server on loopback): describe ok; not exactly the
+  configured voice (another voice, two voices, listed twice, not installed, none); no TTS
+  program, no answer (timeout), closed; synthesize: format and chunks in order, the
   request carries the voice and the stripped text, `error` event, EOF mid-stream, no
   `audio-start` (timeout), a stall between chunks (timeout), chunks before start, a format
   change, an unknown event, connect refused and connect timeout, rejected text (empty, over
   the cap, exactly at the cap) without a connection, early exit closes the connection; config
-  `tts.uri` validation.
+  `tts.uri` validation. `tests/test_main.py`: `check_tts` passes, a `TtsError` is one
+  CRITICAL line and exit 1, other errors propagate.
 - GPU-gated (`tests/test_tts_gpu.py`, marker `gpu`, with `PIOTR_VOICE_HUB_PIPER_URI`): against
   our T-015 service: `start()`, a short and a ~200-character sentence twice each (format,
-  duration, latency printed), a 1000-character text accepted and streamed, 1001 rejected.
+  duration, latency printed), a 1000-character text accepted and streamed, 1001 rejected,
+  `start()` with another voice fails.
   `tools/piper-gpu-test.sh` runs it with T-015's test.
 - Live: our `piper` service alone in its own compose project (`-p piotr-voice-hub-t016`) on
   10201, then stopped.
@@ -117,12 +122,23 @@ speaker hint (T-018).
 
 ## Questions (none changes the implementation)
 
-- `describe` cannot prove the voice is served (above). To catch a wrong `tts.voice` at
-  startup, either T-015's service lists only its preloaded voice in `info` (a small change to
-  PR #18 or a follow-up), or the startup check also synthesizes a word (about 0.08 s, but the
-  brief decided describe-only). Left as is; the first synthesis fails loudly.
+- (Resolved.) A wrong `tts.voice` could not be caught by `describe` while the service listed
+  its whole catalogue; #18's final version describes only the served voice, and the check now
+  requires exactly that voice.
 - The hub now needs Piper at startup (exit 1 without it), and compose starts the hub only once
   `piper` is healthy (about 50 s for a new container).
-
 - The 1000-character cap is a constant, not a config key (design §7 has none). Move it to
   `tts` config only if a consumer needs longer replies.
+
+## #18 review nits (review 5570089492), in a separate commit
+
+- **N1:** a third warm-up text, one sentence of 950 characters (near the 1000 cap), so a long
+  call's first-use CUDA work happens before the port opens, not while serving under the 30 s
+  watchdog. Its time is in the warm-up log line. The warm check still re-times the ~200
+  character sentence (`WARM_CHECK_TEXT`).
+- **N2:** the per-synthesis watchdog is `faulthandler.dump_traceback_later(timeout,
+  exit=True)` instead of a `threading.Timer` (reasons in log.md).
+- **N3:** `WARM_LIMIT_SECONDS` 1 s → 2 s.
+- **N4:** the warm check's thread name and log lines say "warm check", not "warm-up"; the
+  compose comment's long line is reflowed; the `MAX_TEXT_CHARS` comment says the client
+  rejects (not splits) longer text.

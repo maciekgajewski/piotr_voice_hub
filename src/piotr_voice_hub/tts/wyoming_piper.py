@@ -9,8 +9,9 @@ then `audio-start`, `audio-chunk`s and `audio-stop`. Changes from the old code:
   another format, or any other event type is a `TtsError` (the old code skipped them).
 - A text cap: empty text or more than `MAX_TEXT_CHARS` is a `TtsTextError`, before connecting.
   design.md says nothing about long text; it is rejected, not split (T-016 plan).
-- `start()` is only a reachability check (`describe` → `info` with the voice installed): the
-  Piper service warms itself before it listens (T-015), so no validation synthesis.
+- `start()` is only a reachability check (`describe` → `info` listing exactly the configured
+  voice, which is all our service describes): the Piper service warms itself before it
+  listens (T-015), so no validation synthesis.
 - The connection is our own `asyncio.open_connection`; the `wyoming` package provides only
   the event framing and event classes.
 """
@@ -170,11 +171,10 @@ class WyomingPiperTts:
         return _Connection(reader, writer)
 
     async def start(self) -> None:
-        """Startup check: the service answers `describe` and lists the configured voice.
+        """Startup check: the service answers `describe` and lists exactly the configured voice.
 
-        wyoming-piper lists every voice of its catalogue as installed, so this does not prove
-        the service serves this voice: our service (T-015) serves only its preloaded one and
-        answers any other with an `error` event, a TtsError at the first synthesis."""
+        Our service (T-015) describes only the one voice it serves (`advertise_only`), so a
+        `tts.voice` other than that one fails here, before anything is armed."""
         start = time.monotonic()
         connection = await self._connect()
         try:
@@ -185,11 +185,11 @@ class WyomingPiperTts:
         if not Info.is_type(event.type):
             raise TtsError(f"unexpected {event.type} event in answer to describe")
         info = _parse(Info.from_event, event)
-        voices = {v.name for p in info.tts for v in p.voices if v.installed}
-        if self._voice not in voices:
+        listed = [v.name for p in info.tts for v in p.voices if v.installed]
+        if listed != [self._voice]:
             raise TtsError(
-                f"service at {self._host}:{self._port} does not list voice {self._voice} as "
-                f"installed ({len(voices)} voices are)"
+                f"tts.voice is {self._voice!r}, but Piper at {self._host}:{self._port} "
+                f"describes {listed} (it must describe exactly the configured voice)"
             )
         self._logger.info(
             "Piper reachable at %s:%d in %.3f s", self._host, self._port, time.monotonic() - start

@@ -34,3 +34,16 @@
     gives the count, not the list. Question in plan.md.
   - `docker compose -p piotr-voice-hub-t016 down`: removed; 10201 free again. No other
     container touched; the running hub was not touched.
+- PR #19 opened (head 531496c, CI green).
+- PR #18 merged as e8a5679. Its final version describes only the served voice
+  (`advertise_only`), guards each synthesis (`GuardedVoice`: 1000-character cap, 30 s
+  watchdog) and binds 127.0.0.1:10201. Rebased onto `origin/main` with
+  `git rebase --onto origin/main 58092db` (dropping #18's two commits); one conflict, the
+  README T-016 note (#18 had "split … N ≤ 1000", T-016 "reject"), resolved to reject, noting it
+  is the service's own limit.
+- Startup check tightened: `start()` now requires the installed voices in `info` to be exactly
+  `[tts.voice]`; the `TtsError` names both ("tts.voice is 'X', but Piper at … describes
+  [...]"). `hub/main.py` `check_tts` logs it as one CRITICAL line ("TTS startup check failed,
+  exiting: …") and `run_hub` returns 1. Tests: five describe variants in `test_tts.py`, three
+  `check_tts` tests in `test_main.py`, a wrong-voice `start()` in the GPU test. The earlier
+  plan question (a wrong voice is not caught at startup) is resolved; plan and docstring updated.
