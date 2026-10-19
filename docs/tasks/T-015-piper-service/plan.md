@@ -45,6 +45,8 @@ deploying (T-022). The running hub, its checkout and Maciej's containers are not
   `pl_PL-bass-high` (design §4.3, §7).
 - **T-003** (`tools/gpu_smoke/piper_vram.py`, reading reference only): the voice on
   onnxruntime-gpu 1.26.0 CUDA EP: 0.3 GB loaded, 1.2 GB peak, first run 48 s, then 0.1 s.
+  (Production, 2026-10-19: 2228 MiB after the 949-character warm-up, held, because the CUDA
+  arena keeps its peak; design §4.3 now says about 2.2 GB, and about 4.4 GB with the hub.)
 - **wyoming-piper 2.5.2** (latest, with piper-tts 1.8.0 and wyoming 1.10.2):
   - `PiperVoice.load(..., use_cuda=True)` already asks for
     `("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"})`, but with default

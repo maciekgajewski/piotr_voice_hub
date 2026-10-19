@@ -41,3 +41,32 @@
 - After the rebase: `make check` 3× green; the GPU end to end again with our own Piper
   (`-p piotr-voice-hub-t017`, `:t017` image, port 10211): 7 passed, `speak` 3.59 s of audio,
   `ack` → `playback_finished` 3.97 s. Torn down the same way; 10211 free, production untouched.
+- 2026-10-19 14:15: PR #20 was merged (review 5571144796, MERGE, no blockers or should-fix).
+  The manager asked for its four nits to go into this PR as a separate commit:
+  - **N1:** the startup check's worst case is about 137 s, not 120 s. No attempt starts after
+    120 s, and one attempt takes up to 17 s (connect 5 + describe send 5 + info 5 + close 2).
+    Fixed in the `hub/main.py` comment and docstring, the compose comment and the T-016 plan.
+    The CRITICAL line now says `not reachable after <waited> s (<n> attempts; none starts
+    after 120 s)`, and the WARNING says `new attempts until 120 s`. A test checks
+    120 + 17 = 137 against the client's constants. The T-016 log's "up to 120 s" stays
+    (append-only); this entry corrects it.
+  - **N2:** `ConnectionResetError`/`BrokenPipeError` while sending is `TtsUnavailableError`
+    (`connection reset while sending <type>`), so the startup check retries it. Tests cover
+    both errors for `start()` and `synthesize`; any other `OSError` stays a plain `TtsError`.
+    The write raises in the tests, since a real reset cannot be timed to hit the write.
+  - **N3:** an exception from the consumer's code inside `synthesize` is logged as
+    `consumer failed: <type>`, not as stopped early. Tested.
+  - **N4:** a test cancels `check_tts` during the retry sleep: `CancelledError` at once, one
+    attempt, no CRITICAL line.
+- In the same commit: the PR checklist and plan.md no longer mention Home Assistant (the hub
+  owns the satellites; there is none here). The playback-end comparison is against when the
+  audio audibly stops. The T-017 README row now names PR #21.
+- 2026-10-19 14:22, same commit (amended, pushed with force-with-lease on this branch): VRAM
+  docs, at the manager's request. Production on piotr (main 8803766) measured Piper at
+  2228 MiB after the 949-character warm-up (up from T-003's 1.2 GB peak). With the hub's
+  2220 MiB, that is about 4.4 GB. onnxruntime's CUDA arena keeps its peak, so a request near
+  the 1000-character cap would reach this anyway; the warm-up only shows it up front.
+  Decision: keep the warm-up. design.md §4.3 now gives Piper about 2.2 GB peak (held) and a
+  hub total of about 4.4 GB (about 4.9 GB with concurrent partials), leaving about 11 GB for
+  Ollama. T-015 plan.md did not state a ~700 MiB steady state; its T-003 reference line gets
+  a pointer to the production number.

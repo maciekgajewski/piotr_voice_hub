@@ -73,6 +73,6 @@ busy policy and `stop` (T-019), `play` (T-021), the speaker hint (T-018).
 
 ## Manual test (Maciej, hardware)
 
-In the PR: speak a reply on voice-pe-02/03 from `python -m websockets` in the hub container,
-then `release`; plus the T-014 playback-end comparison (the estimate vs. the media player's
-`ANNOUNCING` → `IDLE`).
+In the PR: speak a reply on voice-pe-02/03 with a small Python websockets script in the hub
+container, then `release`; plus the T-014 playback-end comparison (`playback_finished` vs.
+when the audio audibly stops; there is no Home Assistant here, the hub owns the satellites).

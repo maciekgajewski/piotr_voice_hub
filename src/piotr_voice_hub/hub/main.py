@@ -30,6 +30,9 @@ QUIET_LOGGERS = {
 logger = logging.getLogger(__name__)
 # The startup TTS check's wait for an unreachable Piper (T-016 follow-up S2): a new Piper
 # container is ready after about 50 s (T-015); the old project waited 30 s for its port.
+# No attempt starts after TTS_STARTUP_TIMEOUT_SECONDS, and one attempt is bounded by the
+# client (connect 5 s + send 5 s + info 5 s + close 2 s = 17 s), so the whole wait is about
+# 137 s at most (PR #20 review N1), inside the hub's 180 s healthcheck start period.
 TTS_STARTUP_RETRY_SECONDS = 2.0
 TTS_STARTUP_TIMEOUT_SECONDS = 120.0
 
@@ -160,7 +163,8 @@ async def check_tts(
     service warms itself before it listens, so this is only a reachability check.
 
     While Piper is unreachable (`TtsUnavailableError`: refused, reset, connect timed out) it
-    retries every `retry_seconds`, with a WARNING each time, for up to `timeout_seconds`:
+    retries every `retry_seconds`, with a WARNING each time, and starts no attempt after
+    `timeout_seconds` (120 s; with the last attempt's own bound, about 137 s at most):
     after a reboot or a Docker daemon restart, `depends_on` does not apply and the hub can
     start while Piper is still warming up (about 50 s). Any other `TtsError` (a wrong voice, a
     bad answer) and the overall timeout are CRITICAL, and the hub exits 1. Each attempt is
@@ -175,15 +179,16 @@ async def check_tts(
             waited = clock() - started
             if waited + retry_seconds > timeout_seconds:
                 logger.critical(
-                    "TTS startup check failed, exiting: Piper not reachable within %g s "
-                    "(%d attempts): %s",
-                    timeout_seconds,
+                    "TTS startup check failed, exiting: Piper not reachable after %.0f s "
+                    "(%d attempts; none starts after %g s): %s",
+                    waited,
                     attempt,
+                    timeout_seconds,
                     error,
                 )
                 return False
             logger.warning(
-                "waiting for Piper (attempt %d, %.0f s of %g s): %s",
+                "waiting for Piper (attempt %d, %.0f s; new attempts until %g s): %s",
                 attempt,
                 waited,
                 timeout_seconds,
