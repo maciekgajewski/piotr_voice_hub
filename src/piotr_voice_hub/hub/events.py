@@ -9,8 +9,8 @@ class SatelliteState(Enum):
     IDLE = "idle"  # armed, no wake candidate
     LISTENING = "listening"  # wake candidate open
     PROCESSING = "processing"  # accepted; waiting for a reply
+    SPEAKING = "speaking"  # playing a reply (T-017)
     ERROR = "error"  # offline
-    # SPEAKING arrives with playback (P1).
 
 
 @dataclass(frozen=True)
@@ -57,4 +57,15 @@ class TranscriptFinal:
     audio_ms: int
 
 
-type HubEvent = SatelliteStatus | Wake | WakeCancelled | TranscriptPartial | TranscriptFinal
+@dataclass(frozen=True)
+class PlaybackFinished:
+    """One per `ack`ed `speak`, also when the playback failed (T-017 plan)."""
+
+    satellite: str
+    playback_id: str
+    listening_for_follow_up: bool  # follow-up is T-020: always False until then
+
+
+type HubEvent = (
+    SatelliteStatus | Wake | WakeCancelled | TranscriptPartial | TranscriptFinal | PlaybackFinished
+)

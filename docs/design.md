@@ -195,7 +195,7 @@ Proposed package layout in `piotr_voice_hub/`:
 | `stop` | none | Stop current playback; re-arm. |
 | `release` | none | End `PROCESSING` without speaking (e.g. nothing to say); re-arm. |
 
-Errors are `busy`, `unknown_satellite`, `satellite_offline` and `bad_request`.
+Errors are `busy`, `unknown_satellite`, `satellite_offline` and `bad_request`. An error reply is `{"type":"error","reply_to":"c7","satellite":"voice-pe-02","data":{"code":"busy","message":"…"}}` (`reply_to` and `satellite` are `null` when the command did not carry valid ones). Every `ack`ed `speak` ends with one `playback_finished`, also when the playback failed (T-017).
 
 **Satellite states.** `idle`: armed, no wake candidate. `listening`: a wake candidate is open (after `wake`). `processing`: accepted, awaiting a reply. `speaking`: playing audio (P1). `error`: offline, also before the first connect.
 

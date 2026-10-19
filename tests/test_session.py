@@ -1,16 +1,19 @@
-"""T-010: the satellite session state machine, with a fake driver and a fake STT."""
+"""T-010, T-017: the satellite session state machine, with a fake driver, STT and TTS."""
 
 import asyncio
 import logging
 from collections import deque
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 
 import pytest
 
 from piotr_voice_hub.config import SatelliteConfig
 from piotr_voice_hub.hub import session as session_module
+from piotr_voice_hub.hub.commands import CommandError, ErrorCode
 from piotr_voice_hub.hub.events import (
     HubEvent,
+    PlaybackFinished,
     SatelliteState,
     SatelliteStatus,
     TranscriptFinal,
@@ -28,6 +31,9 @@ from piotr_voice_hub.satellites.messages import (
     ListeningStopped,
     MicrophoneCommand,
     MicrophoneEvent,
+    PlaybackBegin,
+    PlaybackChunk,
+    PlaybackEnd,
     PlayCue,
     ResetWakeCandidate,
     SetVisualState,
@@ -37,8 +43,10 @@ from piotr_voice_hub.satellites.messages import (
     StopListening,
     VisualState,
 )
+from piotr_voice_hub.satellites.messages import PlaybackFinished as DriverPlaybackFinished
 from piotr_voice_hub.satellites.types import MicrophoneContext, PlaybackTarget
 from piotr_voice_hub.stt.whisper import StreamingTextEvent, TextEnd, TextPartial
+from piotr_voice_hub.tts.interfaces import AudioFormat, TtsError
 
 TIMEOUT = 2.0
 CHUNK = b"\x01\x00" * 320  # 20 ms
@@ -121,6 +129,51 @@ class FakeStt:
         return session
 
 
+PIPER = AudioFormat(22050, 2, 1)
+
+
+class FakeSpeech:
+    def __init__(self, tts: "FakeTts") -> None:
+        self.format = tts.format
+        self._tts = tts
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self._tts.chunks:
+            await asyncio.sleep(self._tts.chunk_delay)
+            yield chunk
+        if self._tts.fail_after_chunks:
+            raise TtsError("connection closed before audio-stop")
+
+
+class FakeTts:
+    """Yields `chunks` in `format`. `fail_at_start` raises before the format (no audio);
+    `fail_after_chunks` raises after the chunks."""
+
+    def __init__(self) -> None:
+        self.format = PIPER
+        self.chunks: list[bytes] = [b"\x00\x01" * 2205] * 3  # 3 x 0.1 s
+        self.chunk_delay = 0.0
+        self.fail_at_start = False
+        self.fail_after_chunks = False
+        self.texts: list[str] = []
+        self.open = 0  # syntheses entered and not yet exited
+
+    async def start(self) -> None:
+        pass
+
+    @asynccontextmanager
+    async def synthesize(self, text: str) -> AsyncIterator[FakeSpeech]:
+        self.texts.append(text)
+        await asyncio.sleep(0)
+        if self.fail_at_start:
+            raise TtsError("could not connect to the TTS service: refused")
+        self.open += 1
+        try:
+            yield FakeSpeech(self)
+        finally:
+            self.open -= 1
+
+
 type Item = MicrophoneEvent | Exception
 type Script = Callable[[str], list[Item]]  # listen id -> items queued after that arm
 
@@ -138,6 +191,7 @@ class FakeDriver:
         self.arms = 0
         self.fail_starts = 0
         self.silent: set[type] = set()  # command types the driver never answers
+        self.fail_on: set[type] = set()  # command types that fail (once each) as a disconnect
         self.closes = 0
         self.in_flight = False
         self.overlapped = False
@@ -158,6 +212,9 @@ class FakeDriver:
         self.in_flight = True
         try:
             await asyncio.sleep(0.001)
+            if type(event) in self.fail_on:
+                self.fail_on.discard(type(event))
+                raise MicrophoneUnavailable("connection lost")
             self.commands.append(event)
             if type(event) in self.silent:
                 return
@@ -172,6 +229,8 @@ class FakeDriver:
                 self.push(ListeningStopped(event.listen_id, event.reason))
             elif isinstance(event, PlayCue):
                 self.push(CueFinished(event.cue_id))
+            elif isinstance(event, PlaybackEnd):
+                self.push(DriverPlaybackFinished(event.playback_id))
         finally:
             self.in_flight = False
 
@@ -193,6 +252,12 @@ class FakeDriver:
                 return c.cue_type
             if isinstance(c, ResetWakeCandidate):
                 return ("reset", c.utterance_id)
+            if isinstance(c, PlaybackBegin):
+                return ("begin", c.rate, c.width, c.channels, c.volume)
+            if isinstance(c, PlaybackChunk):
+                return ("chunk", len(c.data))
+            if isinstance(c, PlaybackEnd):
+                return "end"
             assert isinstance(c, SetVisualState)
             return c.state
 
@@ -215,10 +280,16 @@ class Harness:
     def __init__(self, reply_timeout: float = 0.05) -> None:
         self.driver = FakeDriver()
         self.stt = FakeStt()
+        self.tts = FakeTts()
         self.events: list[HubEvent] = []
         self.sleeps: list[float] = []
         self.session = SatelliteSession(
-            config(reply_timeout), self.driver, self.stt, self.events.append, self.sleep
+            config(reply_timeout),
+            self.driver,
+            self.stt,
+            self.events.append,
+            self.sleep,
+            tts=self.tts,
         )
         self.task: asyncio.Task[None] | None = None
 
@@ -862,3 +933,254 @@ async def _test_shutdown_swallows_an_assertion_and_still_closes() -> None:
     h.driver.send_output_event = refuse  # type: ignore[method-assign]
     await h.session.shutdown()
     assert h.driver.closes == 1
+
+
+# Speak and release (T-017)
+
+SPEAKING = status(True, SatelliteState.SPEAKING)
+CHUNK_BYTES = 2205 * 2
+BEGIN = ("begin", 22050, 2, 1, 0.7)
+
+
+async def accepted(h: Harness) -> None:
+    """Start the session and wait until it waits for a reply."""
+    h.stt.say("u1", "Ryszardzie, która godzina?")
+    h.driver.after_arm[0] = segments("u1")
+    h.start()
+    await h.until(lambda: bool(h.hub(TranscriptFinal)))
+    await asyncio.sleep(0.01)  # into the reply wait
+
+
+def after_processing(h: Harness) -> list[object]:
+    commands = h.driver.without_ids()
+    return commands[commands.index(VisualState.PROCESSING) + 1 :]
+
+
+def busy(call: Callable[[], object]) -> ErrorCode:
+    with pytest.raises(CommandError) as failure:
+        call()
+    return failure.value.code
+
+
+def test_speak_plays_the_reply_then_rearms() -> None:
+    asyncio.run(_test_speak_plays_the_reply_then_rearms())
+
+
+async def _test_speak_plays_the_reply_then_rearms() -> None:
+    h = Harness(reply_timeout=10)
+    await accepted(h)
+    playback_id = h.session.speak("Jest piąta.", 0.7)
+    assert playback_id.startswith("playback-")
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.tts.texts == ["Jest piąta."] and h.tts.open == 0
+    assert after_processing(h) == [BEGIN] + [("chunk", CHUNK_BYTES)] * 3 + [
+        "end",
+        VisualState.IDLE,
+        "start",
+    ]
+    begin = next(c for c in h.driver.commands if isinstance(c, PlaybackBegin))
+    assert begin.playback_id == playback_id
+    assert h.events[h.events.index(PROCESSING) + 2 :] == [
+        SPEAKING,
+        PlaybackFinished("kitchen", playback_id, False),
+        IDLE,
+    ]
+
+
+def test_release_rearms_without_a_cue() -> None:
+    asyncio.run(_test_release_rearms_without_a_cue())
+
+
+async def _test_release_rearms_without_a_cue() -> None:
+    h = Harness(reply_timeout=10)
+    await accepted(h)
+    h.session.release()
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.stop()
+    assert after_processing(h) == [VisualState.IDLE, "start"]
+    assert not h.hub(PlaybackFinished) and h.tts.texts == []
+
+
+def test_commands_outside_the_reply_wait_are_busy_or_offline() -> None:
+    asyncio.run(_test_commands_outside_the_reply_wait_are_busy_or_offline())
+
+
+async def _test_commands_outside_the_reply_wait_are_busy_or_offline() -> None:
+    h = Harness(reply_timeout=10)
+    assert busy(lambda: h.session.speak("x", 1.0)) == ErrorCode.SATELLITE_OFFLINE  # not started
+    h.tts.chunk_delay = 0.05
+    await accepted(h)
+    playback_id = h.session.speak("Jest piąta.", 0.7)
+    assert busy(lambda: h.session.speak("Drugi raz.", 0.7)) == ErrorCode.BUSY  # taken
+    await h.until(lambda: h.events[-1:] == [SPEAKING])
+    assert busy(h.session.release) == ErrorCode.BUSY  # speaking
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    assert busy(lambda: h.session.speak("x", 1.0)) == ErrorCode.BUSY  # idle: T-019
+    h.driver.fail_starts = 10**9  # stays offline
+    h.driver.push(MicrophoneUnavailable("connection lost"))
+    await h.until(lambda: h.events[-1:] == [OFFLINE])
+    assert busy(lambda: h.session.speak("x", 1.0)) == ErrorCode.SATELLITE_OFFLINE
+    await h.stop()
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
+
+
+def test_tts_failing_before_audio_plays_nothing_and_still_finishes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    asyncio.run(_test_tts_failing_before_audio(caplog))
+
+
+async def _test_tts_failing_before_audio(caplog: pytest.LogCaptureFixture) -> None:
+    h = Harness(reply_timeout=10)
+    h.tts.fail_at_start = True
+    await accepted(h)
+    playback_id = h.session.speak("Jest piąta.", 0.7)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert after_processing(h) == [VisualState.IDLE, "start"]
+    assert h.events[h.events.index(PROCESSING) + 2 :] == [
+        SPEAKING,
+        PlaybackFinished("kitchen", playback_id, False),
+        IDLE,
+    ]
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors == [
+        f"speak playback_id={playback_id}: TTS failed: could not connect to the TTS service: "
+        "refused; nothing to play"
+    ]
+
+
+def test_tts_failing_mid_stream_plays_what_was_produced(caplog: pytest.LogCaptureFixture) -> None:
+    asyncio.run(_test_tts_failing_mid_stream(caplog))
+
+
+async def _test_tts_failing_mid_stream(caplog: pytest.LogCaptureFixture) -> None:
+    h = Harness(reply_timeout=10)
+    h.tts.chunks = h.tts.chunks[:2]
+    h.tts.fail_after_chunks = True
+    await accepted(h)
+    playback_id = h.session.speak("Jest piąta.", 0.7)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert after_processing(h) == [BEGIN, ("chunk", CHUNK_BYTES), ("chunk", CHUNK_BYTES), "end"] + [
+        VisualState.IDLE,
+        "start",
+    ]
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
+    assert h.tts.open == 0
+    assert any("playing what was produced" in r.getMessage() for r in caplog.records)
+
+
+def test_audio_past_the_produce_bound_is_cut_and_played(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(session_module, "PLAYBACK_PRODUCE_TIMEOUT_SECONDS", 0.1)
+    asyncio.run(_test_produce_bound(caplog))
+
+
+async def _test_produce_bound(caplog: pytest.LogCaptureFixture) -> None:
+    h = Harness(reply_timeout=10)
+    h.tts.chunks = h.tts.chunks * 10
+    h.tts.chunk_delay = 0.04
+    await accepted(h)
+    playback_id = h.session.speak("Jest piąta.", 0.7)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    played = after_processing(h)
+    assert played[0] == BEGIN and played[-3:] == ["end", VisualState.IDLE, "start"]
+    assert 1 <= played.count(("chunk", CHUNK_BYTES)) <= 3
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
+    assert h.tts.open == 0
+    assert any("audio not complete within 0.1 s" in r.getMessage() for r in caplog.records)
+
+
+def test_a_playback_that_never_finishes_recovers_and_still_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_module, "PLAYBACK_FINISHED_MARGIN_SECONDS", 0.05)
+    asyncio.run(_test_playback_never_finishes())
+
+
+async def _test_playback_never_finishes() -> None:
+    h = Harness(reply_timeout=10)
+    h.driver.silent.add(PlaybackEnd)
+    await accepted(h)
+    playback_id = h.session.speak("Jest piąta.", 0.7)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    # 0.3 s of audio: bound 2 x 0.3 + 0.05 s.
+    assert h.events[h.events.index(SPEAKING) :] == [
+        SPEAKING,
+        PlaybackFinished("kitchen", playback_id, False),
+        OFFLINE,
+        IDLE,
+    ]
+    assert h.driver.closes == 1 and h.sleeps == [1.0]
+
+
+def test_a_disconnect_mid_speak_recovers_and_still_finishes() -> None:
+    asyncio.run(_test_a_disconnect_mid_speak())
+
+
+async def _test_a_disconnect_mid_speak() -> None:
+    h = Harness(reply_timeout=10)
+    h.driver.fail_on.add(PlaybackChunk)
+    await accepted(h)
+    playback_id = h.session.speak("Jest piąta.", 0.7)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.events[h.events.index(SPEAKING) :] == [
+        SPEAKING,
+        PlaybackFinished("kitchen", playback_id, False),
+        OFFLINE,
+        IDLE,
+    ]
+    assert h.tts.open == 0
+
+
+def test_a_disconnect_right_after_the_ack_still_finishes() -> None:
+    asyncio.run(_test_a_disconnect_right_after_the_ack())
+
+
+async def _test_a_disconnect_right_after_the_ack() -> None:
+    h = Harness(reply_timeout=10)
+    await accepted(h)
+    playback_id = h.session.speak("Jest piąta.", 0.7)
+    h.driver.push(MicrophoneUnavailable("connection lost"))  # in the same step as the ack
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    finished = h.events.index(PlaybackFinished("kitchen", playback_id, False))
+    assert len(h.hub(PlaybackFinished)) == 1
+    assert h.events[finished + 1 :] == [OFFLINE, IDLE]
+
+
+def test_after_the_reply_timeout_a_speak_is_busy() -> None:
+    asyncio.run(_test_after_the_reply_timeout_a_speak_is_busy())
+
+
+async def _test_after_the_reply_timeout_a_speak_is_busy() -> None:
+    h = Harness(reply_timeout=0.05)
+    await accepted(h)
+    await h.until(lambda: CueType.TIMEOUT in h.driver.without_ids())
+    assert busy(lambda: h.session.speak("Za późno.", 0.7)) == ErrorCode.BUSY
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert not h.hub(PlaybackFinished)
+
+
+def test_shutdown_mid_speak_closes_the_synthesis_and_emits_nothing() -> None:
+    asyncio.run(_test_shutdown_mid_speak())
+
+
+async def _test_shutdown_mid_speak() -> None:
+    h = Harness(reply_timeout=10)
+    h.tts.chunk_delay = 1.0
+    await accepted(h)
+    h.session.speak("Jest piąta.", 0.7)
+    await h.until(lambda: h.tts.open == 1)
+    await h.stop()
+    assert h.tts.open == 0 and not h.hub(PlaybackFinished)

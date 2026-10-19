@@ -1,10 +1,16 @@
-"""Per-satellite session (design.md §4.1 steps 1-5): arm, wake candidate, accept or cancel,
-reply timeout, re-arm. P0: no follow-up, busy policy, speak/play/release or speaker hint (P1).
+"""Per-satellite session (design.md §4.1 steps 1-6): arm, wake candidate, accept or cancel,
+then a reply (`speak` or `release`, T-017) or the reply timeout, then re-arm. Not yet: follow-up
+(T-020), idle announcements and `stop` (T-019), `play` (T-021), the speaker hint (T-018).
 
 One `SatelliteSession.run()` task per satellite. It is the driver's only command sender and
 reads the driver's events in order, so everything about speech segment N is emitted before
 anything about segment N+1. `MicrophoneUnavailable` re-arms after a backoff; any other
 exception, including a protocol invariant failure, propagates (fail loudly, design.md §9).
+
+`speak` and `release` are called by the API task (T-017). They only check the state and hand the
+request to `run()` through a one-shot future, so `run()` stays the only command sender. Every
+`ack`ed `speak` ends with exactly one `playback_finished` while the hub runs, also when TTS or the
+satellite fails (T-017 plan), like every `wake` ends with `transcript_final` or `wake_cancelled`.
 """
 
 import asyncio
@@ -14,8 +20,10 @@ from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from piotr_voice_hub.config import SatelliteConfig
+from piotr_voice_hub.hub.commands import CommandError, ErrorCode
 from piotr_voice_hub.hub.events import (
     HubEvent,
+    PlaybackFinished,
     SatelliteState,
     SatelliteStatus,
     TranscriptFinal,
@@ -34,6 +42,9 @@ from piotr_voice_hub.satellites.messages import (
     ListeningStopped,
     MicrophoneCommand,
     MicrophoneEvent,
+    PlaybackBegin,
+    PlaybackChunk,
+    PlaybackEnd,
     PlayCue,
     ResetWakeCandidate,
     SetVisualState,
@@ -43,8 +54,10 @@ from piotr_voice_hub.satellites.messages import (
     StopListening,
     VisualState,
 )
+from piotr_voice_hub.satellites.messages import PlaybackFinished as DriverPlaybackFinished
 from piotr_voice_hub.satellites.protocol import MicrophoneProtocolState
 from piotr_voice_hub.stt.whisper import StreamingTextEvent, TextEnd
+from piotr_voice_hub.tts.interfaces import TextToSpeech, TtsError
 
 BACKOFF_FIRST_SECONDS = 1.0
 BACKOFF_MAX_SECONDS = 30.0
@@ -52,6 +65,13 @@ EVENT_TIMEOUT_SECONDS = 10.0  # for an event the driver owes us (started, stoppe
 SHUTDOWN_TIMEOUT_SECONDS = 3.0  # stop listening (waits for the stop ack) and go idle
 SEGMENT_MARGIN_SECONDS = 0.1  # the driver ends a segment on a whole 32 ms frame
 BYTES_PER_MS = 32  # 16 kHz, 16-bit mono
+# PlaybackBegin -> PlaybackEnd, which is also the bound on one synthesis once its audio starts
+# (before that, the TTS client's connect and first-audio bounds). 1000 characters (the cap)
+# take about 1 s on the GPU; past this, what was produced is played and the rest dropped.
+PLAYBACK_PRODUCE_TIMEOUT_SECONDS = 30.0
+# PlaybackEnd -> PlaybackFinished: above the driver's own drain bounds (T-014: about
+# 2 x the audio + 35 s); past this the driver is treated as unavailable.
+PLAYBACK_FINISHED_MARGIN_SECONDS = 60.0
 
 _logger = logging.getLogger(__name__)
 
@@ -68,6 +88,18 @@ class SttSession(Protocol):
 
 class Stt(Protocol):
     def create_streaming_session(self, session_id: str, max_audio_seconds: float) -> SttSession: ...
+
+
+@dataclasses.dataclass(frozen=True)
+class _Speak:
+    playback_id: str
+    text: str
+    volume: float
+
+
+@dataclasses.dataclass(frozen=True)
+class _Release:
+    pass
 
 
 @dataclasses.dataclass
@@ -87,10 +119,13 @@ class SatelliteSession:
         stt: Stt,
         emit: Emit,
         sleep: Sleep = asyncio.sleep,
+        *,
+        tts: TextToSpeech,
     ) -> None:
         self._config = config
         self._microphone = microphone
         self._stt = stt
+        self._tts = tts
         self._emit = emit
         self._sleep = sleep
         self._max_audio_seconds = config.max_segment_seconds + SEGMENT_MARGIN_SECONDS
@@ -99,6 +134,8 @@ class SatelliteSession:
         self._listen_id: str | None = None
         self._segment: _Segment | None = None  # owned until finished or abandoned
         self._open_wake: str | None = None  # `wake` sent, no transcript_final/wake_cancelled yet
+        self._reply: asyncio.Future[_Speak | _Release] | None = None  # set while one is awaited
+        self._open_playback: str | None = None  # `speak` acked, no playback_finished yet
         self._last_status: SatelliteStatus | None = None
         self._running = False  # run() is running; shutdown() needs it stopped
         self._logger = logging.getLogger(f"{__name__}[{config.id}]")
@@ -148,6 +185,27 @@ class SatelliteSession:
         finally:
             await self._microphone.close()
         self._logger.info("shut down")
+
+    # Commands (T-017), called from the API task
+
+    def speak(self, text: str, volume: float) -> str:
+        """Accept a reply to speak; the playback_id. CommandError if it cannot be taken now."""
+        playback_id = new_id("playback")
+        self._take_reply(_Speak(playback_id, text, volume))
+        self._open_playback = playback_id
+        return playback_id
+
+    def release(self) -> None:
+        """No reply: re-arm without the timeout cue. CommandError if not waiting for one."""
+        self._take_reply(_Release())
+
+    def _take_reply(self, reply: _Speak | _Release) -> None:
+        if self._last_status is None or not self._last_status.connected:
+            raise CommandError(ErrorCode.SATELLITE_OFFLINE, f"{self._config.id} is offline")
+        if self._reply is None or self._reply.done():
+            state = self._last_status.state.value
+            raise CommandError(ErrorCode.BUSY, f"{self._config.id} is {state}, not processing")
+        self._reply.set_result(reply)
 
     # Steps
 
@@ -259,16 +317,86 @@ class SatelliteSession:
         )
 
     async def _wait_for_reply(self) -> None:
-        """P0: nothing can answer (speak/release are P1), so this always runs to the timeout.
-        Reading events here notices a disconnect at once."""
+        """Wait for `speak` or `release`, at most the reply timeout. Reading events meanwhile
+        notices a disconnect at once."""
+        reply = self._reply = asyncio.get_running_loop().create_future()
+        reader = asyncio.create_task(self._event())
         try:
-            async with asyncio.timeout(self._config.reply_timeout_seconds):
-                event = await self._event()
-        except TimeoutError:
+            await asyncio.wait(
+                {reply, reader},
+                timeout=self._config.reply_timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            self._reply = None
+            reply.cancel()  # no-op once a command set it; later commands are busy
+            reader.cancel()
+            await asyncio.wait({reader})  # wait_for_event is cancel-safe
+        if not reader.cancelled():
+            if (error := reader.exception()) is not None:
+                raise error  # MicrophoneUnavailable: an acked speak ends in _recover
+            raise AssertionError(f"unexpected event while waiting for a reply: {reader.result()}")
+        if reply.cancelled():
             self._logger.info("reply timeout after %g s", self._config.reply_timeout_seconds)
             await self._play_cue(CueType.TIMEOUT)
             return
-        raise AssertionError(f"unexpected event while waiting for a reply: {event}")
+        request = reply.result()
+        if isinstance(request, _Release):
+            self._logger.info("released")
+            return
+        await self._speak(request)
+
+    async def _speak(self, request: _Speak) -> None:
+        playback_id = request.playback_id
+        self._status(True, SatelliteState.SPEAKING)
+        self._logger.info(
+            "speaking playback_id=%s (%d characters, volume %g)",
+            playback_id,
+            len(request.text),
+            request.volume,
+        )
+        began = False
+        audio_bytes = 0
+        byte_rate = 1
+        produce = asyncio.timeout(PLAYBACK_PRODUCE_TIMEOUT_SECONDS)
+        try:
+            async with self._tts.synthesize(request.text) as speech:
+                audio = speech.format
+                byte_rate = audio.rate * audio.width * audio.channels
+                await self._command(
+                    PlaybackBegin(
+                        playback_id, audio.rate, audio.width, audio.channels, request.volume
+                    )
+                )
+                began = True
+                async with produce:
+                    async for chunk in speech:
+                        await self._command(PlaybackChunk(playback_id, chunk))
+                        audio_bytes += len(chunk)
+        except TtsError as error:
+            self._logger.error(
+                "speak playback_id=%s: TTS failed: %s; %s",
+                playback_id,
+                error,
+                "playing what was produced" if began else "nothing to play",
+            )
+        except TimeoutError:
+            if not produce.expired():
+                raise
+            self._logger.error(
+                "speak playback_id=%s: audio not complete within %g s; playing what was produced",
+                playback_id,
+                PLAYBACK_PRODUCE_TIMEOUT_SECONDS,
+            )
+        if began:
+            audio_seconds = audio_bytes / byte_rate
+            await self._command(PlaybackEnd(playback_id))
+            await self._expect(
+                DriverPlaybackFinished(playback_id),
+                2 * audio_seconds + PLAYBACK_FINISHED_MARGIN_SECONDS,
+            )
+            self._logger.info("played playback_id=%s (%.1f s)", playback_id, audio_seconds)
+        self._finish_playback()
 
     async def _play_cue(self, cue_type: CueType) -> None:
         cue_id = new_id("cue")
@@ -287,13 +415,14 @@ class SatelliteSession:
         self._protocol.event(event)
         return event
 
-    async def _expect(self, expected: MicrophoneEvent) -> None:
+    async def _expect(self, expected: MicrophoneEvent, timeout: float | None = None) -> None:
+        timeout = EVENT_TIMEOUT_SECONDS if timeout is None else timeout
         try:
-            async with asyncio.timeout(EVENT_TIMEOUT_SECONDS):
+            async with asyncio.timeout(timeout):
                 event = await self._event()
         except TimeoutError as error:
             raise MicrophoneUnavailable(
-                f"no {type(expected).__name__} within {EVENT_TIMEOUT_SECONDS:g} s"
+                f"no {type(expected).__name__} within {timeout:g} s"
             ) from error
         assert event == expected, f"expected {expected}, got {event}"
 
@@ -301,6 +430,7 @@ class SatelliteSession:
         self._listen_id = None
         await self._abandon_segment()
         self._cancel_wake()  # every `wake` ends with transcript_final or wake_cancelled
+        self._finish_playback()  # every acked `speak` ends with playback_finished
         self._status(False, SatelliteState.ERROR)
         await self._microphone.close()
         self._protocol = MicrophoneProtocolState()  # the driver forgot everything too
@@ -335,6 +465,11 @@ class SatelliteSession:
         if self._open_wake is not None:
             self._emit(WakeCancelled(self._config.id, self._open_wake))
             self._open_wake = None
+
+    def _finish_playback(self) -> None:
+        if self._open_playback is not None:
+            self._emit(PlaybackFinished(self._config.id, self._open_playback, False))
+            self._open_playback = None
 
     def _status(self, connected: bool, state: SatelliteState) -> None:
         status = SatelliteStatus(self._config.id, self._config.area, connected, state)

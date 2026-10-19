@@ -204,6 +204,7 @@ async def run_hub(config: HubConfig) -> int:
     covered by the live check, T-012 log)."""
     # Imported here so --help and the unit tests do not load onnxruntime or faster-whisper.
     from piotr_voice_hub.hub.api import ApiServer
+    from piotr_voice_hub.hub.commands import CommandRouter
     from piotr_voice_hub.hub.playback_http import PlaybackHttpServer
     from piotr_voice_hub.hub.session import SatelliteSession
     from piotr_voice_hub.satellites.esphome import EsphomeSatellite
@@ -228,9 +229,16 @@ async def run_hub(config: HubConfig) -> int:
             ),
             stt,
             api.publish,
+            tts=tts,
         )
         for s in config.satellites
     ]
+    api.set_command_handler(
+        CommandRouter(
+            {s.id: session for s, session in zip(config.satellites, sessions, strict=True)},
+            config.tts.volume,
+        ).handle
+    )
     names = [s.id for s in config.satellites]
     # Started before and closed after everything else; nothing streams before the sessions.
     await playback.start()

@@ -154,6 +154,33 @@ def test_remaining_seconds_counts_from_the_first_chunk_sent() -> None:
     run(scenario)
 
 
+def test_the_close_timeout_covers_a_full_buffer_at_the_stream_rate() -> None:
+    assert playback_http.close_timeout(None) == 5.0  # a 404 or a failed request
+    assert playback_http.close_timeout(44100) == 5.0  # Piper: 64 KiB is 1.5 s
+    assert playback_http.close_timeout(16000) == pytest.approx(65536 / 16000 + 2.0)  # 6.1 s
+
+
+def test_a_get_closes_with_its_stream_rate(monkeypatch: pytest.MonkeyPatch) -> None:
+    rates: list[int | None] = []
+
+    def recording(byte_rate: int | None) -> float:
+        rates.append(byte_rate)
+        return 5.0
+
+    monkeypatch.setattr(playback_http, "close_timeout", recording)
+
+    async def scenario() -> None:
+        async with serving() as server:
+            stream = server.open_stream("pb-1", 8000, WIDTH, CHANNELS, LOOPBACK)
+            stream.end()
+            await get_wav(server, "pb-1")
+            await get(server, b"GET /unknown.wav HTTP/1.1\r\n\r\n")
+            await asyncio.sleep(0.05)
+
+    run(scenario)
+    assert rates == [16000, None, 16000]  # the GET, the 404, then the server's own close
+
+
 def test_close_ends_an_open_get_and_unblocks_its_done() -> None:
     async def scenario() -> None:
         server = PlaybackHttpServer("127.0.0.1", 0)
