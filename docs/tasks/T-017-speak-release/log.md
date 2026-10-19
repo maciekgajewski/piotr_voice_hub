@@ -34,3 +34,10 @@
   - All 7 Piper GPU tests passed (T-015 service, T-016 client, T-017 speak).
   - Torn down: `down`, the `:t017` image deleted, 10211 free. The running hub, its Piper,
     and Maciej's containers untouched (not exec'd into, not restarted).
+- PR #21 opened; then PR #20 (T-016 follow-up) was merged as 8803766, so the branch was rebased
+  onto it. One conflict, the header comment of `tools/piper-gpu-test.sh`; `run_hub` merged
+  cleanly (the TTS client from #20's startup wait is the one handed to the sessions; its
+  `TtsUnavailableError` is a `TtsError`, so the session's handling covers it).
+- After the rebase: `make check` 3× green; the GPU end to end again with our own Piper
+  (`-p piotr-voice-hub-t017`, `:t017` image, port 10211): 7 passed, `speak` 3.59 s of audio,
+  `ack` → `playback_finished` 3.97 s. Torn down the same way; 10211 free, production untouched.

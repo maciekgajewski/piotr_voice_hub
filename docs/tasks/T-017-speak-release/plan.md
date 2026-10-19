@@ -1,7 +1,7 @@
 # T-017: speak and release: plan
 
-**Status:** planned (2026-10-19). Branch `t-017-speak-release` from `origin/main` (0fac79f).
-It does not need PR #20 (in review): `TtsError` from main is enough here.
+**Status:** in review (2026-10-19). Branch `t-017-speak-release`, started from `origin/main`
+(0fac79f) since it does not need PR #20, then rebased onto 8803766 once #20 was merged.
 
 ## Scope (docs/tasks/README.md, design.md §4.1 steps 5-6, §6)
 
