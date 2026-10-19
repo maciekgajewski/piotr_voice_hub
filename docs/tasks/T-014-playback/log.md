@@ -90,3 +90,26 @@
 
   `_fail()` now releases the playback (cancels the drain), so a transport stop or any failure
   ends it without `PlaybackFinished`.
+
+## 2026-10-19: PR #16 re-review 5569228184
+
+- **B1:** the 10 s write limit covered a whole chunk. A reader at exactly the audio rate needs
+  as long as the chunk's audio, so any chunk over about 10 s cut off a healthy satellite (the
+  reviewer's 40 s chunk had 0 bytes sent). Audio is now written in slices of at most 16 KiB
+  (`SEND_SLICE_BYTES`), with the 10 s limit per slice (write plus drain).
+  - The test drives the real handler with a writer whose peer reads at exactly the audio rate:
+    one 2 s chunk at 16000 bytes/s with a 0.3 s limit. Sliced at 1 KiB, it is all sent in about
+    2 s; written whole (the old behaviour), it is cut off with 0 bytes.
+  - The real-socket stall test still fails fast (0.3 s limit, about 0.3 s).
+- **Nits:**
+  1. On the write-error path the transport is aborted, not closed, since `close()` +
+     `wait_closed()` flushes to the stalled peer. A slow normal close is aborted after 5 s.
+     Test: a stalled writer whose flushing close never ends; the handler returns in under 1 s.
+     With the old close it would take the 5 s close timeout.
+  2. A satellite with an open stream is exempt from the 8-connection cap. Test with 127.0.0.x
+     sources on loopback: the cap is held, another address is refused, and the satellite is
+     served.
+  3. A live id requested from another IP gets 404, like an unknown id; the log line says
+     which IP may fetch it. Docs and tests updated.
+  4. plan.md: an unsupported audio format is a `ValueError` that is not caught. It is a
+     producer bug, so it takes the session down on purpose.

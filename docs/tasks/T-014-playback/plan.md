@@ -89,17 +89,22 @@ playback, instead of one server per playback on a random port.
    - `open_stream(playback_id, rate, width, channels, client_ip)` returns a `PlaybackStream`
      holding at most `MAX_STREAM_SECONDS` (300 s) of audio; more is `StreamFull`.
      - Formats: 16-bit PCM, 1 or 2 channels, at 8000, 11025, 16000, 22050, 24000, 32000, 44100
-       or 48000 Hz. Anything else is a `ValueError` before anything is sent.
+       or 48000 Hz. Anything else is a `ValueError` before anything is sent. It is not caught:
+       a bad format is a producer bug, so it takes the session (and the hub) down on purpose.
      - `GET /<playback_id>.wav` gets the endless WAV header (the old driver's), then the chunks
        as they arrive, until the stream ends or is released.
    - One GET per stream, and only from the satellite's IP. An unknown, released or already
-     fetched id, or a non-GET, gets 404; another IP gets 403. At most 8 connections at once;
-     more are closed at once.
-   - Bounds: reading the request takes at most 5 s, one blocked write at most 10 s, closing at
-     most 5 s.
-     - A device that stops reading mid-stream fills the socket buffers. The next write then
-       blocks and is cut off after 10 s, so the GET ends incomplete. A playing device reads at
-       least at the audio rate, so a healthy write never waits that long.
+     fetched id, a non-GET, or a request from another IP gets 404 (another IP is told nothing
+     more than for an unknown id). At most 8 connections at once from other addresses; more
+     are aborted at once. A satellite with an open stream is never refused.
+   - Bounds: reading the request takes at most 5 s, closing at most 5 s (then abort).
+     - Audio is written in slices of at most 16 KiB, each with its own 10 s write limit (write
+       plus drain). A device that reads at exactly the audio rate needs at most about 0.37 s
+       per slice (22050 Hz mono), whatever the chunk size. One limit for a whole chunk would
+       cut off a healthy device for any chunk over about 10 s of audio (PR #16 re-review B1).
+     - A device that stops reading mid-stream fills the socket buffers. The next slice then
+       blocks and is cut off after 10 s, so the GET ends incomplete. On that error path the
+       connection is aborted, not closed: `close()` would first flush to the stalled peer.
      - Not bounded: the writer's wait for the next chunk, i.e. `PlaybackBegin` to
        `PlaybackEnd`. That bound is the producer's (P1 session/TTS carry-forward).
 2. **Driver (`EsphomeSatellite`, optional `playback_server`; the wake-test runner has none):**

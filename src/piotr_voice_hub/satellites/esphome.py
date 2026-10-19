@@ -683,7 +683,7 @@ class EsphomeSatellite:
                 f"{STREAM_REQUEST_TIMEOUT_SECONDS:g} s"
             )
             return
-        # A stalled reader is cut off by the server's per-write timeout, which sets `done`;
+        # A stalled reader is cut off by the server's per-slice write timeout, which sets `done`;
         # this outer bound only covers a server that never finishes.
         done_timeout = STREAM_DONE_EXTRA_SECONDS + stream.audio_seconds
         try:

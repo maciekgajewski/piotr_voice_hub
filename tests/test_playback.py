@@ -44,8 +44,9 @@ async def serving() -> AsyncIterator[PlaybackHttpServer]:
         await server.close()
 
 
-async def get(server: PlaybackHttpServer, request: bytes) -> bytes:
-    reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+async def get(server: PlaybackHttpServer, request: bytes, source: str = LOOPBACK) -> bytes:
+    """`source`: any 127.x.y.z, to stand in for another LAN address (Linux loopback)."""
+    reader, writer = await asyncio.open_connection(LOOPBACK, server.port, local_addr=(source, 0))
     writer.write(request)
     try:
         return await asyncio.wait_for(reader.read(), 2.0)
@@ -53,8 +54,9 @@ async def get(server: PlaybackHttpServer, request: bytes) -> bytes:
         writer.close()
 
 
-async def get_wav(server: PlaybackHttpServer, playback_id: str) -> bytes:
-    return await get(server, f"GET /{playback_id}.wav HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+async def get_wav(server: PlaybackHttpServer, playback_id: str, source: str = LOOPBACK) -> bytes:
+    request = f"GET /{playback_id}.wav HTTP/1.1\r\nHost: x\r\n\r\n".encode()
+    return await get(server, request, source)
 
 
 def run(scenario: Callable[[], Awaitable[None]]) -> None:
@@ -342,30 +344,138 @@ def test_playback_only_while_disarmed() -> None:
     run(scenario)
 
 
-def test_only_the_satellite_ip_may_fetch_a_stream() -> None:
+def test_another_ip_gets_404_like_an_unknown_id_and_the_satellite_can_still_fetch() -> None:
     async def scenario() -> None:
         async with serving() as server:
-            stream = server.open_stream("pb-1", RATE, WIDTH, CHANNELS, "10.0.0.5")
-            assert (await get_wav(server, "pb-1")).startswith(b"HTTP/1.1 403 Forbidden\r\n")
-            assert not stream.requested.is_set()  # the satellite can still fetch it
+            stream = server.open_stream("pb-1", RATE, WIDTH, CHANNELS, "127.0.0.2")
+            assert (await get_wav(server, "pb-1")).startswith(b"HTTP/1.1 404 Not Found\r\n")
+            assert not stream.requested.is_set()
+            body = asyncio.create_task(get_wav(server, "pb-1", source="127.0.0.2"))
+            await asyncio.wait_for(stream.requested.wait(), 2.0)
+            stream.end()
+            assert (await body).startswith(OK_HEAD)
 
     run(scenario)
 
 
-def test_connections_over_the_cap_are_closed_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connections_over_the_cap_are_closed_at_once_except_for_a_satellite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(playback_http, "MAX_CONNECTIONS", 1)
 
+    async def refused(source: str) -> None:
+        try:  # closed without a response (aborted: a reset)
+            assert await get_wav(server, "nope", source) == b""
+        except ConnectionResetError:
+            pass
+
     async def scenario() -> None:
+        nonlocal server
         async with serving() as server:
-            _, idle = await asyncio.open_connection(LOOPBACK, server.port)  # holds the one slot
+            _, idle = await asyncio.open_connection(  # holds the one slot
+                LOOPBACK, server.port, local_addr=("127.0.0.3", 0)
+            )
             await asyncio.sleep(0.05)
-            try:  # closed without a response (a reset, as the request was not read)
-                assert await get_wav(server, "nope") == b""
-            except ConnectionResetError:
-                pass
+            await refused("127.0.0.4")
+            stream = server.open_stream("pb-1", RATE, WIDTH, CHANNELS, "127.0.0.2")
+            body = asyncio.create_task(get_wav(server, "pb-1", source="127.0.0.2"))
+            await asyncio.wait_for(stream.requested.wait(), 2.0)  # served despite the cap
+            stream.end()
+            assert (await body).startswith(OK_HEAD)
+            await refused("127.0.0.4")
             idle.close()
             await asyncio.sleep(0.05)
             assert (await get_wav(server, "nope")).startswith(b"HTTP/1.1 404")  # slot is free
+
+    server = PlaybackHttpServer(LOOPBACK, 0)
+    run(scenario)
+
+
+class RateWriter:
+    """A StreamWriter whose peer reads at exactly `byte_rate` (drain takes as long as the
+    buffered audio), or never (`stalled`: drain and a flushing close hang until aborted)."""
+
+    def __init__(self, byte_rate: float, stalled: bool = False) -> None:
+        self.byte_rate, self.stalled = byte_rate, stalled
+        self.data = bytearray()
+        self.pending = 0
+        self.aborted = False
+        self.transport = self
+
+    def get_extra_info(self, name: str) -> object:
+        assert name == "peername"
+        return (LOOPBACK, 40000)
+
+    def write(self, data: bytes) -> None:
+        self.data += data
+        self.pending += len(data)
+
+    async def drain(self) -> None:
+        if self.stalled:
+            await asyncio.Event().wait()
+        await asyncio.sleep(self.pending / self.byte_rate)
+        self.pending = 0
+
+    def close(self) -> None:
+        pass
+
+    async def wait_closed(self) -> None:
+        if self.stalled:
+            await asyncio.Event().wait()  # flushing to a peer that never reads
+
+    def abort(self) -> None:
+        self.aborted = True
+
+
+async def handle(server: PlaybackHttpServer, writer: RateWriter) -> None:
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"GET /pb-1.wav HTTP/1.1\r\nHost: x\r\n\r\n")
+    await server._handle(reader, writer)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(("slice_bytes", "complete"), [(1024, True), (1 << 20, False)])
+def test_a_reader_at_exactly_the_audio_rate_gets_one_big_chunk(
+    monkeypatch: pytest.MonkeyPatch, slice_bytes: int, complete: bool
+) -> None:
+    """PR #16 re-review B1, scaled: a 2 s chunk with a 0.3 s write limit. Sliced (1 KiB, 64 ms
+    of audio each) it is all sent; written whole (the old code) it is cut off."""
+    monkeypatch.setattr(playback_http, "SEND_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(playback_http, "SEND_SLICE_BYTES", slice_bytes)
+
+    async def scenario() -> None:
+        server = PlaybackHttpServer(LOOPBACK, 0)
+        stream = server.open_stream("pb-1", 8000, 2, 1, LOOPBACK)  # 16000 bytes/s
+        chunk = bytes(range(256)) * 125  # 32000 bytes: 2 s of audio
+        stream.write(chunk)
+        stream.end()
+        writer = RateWriter(byte_rate=16000)
+        started = time.monotonic()
+        await handle(server, writer)
+        assert stream.complete is complete
+        if complete:
+            assert bytes(writer.data).endswith(wav_header(8000, 2, 1) + chunk)
+            assert 1.9 < time.monotonic() - started < 3.0  # paced by the reader
+            assert not writer.aborted
+        else:
+            assert writer.aborted and stream.sent_bytes == 0
+
+    run(scenario)
+
+
+def test_a_stalled_reader_is_aborted_and_the_handler_does_not_hang(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(playback_http, "SEND_TIMEOUT_SECONDS", 0.2)
+
+    async def scenario() -> None:
+        server = PlaybackHttpServer(LOOPBACK, 0)
+        stream = server.open_stream("pb-1", RATE, WIDTH, CHANNELS, LOOPBACK)
+        stream.write(bytes(BYTE_RATE))
+        writer = RateWriter(byte_rate=1, stalled=True)
+        started = time.monotonic()
+        await handle(server, writer)  # close() + wait_closed() would hang here
+        assert time.monotonic() - started < 1.0
+        assert writer.aborted and stream.done.is_set() and not stream.complete
 
     run(scenario)
 
