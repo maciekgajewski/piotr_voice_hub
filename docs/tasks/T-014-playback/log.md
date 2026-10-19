@@ -42,3 +42,8 @@
   `speak` command, so the hardware check is in P1.
 - docs/tasks/README.md: the T-014 table row is left as is, to avoid a conflict with PR #15,
   which edits the line after it. Its status follows when both are merged.
+
+## 2026-10-19: rebased onto main after PR #15
+
+- PR #15 was merged as 68dab8b. `t-014-playback` was rebased onto it without conflicts, and
+  the T-014 row in docs/tasks/README.md now says "in review (PR #16)".

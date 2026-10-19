@@ -20,7 +20,7 @@ one PR (AGENTS.md). Order is the dependency order.
 | T-010 session | Per-satellite session state machine with the wake matcher (accept, cancel, reply timeout); follow-up and busy handling are P1 | merged |
 | T-011 api | WebSocket API events only (commands such as speak/play/stop/release are P1) | merged |
 | T-012 main-compose | Hub main wiring and compose with the hub only | merged |
-| T-014 esphome-playback | ESPHome playback split from T-007: shared playback HTTP server, media_player announce, drain, PlaybackFinished | planned |
+| T-014 esphome-playback | ESPHome playback split from T-007: shared playback HTTP server, media_player announce, drain, PlaybackFinished | in review (PR #16) |
 
 P0 is done except T-014 (playback): the hub runs on piotr under compose, and the acceptance test
 (PR #14 manual checklist) has no audible reply yet, only the reply-timeout cue.
