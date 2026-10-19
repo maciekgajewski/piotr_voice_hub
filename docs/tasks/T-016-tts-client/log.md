@@ -103,3 +103,40 @@
     contacted. Copy deleted.
   - Torn down: `down` (container removed), the `:t016` image deleted, 10211 free. The hub,
     production piper and Maciej's containers kept running untouched.
+- PR #19 merged as 0fac79f (review 5570976280, MERGE, with should-fix S1–S3 and nits N1–N6).
+  Follow-up branch `t-016-followup` from `origin/main`, worktree
+  `~/src/piotr_voice_hub-t016f`; plan.md has the follow-up section.
+  - S1: `_Connection.receive` turns `KeyError`/`TypeError`/`AttributeError` from wyoming's
+    reader into `TtsError("malformed event while waiting for …")`. Tests: a header without
+    `type`, a JSON array, `"data_length": "x"`, each before audio-start, mid-stream and in
+    describe (raw writes from the fake).
+  - S2: `TtsUnavailableError(TtsError)` from a failed or timed-out connect and from a reset
+    connection; `check_tts` retries only that, every 2 s, up to 120 s, a WARNING per attempt,
+    INFO when reachable; a wrong voice, any other `TtsError` and the overall timeout are one
+    CRITICAL line and exit 1. Clock, sleep and both bounds are injectable; tests for waiting
+    then success, the overall timeout (6 attempts in 10 s), and a wrong voice after a wait.
+    The compose comment now says `depends_on` orders only `docker compose up`.
+  - S3: DEBUG lines with a per-client synthesis id: connect (with the length), request sent,
+    audio-start (format, latency), audio-stop / stopped early / cancelled / failed (bytes,
+    time), and describe connect and info. A test checks the text itself is never logged.
+  - N1: plan.md: no client-side overall deadline (decided); T-017's PlaybackBegin → End bound
+    plus the per-wait bounds cover it.
+  - N2/N3: tests for a cancel mid-stream (connection closed, `CancelledError`), a reset
+    mid-stream (SO_LINGER 0 + abort in the fake: `TtsError`), and, in a subprocess, the real
+    faulthandler watchdog disarmed after a successful synthesis (`cancel` called, alive after
+    3× the timeout, no "Timeout" on stderr).
+  - N4: plan.md wording (the wake-test entry is in the T-010 log).
+  - N5: `parse_tcp_uri` rejects a query (also an empty `?`), a fragment and user info; the
+    user-info error does not echo the URI. Four config tests.
+  - N6: `tools/piper-gpu-test.sh` comment wrapped.
+  - `make check` 3× green (616 passed, 7 skipped).
+- Live S2 check (13:47–13:49 Europe/Warsaw), own project `piotr-voice-hub-t016f`, own image
+  tag `piotr-voice-hub-piper:t016f` (built directly with `docker build -t`, so `latest` was
+  not touched), port 10211 via an override file:
+  - `check_tts` with the real client started first against 10211 (nothing listening); piper
+    started 20 s later.
+  - WARNING "waiting for Piper (attempt N, …): connect … failed: ConnectionRefusedError" every
+    2.0 s, 36 times; piper "warm in 49.81 s; serving"; then "Piper reachable after 37
+    attempts, 72.1 s", `check_tts -> True`, exit 0. No CRITICAL.
+  - Torn down: container removed, `:t016f` image deleted, 10211 free. The running
+    `piotr-voice-hub` project (hub, piper) and its `latest` images were not touched.

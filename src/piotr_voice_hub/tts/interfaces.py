@@ -18,6 +18,12 @@ class TtsError(Exception):
     something unexpected. Fail loudly; there are no retries."""
 
 
+class TtsUnavailableError(TtsError):
+    """The service is not reachable: the connect was refused, timed out or failed, or the
+    connection was reset. The hub's startup check waits for it (Piper may still be warming
+    up); everywhere else it is a TtsError like any other."""
+
+
 class TtsTextError(TtsError):
     """The text itself is rejected (empty, or over the cap) before anything is sent."""
 

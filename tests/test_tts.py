@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import socket
+import struct
 from collections.abc import Awaitable, Callable
 
 import pytest
@@ -12,7 +14,12 @@ from wyoming.info import Attribution, Describe, Info, TtsProgram, TtsVoice
 from wyoming.tts import Synthesize
 
 from piotr_voice_hub.config import TtsConfig
-from piotr_voice_hub.tts.interfaces import AudioFormat, TtsError, TtsTextError
+from piotr_voice_hub.tts.interfaces import (
+    AudioFormat,
+    TtsError,
+    TtsTextError,
+    TtsUnavailableError,
+)
 from piotr_voice_hub.tts.wyoming_piper import MAX_TEXT_CHARS, WyomingPiperTts, check_text
 
 VOICE = "pl_PL-bass-high"
@@ -194,7 +201,7 @@ def test_start_fails_on_refused_connection() -> None:
         server.close()
         await server.wait_closed()
         tts = WyomingPiperTts(TtsConfig(uri=f"tcp://127.0.0.1:{port}", voice=VOICE, volume=1.0))
-        with pytest.raises(TtsError, match=f"connect to 127.0.0.1:{port} failed"):
+        with pytest.raises(TtsUnavailableError, match=f"connect to 127.0.0.1:{port} failed"):
             await tts.start()
 
     asyncio.run(test())
@@ -333,3 +340,175 @@ def test_text_at_the_cap_is_accepted() -> None:
 def test_invalid_uri_is_rejected() -> None:
     with pytest.raises(ValueError, match="expected tcp://host:port"):
         WyomingPiperTts(TtsConfig(uri="tcp://host", voice=VOICE, volume=1.0))
+
+
+# --- follow-up (PR #19 review 5570976280) ---------------------------------------------------
+
+
+def writes_raw_then_closes(*lines: bytes) -> Handler:
+    async def handler(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        for line in lines:
+            writer.write(line)
+        await writer.drain()
+        writer.close()
+
+    return handler
+
+
+MALFORMED_HEADERS = [
+    (b'{"data": {}}\n', "KeyError"),
+    (b"[1, 2]\n", "AttributeError"),
+    (b'{"type": "audio-start", "data_length": "x"}\n', "TypeError"),
+]
+
+
+@pytest.mark.parametrize(("header", "kind"), MALFORMED_HEADERS, ids=["no-type", "array", "length"])
+def test_malformed_framing_is_a_tts_error(header: bytes, kind: str) -> None:
+    async def test(tts: WyomingPiperTts, fake: FakePiper) -> None:
+        with pytest.raises(
+            TtsError, match=f"malformed event while waiting for audio-start: {kind}"
+        ):
+            await collect(tts, "Dzień dobry.")
+        await fake.closed.wait()
+
+    run(writes_raw_then_closes(header), test)
+
+
+@pytest.mark.parametrize(("header", "kind"), MALFORMED_HEADERS, ids=["no-type", "array", "length"])
+def test_malformed_framing_mid_stream_and_in_describe(header: bytes, kind: str) -> None:
+    async def mid_stream(tts: WyomingPiperTts, _fake: FakePiper) -> None:
+        with pytest.raises(TtsError, match=f"next audio event: {kind}"):
+            await collect(tts, "Dzień dobry.")
+
+    async def describe(tts: WyomingPiperTts, _fake: FakePiper) -> None:
+        with pytest.raises(TtsError, match=f"malformed event while waiting for info: {kind}"):
+            await tts.start()
+
+    async def start_then_raw(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await async_write_event(START, writer)
+        await writes_raw_then_closes(header)(_reader, writer)
+
+    run(start_then_raw, mid_stream)
+    run(writes_raw_then_closes(header), describe)
+
+
+def test_connect_errors_are_unavailable() -> None:
+    tts = WyomingPiperTts(
+        TtsConfig(uri="tcp://192.0.2.1:10201", voice=VOICE, volume=1.0),
+        connect_timeout=SHORT_BOUND,
+    )
+    with pytest.raises(TtsUnavailableError):
+        asyncio.run(tts.start())
+    assert issubclass(TtsUnavailableError, TtsError)
+
+
+def resets_after(*events: Event) -> Handler:
+    """Sends `events`, then resets the connection (SO_LINGER 0, then abort: an RST)."""
+
+    async def handler(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        for event in events:
+            await async_write_event(event, writer)
+        await asyncio.sleep(0.05)  # let the client read them first
+        sock = writer.get_extra_info("socket")
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        writer.transport.abort()
+
+    return handler
+
+
+def test_a_connection_reset_mid_stream_is_a_tts_error(caplog: pytest.LogCaptureFixture) -> None:
+    async def test(tts: WyomingPiperTts, fake: FakePiper) -> None:
+        received: list[bytes] = []
+        with (
+            caplog.at_level(logging.DEBUG),
+            pytest.raises(TtsError, match="connection (reset|failed)"),
+        ):
+            async with tts.synthesize("Dzień dobry.") as speech:
+                async for pcm in speech:
+                    received.append(pcm)
+        assert received == [b"\0\0"]
+        await fake.closed.wait()
+
+    run(resets_after(START, chunk(b"\0\0")), test)
+    assert "synthesis 1: failed: connection" in caplog.text
+
+
+def test_a_describe_reset_is_unavailable() -> None:
+    async def test(tts: WyomingPiperTts, _fake: FakePiper) -> None:
+        with pytest.raises(TtsUnavailableError, match="connection reset while waiting for info"):
+            await tts.start()
+
+    run(resets_after(), test)
+
+
+def test_cancel_mid_stream_closes_the_connection(caplog: pytest.LogCaptureFixture) -> None:
+    async def test(tts: WyomingPiperTts, fake: FakePiper) -> None:
+        first = asyncio.Event()
+
+        async def consume() -> None:
+            async with tts.synthesize("Dzień dobry.") as speech:
+                async for _pcm in speech:
+                    first.set()
+
+        with caplog.at_level(logging.DEBUG):
+            task = asyncio.create_task(consume())
+            await first.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await fake.closed.wait()
+
+    run(sends(START, chunk(b"\0\0")), test)  # then nothing: the consumer waits
+    assert "synthesis 1: cancelled after 2 bytes" in caplog.text
+
+
+def test_debug_lines_trace_a_synthesis_without_the_text(caplog: pytest.LogCaptureFixture) -> None:
+    text = "Tajny tekst, którego nie wolno logować."
+
+    async def test(tts: WyomingPiperTts, _fake: FakePiper) -> None:
+        with caplog.at_level(logging.DEBUG):
+            await collect(tts, text)
+            await tts.start()
+
+    def handler_factory() -> Handler:
+        calls = 0
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await sends(START, chunk(b"\0\0" * 4), AudioStop().event())(reader, writer)
+            else:
+                await sends(info_event([(VOICE, True)]))(reader, writer)
+
+        return handler
+
+    run(handler_factory(), test)
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any(
+        f"synthesis 1: {len(text)} characters, connecting to 127.0.0.1:" in m for m in messages
+    )
+    assert "synthesis 1: request sent" in messages
+    assert any(m.startswith("synthesis 1: audio-start AudioFormat(rate=22050") for m in messages)
+    assert any(m.startswith("synthesis 1: audio-stop after 8 bytes") for m in messages)
+    assert any(m.startswith("describe: connecting to 127.0.0.1:") for m in messages)
+    assert f"describe: info lists ['{VOICE}']" in messages
+    assert text not in caplog.text
+
+
+def test_debug_lines_for_an_early_stop_and_a_failure(caplog: pytest.LogCaptureFixture) -> None:
+    async def early(tts: WyomingPiperTts, fake: FakePiper) -> None:
+        with caplog.at_level(logging.DEBUG):
+            async with tts.synthesize("Dzień dobry.") as speech:
+                async for _pcm in speech:
+                    break
+        await fake.closed.wait()
+
+    async def failing(tts: WyomingPiperTts, _fake: FakePiper) -> None:
+        with caplog.at_level(logging.DEBUG), pytest.raises(TtsError):
+            await collect(tts, "Dzień dobry.")
+
+    run(sends(START, chunk(b"\0\0"), chunk(b"\0\0")), early)
+    assert "synthesis 1: stopped early (closed before audio-stop) after 2 bytes" in caplog.text
+    run(sends_then_closes(Error(text="boom").event()), failing)
+    assert "synthesis 1: failed: service error: boom" in caplog.text

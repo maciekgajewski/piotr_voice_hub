@@ -20,7 +20,9 @@ services:
     stop_grace_period: 30s  # shutdown is bounded: run() 10 s, sessions 3 s, API 5 s
     network_mode: host  # satellites on the LAN, .local names via zeroconf; API on api.port
     gpus: all
-    # The hub checks Piper at startup and exits 1 without it (T-016); wait for it to be warm.
+    # The hub checks Piper at startup (T-016). This orders `docker compose up` only: after a
+    # reboot or a daemon restart Docker starts both at once, and the hub's check then waits up
+    # to 120 s for Piper to listen (WARNING lines meanwhile) before it exits 1.
     depends_on:
       piper: {condition: service_healthy}
     user: "${HUB_USER:?set HUB_USER=$(id -u):$(id -g), the owner of HUB_CONFIG}"

@@ -159,6 +159,14 @@ def test_missing_file(tmp_path: Path) -> None:
         ),
         ("uri: tcp://127.0.0.1:10200", "uri: tcp://127.0.0.1", r"tts\.uri: .*tcp://host:port"),
         ("uri: tcp://127.0.0.1:10200", "uri: tcp://127.0.0.1:x", r"tts\.uri: .*Port could not"),
+        ("uri: tcp://127.0.0.1:10200", "uri: 'tcp://h:1?x=1'", r"tts\.uri: .*tcp://host:port"),
+        ("uri: tcp://127.0.0.1:10200", "uri: 'tcp://h:1?'", r"tts\.uri: .*tcp://host:port"),
+        ("uri: tcp://127.0.0.1:10200", "uri: 'tcp://h:1#f'", r"tts\.uri: .*tcp://host:port"),
+        (
+            "uri: tcp://127.0.0.1:10200",
+            "uri: 'tcp://u:secret@h:1'",
+            r"hub\.yaml: tts\.uri: expected tcp://host:port, without user info$",
+        ),
         ("uri: tcp://127.0.0.1:10200", "uri: tcp://:10200", r"tts\.uri: .*tcp://host:port"),
         (
             "end_silence_seconds: 0.8",

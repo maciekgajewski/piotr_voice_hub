@@ -4,12 +4,13 @@ satellite, started in that order and shut down in the reverse one."""
 import asyncio
 import logging
 import signal
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 
 from piotr_voice_hub.config import HubConfig
 from piotr_voice_hub.hub.watchdog import Watchdog, heartbeat
-from piotr_voice_hub.tts.interfaces import TextToSpeech, TtsError
+from piotr_voice_hub.tts.interfaces import TextToSpeech, TtsError, TtsUnavailableError
 
 EXIT_OK = 0
 EXIT_FAILED = 1  # a session or startup failed: Docker restarts the container (§9)
@@ -27,6 +28,10 @@ QUIET_LOGGERS = {
 }
 
 logger = logging.getLogger(__name__)
+# The startup TTS check's wait for an unreachable Piper (T-016 follow-up S2): a new Piper
+# container is ready after about 50 s (T-015); the old project waited 30 s for its port.
+TTS_STARTUP_RETRY_SECONDS = 2.0
+TTS_STARTUP_TIMEOUT_SECONDS = 120.0
 
 
 class Stt(Protocol):
@@ -143,15 +148,55 @@ async def run_until_signal(
             watchdog.stop()
 
 
-async def check_tts(tts: TextToSpeech) -> bool:
+async def check_tts(
+    tts: TextToSpeech,
+    *,
+    retry_seconds: float = TTS_STARTUP_RETRY_SECONDS,
+    timeout_seconds: float = TTS_STARTUP_TIMEOUT_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> bool:
     """The startup TTS check: Piper is reachable and describes exactly `tts.voice`. The
-    service warms itself before it listens, so this is only a reachability check."""
-    try:
-        await tts.start()
-    except TtsError as error:
-        logger.critical("TTS startup check failed, exiting: %s", error)
-        return False
-    return True
+    service warms itself before it listens, so this is only a reachability check.
+
+    While Piper is unreachable (`TtsUnavailableError`: refused, reset, connect timed out) it
+    retries every `retry_seconds`, with a WARNING each time, for up to `timeout_seconds`:
+    after a reboot or a Docker daemon restart, `depends_on` does not apply and the hub can
+    start while Piper is still warming up (about 50 s). Any other `TtsError` (a wrong voice, a
+    bad answer) and the overall timeout are CRITICAL, and the hub exits 1. Each attempt is
+    itself bounded (the client's connect and info timeouts)."""
+    started = clock()
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            await tts.start()
+        except TtsUnavailableError as error:
+            waited = clock() - started
+            if waited + retry_seconds > timeout_seconds:
+                logger.critical(
+                    "TTS startup check failed, exiting: Piper not reachable within %g s "
+                    "(%d attempts): %s",
+                    timeout_seconds,
+                    attempt,
+                    error,
+                )
+                return False
+            logger.warning(
+                "waiting for Piper (attempt %d, %.0f s of %g s): %s",
+                attempt,
+                waited,
+                timeout_seconds,
+                error,
+            )
+            await sleep(retry_seconds)
+        except TtsError as error:
+            logger.critical("TTS startup check failed, exiting: %s", error)
+            return False
+        else:
+            if attempt > 1:
+                logger.info("Piper reachable after %d attempts, %.1f s", attempt, clock() - started)
+            return True
 
 
 async def run_hub(config: HubConfig) -> int:

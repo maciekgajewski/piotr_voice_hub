@@ -3,7 +3,8 @@
 **Status:** implemented as below (2026-10-19). First based on `t-015-piper-service` (PR #18);
 rebased onto `main` after #18 merged (e8a5679). No design question changes the
 implementation (see the end). The PR also carries the #18 review nits N1–N4 (a separate
-commit, see the end) and a wake-test log entry for T-013.
+commit, see the end) and a wake-test log entry, in the T-010 log (a separate commit). The
+follow-up PR (review 5570976280) is at the end.
 
 ## Scope (docs/tasks/README.md)
 
@@ -142,3 +143,28 @@ speaker hint (T-018).
 - **N4:** the warm check's thread name and log lines say "warm check", not "warm-up"; the
   compose comment's long line is reflowed; the `MAX_TEXT_CHARS` comment says the client
   rejects (not splits) longer text.
+
+## Follow-up (PR #19 review 5570976280), branch `t-016-followup`
+
+- **S1:** malformed framing (`KeyError`, `TypeError`, `AttributeError` from wyoming's reader,
+  which catches only `ValueError`) is a `TtsError`.
+- **S2:** `TtsUnavailableError(TtsError)` for a refused, failed or timed-out connect and a
+  reset connection. `hub/main.py` `check_tts` retries only that, every 2 s for up to 120 s
+  (`TTS_STARTUP_RETRY_SECONDS`, `TTS_STARTUP_TIMEOUT_SECONDS`, injectable with the clock and
+  sleep), with a WARNING per attempt; a wrong voice, any other `TtsError` and the overall
+  timeout stay one CRITICAL line and exit 1. Why: compose's `depends_on` orders only
+  `docker compose up`; after a reboot or a daemon restart Docker starts both containers at
+  once and Piper needs about 50 s. This is a startup wait, not a synthesis retry; synthesis
+  still never retries.
+- **S3:** DEBUG lines per interaction: describe (connect, info), synthesis (connect with the
+  length, request sent, audio-start with format and latency, audio-stop, stopped early,
+  cancelled, failed), each with a per-client synthesis id. Never the text itself.
+- **N1 (decided: no client limit):** there is no overall deadline per synthesis in the client.
+  Each wait is bounded (first audio 10 s, each next event 10 s), and T-017's bound from
+  `PlaybackBegin` to `PlaybackEnd` in the session is the end-to-end bound per synthesis.
+- **N2/N3:** tests: a cancel mid-stream, a connection reset mid-stream, and the real
+  faulthandler watchdog disarmed after a successful synthesis (no exit after the timeout).
+- **N4:** the wake-test wording above (T-010, not T-013).
+- **N5:** `parse_tcp_uri` rejects a query, a fragment and user info (the latter without
+  echoing the URI).
+- **N6:** `tools/piper-gpu-test.sh`'s comment wrapped at 100.
