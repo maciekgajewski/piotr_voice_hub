@@ -81,7 +81,6 @@ class SpeakerRecognitionConfig:
 class TtsConfig:
     uri: str
     voice: str
-    volume: float
 
 
 @dataclass(frozen=True)
@@ -267,16 +266,14 @@ def _parse_speaker(raw: dict[str, Any]) -> SpeakerRecognitionConfig:
 
 
 def _parse_tts(raw: dict[str, Any]) -> TtsConfig:
-    _keys(raw, "tts", {"uri", "voice", "volume"})
-    volume = _number(raw, "volume", "tts")
-    if not 0.0 <= volume <= 1.0:
-        raise ConfigError(f"tts.volume: must be between 0.0 and 1.0, got {volume}")
+    # No `volume` (T-017 follow-up): `speak` sets one only when the command passes it.
+    _keys(raw, "tts", {"uri", "voice"})
     uri = _str(raw, "uri", "tts")
     try:
         parse_tcp_uri(uri)
     except ValueError as error:
         raise ConfigError(f"tts.uri: {error}") from None
-    return TtsConfig(uri=uri, voice=_str(raw, "voice", "tts"), volume=volume)
+    return TtsConfig(uri=uri, voice=_str(raw, "voice", "tts"))
 
 
 def parse_tcp_uri(uri: str) -> tuple[str, int]:

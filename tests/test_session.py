@@ -1012,7 +1012,9 @@ async def _test_commands_outside_the_reply_wait_are_busy_or_offline() -> None:
     h.tts.chunk_delay = 0.05
     await accepted(h)
     playback_id = h.session.speak("Jest piąta.", 0.7)
-    assert busy(lambda: h.session.speak("Drugi raz.", 0.7)) == ErrorCode.BUSY  # taken
+    with pytest.raises(CommandError, match="kitchen already has a reply") as taken:
+        h.session.speak("Drugi raz.", 0.7)
+    assert taken.value.code == ErrorCode.BUSY
     await h.until(lambda: h.events[-1:] == [SPEAKING])
     assert busy(h.session.release) == ErrorCode.BUSY  # speaking
     await h.until(lambda: h.events[-1:] == [IDLE])
@@ -1025,30 +1027,68 @@ async def _test_commands_outside_the_reply_wait_are_busy_or_offline() -> None:
     assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
 
 
-def test_tts_failing_before_audio_plays_nothing_and_still_finishes(
-    caplog: pytest.LogCaptureFixture,
+@pytest.mark.parametrize("when", ["before-audio-start", "after-audio-start"])
+def test_tts_failing_before_any_audio_plays_the_timeout_cue_and_still_finishes(
+    caplog: pytest.LogCaptureFixture, when: str
 ) -> None:
-    asyncio.run(_test_tts_failing_before_audio(caplog))
+    asyncio.run(_test_tts_failing_before_any_audio(caplog, when))
 
 
-async def _test_tts_failing_before_audio(caplog: pytest.LogCaptureFixture) -> None:
+async def _test_tts_failing_before_any_audio(caplog: pytest.LogCaptureFixture, when: str) -> None:
     h = Harness(reply_timeout=10)
-    h.tts.fail_at_start = True
+    if when == "before-audio-start":
+        h.tts.fail_at_start = True
+        reason = "could not connect to the TTS service: refused"
+    else:  # audio-start, then a failure before the first chunk: an empty playback
+        h.tts.chunks = []
+        h.tts.fail_after_chunks = True
+        reason = "connection closed before audio-stop"
     await accepted(h)
     playback_id = h.session.speak("Jest piąta.", 0.7)
     await h.until(lambda: h.events[-1:] == [IDLE])
     await h.stop()
-    assert after_processing(h) == [VisualState.IDLE, "start"]
+    # No playback at all, then the timeout cue, so the person does not hear only silence.
+    assert after_processing(h) == [CueType.TIMEOUT, VisualState.IDLE, "start"]
     assert h.events[h.events.index(PROCESSING) + 2 :] == [
         SPEAKING,
         PlaybackFinished("kitchen", playback_id, False),
         IDLE,
     ]
+    assert h.tts.open == 0
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert errors == [
-        f"speak playback_id={playback_id}: TTS failed: could not connect to the TTS service: "
-        "refused; nothing to play"
+        f"speak playback_id={playback_id}: TTS failed: {reason}; no audio: playing the timeout cue"
     ]
+
+
+def test_a_speak_without_a_volume_leaves_the_satellite_volume_alone() -> None:
+    asyncio.run(_test_a_speak_without_a_volume())
+
+
+async def _test_a_speak_without_a_volume() -> None:
+    h = Harness(reply_timeout=10)
+    await accepted(h)
+    h.session.speak("Jest piąta.", None)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert after_processing(h)[0] == ("begin", 22050, 2, 1, None)
+
+
+def test_shutdown_while_waiting_for_the_playback_to_finish() -> None:
+    asyncio.run(_test_shutdown_while_waiting_for_the_playback_to_finish())
+
+
+async def _test_shutdown_while_waiting_for_the_playback_to_finish() -> None:
+    h = Harness(reply_timeout=10)
+    h.driver.silent.add(PlaybackEnd)  # the device is still playing
+    await accepted(h)
+    h.session.speak("Jest piąta.", 0.7)
+    await h.until(lambda: "end" in h.driver.without_ids())
+    await h.stop()
+    async with asyncio.timeout(session_module.SHUTDOWN_TIMEOUT_SECONDS + 1.0):
+        await h.session.shutdown()
+    assert h.driver.closes == 1
+    assert not h.hub(PlaybackFinished) and h.tts.open == 0
 
 
 def test_tts_failing_mid_stream_plays_what_was_produced(caplog: pytest.LogCaptureFixture) -> None:

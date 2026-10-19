@@ -9,7 +9,6 @@ tasks (T-019, T-020, T-021) and are refused as not supported yet.
 
 import json
 import logging
-import math
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any, Protocol
@@ -45,7 +44,7 @@ class Speaker(Protocol):
     """What a command needs from a satellite's session. Both raise CommandError (busy,
     satellite_offline) when the session cannot take the command now."""
 
-    def speak(self, text: str, volume: float) -> str: ...  # the playback_id
+    def speak(self, text: str, volume: float | None) -> str: ...  # the playback_id
 
     def release(self) -> None: ...
 
@@ -66,9 +65,8 @@ def error(reply_to: str | None, satellite: str | None, failure: CommandError) ->
 class CommandRouter:
     """Routes commands to the satellites' sessions, by satellite id."""
 
-    def __init__(self, sessions: Mapping[str, Speaker], default_volume: float) -> None:
+    def __init__(self, sessions: Mapping[str, Speaker]) -> None:
         self._sessions = dict(sessions)
-        self._default_volume = default_volume
 
     def handle(self, message: str | bytes) -> dict[str, Any]:
         """The reply to one client message."""
@@ -126,7 +124,9 @@ class CommandRouter:
         text, volume = self._speak_args(data)
         return {"playback_id": session.speak(text, volume)}
 
-    def _speak_args(self, data: dict[str, Any]) -> tuple[str, float]:
+    def _speak_args(self, data: dict[str, Any]) -> tuple[str, float | None]:
+        """The text, and the volume: None (the satellite's volume is not touched) unless the
+        command passes one (T-017 follow-up)."""
         if unknown := set(data) - SPEAK_KEYS:
             raise CommandError(ErrorCode.BAD_REQUEST, f"unknown speak keys {sorted(unknown)}")
         text = data.get("text")
@@ -141,13 +141,11 @@ class CommandRouter:
             raise CommandError(ErrorCode.BAD_REQUEST, "'listen_after' must be a boolean")
         if listen_after:
             raise CommandError(ErrorCode.BAD_REQUEST, "'listen_after' is not supported yet (T-020)")
-        volume = data.get("volume", self._default_volume)
-        if (
-            isinstance(volume, bool)
-            or not isinstance(volume, int | float)
-            or not math.isfinite(volume)
-            or not 0.0 <= volume <= 1.0
-        ):
+        if "volume" not in data:
+            return text, None
+        volume = data["volume"]
+        # No math.isfinite: it overflows on a huge int. NaN and infinities fail the range.
+        if isinstance(volume, bool) or not isinstance(volume, int | float) or not 0 <= volume <= 1:
             raise CommandError(ErrorCode.BAD_REQUEST, "'volume' must be a number from 0 to 1")
         return text, float(volume)
 
@@ -163,6 +161,10 @@ def _load(message: str | bytes) -> dict[str, Any]:
         command = json.loads(message)
     except json.JSONDecodeError as failure:
         raise CommandError(ErrorCode.BAD_REQUEST, f"not JSON: {failure}") from None
+    except (ValueError, RecursionError) as failure:
+        # Valid JSON that json refuses: an integer over 4300 digits (ValueError) or deep
+        # nesting (RecursionError). Still one bad_request reply (PR #21 review S1).
+        raise CommandError(ErrorCode.BAD_REQUEST, f"not JSON: {type(failure).__name__}") from None
     if not isinstance(command, dict):
         raise CommandError(ErrorCode.BAD_REQUEST, "a command is a JSON object")
     return command

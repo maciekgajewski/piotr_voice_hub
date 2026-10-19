@@ -55,13 +55,13 @@ def test_speak_through_the_api_plays_piper_audio_on_a_fake_satellite() -> None:
         api = ApiServer("127.0.0.1", 0)
         satellite = config()
         microphone, clients = make(cfg=satellite, playback_server=playback)
-        tts = WyomingPiperTts(TtsConfig(uri=URI, voice=VOICE, volume=0.6))
+        tts = WyomingPiperTts(TtsConfig(uri=URI, voice=VOICE))
         await tts.start()
         # The raw driver: the session validates the protocol itself.
         session = SatelliteSession(
             satellite, microphone.driver, AnyUtteranceStt(), api.publish, tts=tts
         )
-        api.set_command_handler(CommandRouter({"kitchen": session}, 0.6).handle)
+        api.set_command_handler(CommandRouter({"kitchen": session}).handle)
         await playback.start()
         await api.start()
         task = asyncio.create_task(session.run())
@@ -84,7 +84,12 @@ async def speak_once(client: ClientConnection, clients: Clients) -> None:
     await clients.last.audio(silence(0.5) + loud(0.6) + silence(1.0))
     final = await next_of(client, "transcript_final")
     assert final["data"]["text"] == "która godzina"
-    command = {"type": "speak", "id": "c1", "satellite": "kitchen", "data": {"text": REPLY}}
+    command = {
+        "type": "speak",
+        "id": "c1",
+        "satellite": "kitchen",
+        "data": {"text": REPLY, "volume": 0.6},
+    }
     await client.send(json.dumps(command))
     start = time.monotonic()
     ack = await next_of(client, "ack")

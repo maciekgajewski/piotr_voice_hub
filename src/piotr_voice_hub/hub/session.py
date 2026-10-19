@@ -65,9 +65,10 @@ EVENT_TIMEOUT_SECONDS = 10.0  # for an event the driver owes us (started, stoppe
 SHUTDOWN_TIMEOUT_SECONDS = 3.0  # stop listening (waits for the stop ack) and go idle
 SEGMENT_MARGIN_SECONDS = 0.1  # the driver ends a segment on a whole 32 ms frame
 BYTES_PER_MS = 32  # 16 kHz, 16-bit mono
-# PlaybackBegin -> PlaybackEnd, which is also the bound on one synthesis once its audio starts
-# (before that, the TTS client's connect and first-audio bounds). 1000 characters (the cap)
-# take about 1 s on the GPU; past this, what was produced is played and the rest dropped.
+# audio-start -> PlaybackEnd (PlaybackBegin goes out with the first chunk, so this bounds
+# PlaybackBegin -> PlaybackEnd too), which is also the bound on one synthesis once its audio
+# starts (before that, the TTS client's connect and first-audio bounds). 1000 characters (the
+# cap) take about 1 s on the GPU; past this, what was produced is played and the rest dropped.
 PLAYBACK_PRODUCE_TIMEOUT_SECONDS = 30.0
 # PlaybackEnd -> PlaybackFinished: above the driver's own drain bounds (T-014: about
 # 2 x the audio + 35 s); past this the driver is treated as unavailable.
@@ -94,7 +95,7 @@ class Stt(Protocol):
 class _Speak:
     playback_id: str
     text: str
-    volume: float
+    volume: float | None  # None: the satellite's volume is not touched
 
 
 @dataclasses.dataclass(frozen=True)
@@ -188,7 +189,7 @@ class SatelliteSession:
 
     # Commands (T-017), called from the API task
 
-    def speak(self, text: str, volume: float) -> str:
+    def speak(self, text: str, volume: float | None) -> str:
         """Accept a reply to speak; the playback_id. CommandError if it cannot be taken now."""
         playback_id = new_id("playback")
         self._take_reply(_Speak(playback_id, text, volume))
@@ -202,7 +203,10 @@ class SatelliteSession:
     def _take_reply(self, reply: _Speak | _Release) -> None:
         if self._last_status is None or not self._last_status.connected:
             raise CommandError(ErrorCode.SATELLITE_OFFLINE, f"{self._config.id} is offline")
-        if self._reply is None or self._reply.done():
+        if self._reply is not None and self._reply.done():
+            # Taken by an earlier command that run() has not picked up yet (PR #21 review N1).
+            raise CommandError(ErrorCode.BUSY, f"{self._config.id} already has a reply")
+        if self._reply is None:
             state = self._last_status.state.value
             raise CommandError(ErrorCode.BUSY, f"{self._config.id} is {state}, not processing")
         self._reply.set_result(reply)
@@ -347,46 +351,51 @@ class SatelliteSession:
         await self._speak(request)
 
     async def _speak(self, request: _Speak) -> None:
+        """`PlaybackBegin` goes out with the first chunk, so a synthesis that fails before any
+        audio is no playback at all: the timeout cue plays instead, so the person does not
+        hear only silence after the accepted cue (T-017 follow-up). Either way the acked speak
+        ends with one `playback_finished`."""
         playback_id = request.playback_id
         self._status(True, SatelliteState.SPEAKING)
         self._logger.info(
-            "speaking playback_id=%s (%d characters, volume %g)",
+            "speaking playback_id=%s (%d characters, volume %s)",
             playback_id,
             len(request.text),
-            request.volume,
+            "unchanged" if request.volume is None else f"{request.volume:g}",
         )
         began = False
         audio_bytes = 0
         byte_rate = 1
         produce = asyncio.timeout(PLAYBACK_PRODUCE_TIMEOUT_SECONDS)
         try:
-            async with self._tts.synthesize(request.text) as speech:
+            async with self._tts.synthesize(request.text) as speech, produce:
                 audio = speech.format
                 byte_rate = audio.rate * audio.width * audio.channels
-                await self._command(
-                    PlaybackBegin(
-                        playback_id, audio.rate, audio.width, audio.channels, request.volume
-                    )
-                )
-                began = True
-                async with produce:
-                    async for chunk in speech:
-                        await self._command(PlaybackChunk(playback_id, chunk))
-                        audio_bytes += len(chunk)
+                async for chunk in speech:
+                    if not began:
+                        await self._command(
+                            PlaybackBegin(
+                                playback_id, audio.rate, audio.width, audio.channels, request.volume
+                            )
+                        )
+                        began = True
+                    await self._command(PlaybackChunk(playback_id, chunk))
+                    audio_bytes += len(chunk)
         except TtsError as error:
             self._logger.error(
                 "speak playback_id=%s: TTS failed: %s; %s",
                 playback_id,
                 error,
-                "playing what was produced" if began else "nothing to play",
+                "playing what was produced" if began else "no audio: playing the timeout cue",
             )
         except TimeoutError:
             if not produce.expired():
                 raise
             self._logger.error(
-                "speak playback_id=%s: audio not complete within %g s; playing what was produced",
+                "speak playback_id=%s: audio not complete within %g s; %s",
                 playback_id,
                 PLAYBACK_PRODUCE_TIMEOUT_SECONDS,
+                "playing what was produced" if began else "no audio: playing the timeout cue",
             )
         if began:
             audio_seconds = audio_bytes / byte_rate
@@ -396,6 +405,8 @@ class SatelliteSession:
                 2 * audio_seconds + PLAYBACK_FINISHED_MARGIN_SECONDS,
             )
             self._logger.info("played playback_id=%s (%.1f s)", playback_id, audio_seconds)
+        else:
+            await self._play_cue(CueType.TIMEOUT)
         self._finish_playback()
 
     async def _play_cue(self, cue_type: CueType) -> None:

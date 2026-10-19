@@ -195,7 +195,7 @@ Proposed package layout in `piotr_voice_hub/`:
 | `stop` | none | Stop current playback; re-arm. |
 | `release` | none | End `PROCESSING` without speaking (e.g. nothing to say); re-arm. |
 
-Errors are `busy`, `unknown_satellite`, `satellite_offline` and `bad_request`. An error reply is `{"type":"error","reply_to":"c7","satellite":"voice-pe-02","data":{"code":"busy","message":"…"}}` (`reply_to` and `satellite` are `null` when the command did not carry valid ones). Every `ack`ed `speak` ends with one `playback_finished`, also when the playback failed (T-017).
+Errors are `busy`, `unknown_satellite`, `satellite_offline` and `bad_request`. An error reply is `{"type":"error","reply_to":"c7","satellite":"voice-pe-02","data":{"code":"busy","message":"…"}}` (`reply_to` and `satellite` are `null` when the command did not carry valid ones). Every `ack`ed `speak` ends with one `playback_finished` while the hub runs (shutdown emits none), also when the playback failed (T-017). If TTS fails before any audio, the timeout cue plays first, so the person does not hear only silence after the accepted cue.
 
 **Satellite states.** `idle`: armed, no wake candidate. `listening`: a wake candidate is open (after `wake`). `processing`: accepted, awaiting a reply. `speaking`: playing audio (P1). `error`: offline, also before the first connect.
 
@@ -237,8 +237,10 @@ speaker_recognition:
   timeout_seconds: 1.0
   profiles: {Maciek: /profiles/maciek/profile/speaker_profile.npz}
 
-tts: {uri: tcp://127.0.0.1:10201, voice: pl_PL-bass-high, volume: 1.0}
+tts: {uri: tcp://127.0.0.1:10201, voice: pl_PL-bass-high}
 ```
+
+There is no default volume: `speak` changes the satellite's volume only when the command passes `volume` (T-017 follow-up). There is no `tts.volume` key; a config that still has one is refused like any unknown key.
 
 Language is not configurable: Polish is fixed.
 

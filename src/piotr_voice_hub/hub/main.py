@@ -240,8 +240,7 @@ async def run_hub(config: HubConfig) -> int:
     ]
     api.set_command_handler(
         CommandRouter(
-            {s.id: session for s, session in zip(config.satellites, sessions, strict=True)},
-            config.tts.volume,
+            {s.id: session for s, session in zip(config.satellites, sessions, strict=True)}
         ).handle
     )
     names = [s.id for s in config.satellites]
