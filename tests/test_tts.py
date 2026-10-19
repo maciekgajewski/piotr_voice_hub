@@ -58,9 +58,7 @@ async def run_with(
     fake = FakePiper(handler)
     server = await asyncio.start_server(fake._serve, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    tts = WyomingPiperTts(
-        TtsConfig(uri=f"tcp://127.0.0.1:{port}", voice=VOICE, volume=1.0), **bounds
-    )
+    tts = WyomingPiperTts(TtsConfig(uri=f"tcp://127.0.0.1:{port}", voice=VOICE), **bounds)
     try:
         async with asyncio.timeout(TEST_TIMEOUT):
             await test(tts, fake)
@@ -201,7 +199,7 @@ def test_start_fails_on_refused_connection() -> None:
         port = server.sockets[0].getsockname()[1]
         server.close()
         await server.wait_closed()
-        tts = WyomingPiperTts(TtsConfig(uri=f"tcp://127.0.0.1:{port}", voice=VOICE, volume=1.0))
+        tts = WyomingPiperTts(TtsConfig(uri=f"tcp://127.0.0.1:{port}", voice=VOICE))
         with pytest.raises(TtsUnavailableError, match=f"connect to 127.0.0.1:{port} failed"):
             await tts.start()
 
@@ -212,7 +210,7 @@ def test_connect_timeout() -> None:
     # 192.0.2.0/24 is TEST-NET-1: never routed, so the connect hangs (or fails at once where
     # there is no route; both are a TtsError naming the connect).
     tts = WyomingPiperTts(
-        TtsConfig(uri="tcp://192.0.2.1:10201", voice=VOICE, volume=1.0), connect_timeout=SHORT_BOUND
+        TtsConfig(uri="tcp://192.0.2.1:10201", voice=VOICE), connect_timeout=SHORT_BOUND
     )
     with pytest.raises(TtsError, match="connect to 192.0.2.1:10201"):
         asyncio.run(tts.start())
@@ -340,7 +338,7 @@ def test_text_at_the_cap_is_accepted() -> None:
 
 def test_invalid_uri_is_rejected() -> None:
     with pytest.raises(ValueError, match="expected tcp://host:port"):
-        WyomingPiperTts(TtsConfig(uri="tcp://host", voice=VOICE, volume=1.0))
+        WyomingPiperTts(TtsConfig(uri="tcp://host", voice=VOICE))
 
 
 # --- follow-up (PR #19 review 5570976280) ---------------------------------------------------
@@ -395,7 +393,7 @@ def test_malformed_framing_mid_stream_and_in_describe(header: bytes, kind: str) 
 
 def test_connect_errors_are_unavailable() -> None:
     tts = WyomingPiperTts(
-        TtsConfig(uri="tcp://192.0.2.1:10201", voice=VOICE, volume=1.0),
+        TtsConfig(uri="tcp://192.0.2.1:10201", voice=VOICE),
         connect_timeout=SHORT_BOUND,
     )
     with pytest.raises(TtsUnavailableError):

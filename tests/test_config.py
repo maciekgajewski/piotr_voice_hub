@@ -25,7 +25,7 @@ speaker_recognition:
   url: http://127.0.0.1:2140
   timeout_seconds: 1.0
   profiles: {Maciek: /profiles/maciek.npz}
-tts: {uri: tcp://127.0.0.1:10200, voice: pl_PL-bass-high, volume: 1.0}
+tts: {uri: tcp://127.0.0.1:10200, voice: pl_PL-bass-high}
 """
 
 
@@ -62,13 +62,6 @@ def test_example_config_matches_design() -> None:
         "Maciek": "/profiles/maciek/profile/speaker_profile.npz"
     }
     assert config.tts.voice == "pl_PL-bass-high"
-    assert config.tts.volume is None  # speak sets a volume only when the command passes one
-
-
-def test_a_leftover_tts_volume_still_loads(tmp_path: Path) -> None:
-    assert load_text(tmp_path, MINIMAL).tts.volume == 1.0
-    no_volume = MINIMAL.replace(", volume: 1.0}", "}")
-    assert load_text(tmp_path, no_volume).tts.volume is None
 
 
 def test_defaults_apply_and_device_values_win(tmp_path: Path) -> None:
@@ -138,7 +131,11 @@ def test_missing_file(tmp_path: Path) -> None:
         ("port: 8750", "port: true", r"api\.port: must be an integer"),
         ("port: 8751", "port: 70000", r"playback_http\.port: must be between 1 and 65535"),
         ("beam_size: 1", "beam_size: 0", r"stt\.partial\.beam_size: must be >= 1"),
-        ("volume: 1.0", "volume: 1.5", r"tts\.volume: must be between 0\.0 and 1\.0"),
+        (  # T-017 follow-up: speak sets a volume only when the command passes one
+            "voice: pl_PL-bass-high}",
+            "voice: pl_PL-bass-high, volume: 1.0}",
+            r"tts: unknown key\(s\): volume",
+        ),
         ("timeout_seconds: 1.0", "timeout_seconds: 0", r"timeout_seconds: must be > 0"),
         ("voice: pl_PL-bass-high", "voice: ''", r"tts\.voice: must be a non-empty string"),
         ("id: sat-b", "id: sat-a", r"duplicate id\(s\): sat-a"),
@@ -158,7 +155,6 @@ def test_missing_file(tmp_path: Path) -> None:
             "timeout_seconds: .nan",
             r"speaker_recognition\.timeout_seconds: must be a finite",
         ),
-        ("volume: 1.0", "volume: .nan", r"tts\.volume: must be a finite"),
         (
             "uri: tcp://127.0.0.1:10200",
             "uri: http://127.0.0.1:10200",

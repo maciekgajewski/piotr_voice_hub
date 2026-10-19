@@ -53,7 +53,7 @@ async def measure(tts: WyomingPiperTts, text: str) -> tuple[float, float, float]
 
 def test_client_against_the_service() -> None:
     async def run() -> None:
-        tts = WyomingPiperTts(TtsConfig(uri=URI, voice=VOICE, volume=1.0))
+        tts = WyomingPiperTts(TtsConfig(uri=URI, voice=VOICE))
         start = time.monotonic()
         await tts.start()
         print(f"\nstart (describe → info): {time.monotonic() - start:.3f} s")
@@ -72,7 +72,7 @@ def test_client_against_the_service() -> None:
         )
         with pytest.raises(TtsTextError):
             await measure(tts, "x" * (MAX_TEXT_CHARS + 1))
-        wrong = WyomingPiperTts(TtsConfig(uri=URI, voice="pl_PL-gosia-medium", volume=1.0))
+        wrong = WyomingPiperTts(TtsConfig(uri=URI, voice="pl_PL-gosia-medium"))
         with pytest.raises(TtsError, match=r"describes \['pl_PL-bass-high'\]"):
             await wrong.start()
 

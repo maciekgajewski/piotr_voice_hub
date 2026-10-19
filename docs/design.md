@@ -240,7 +240,7 @@ speaker_recognition:
 tts: {uri: tcp://127.0.0.1:10201, voice: pl_PL-bass-high}
 ```
 
-There is no default volume: `speak` changes the satellite's volume only when the command passes `volume` (T-017 follow-up). A leftover `tts.volume` is accepted and ignored, with a WARNING.
+There is no default volume: `speak` changes the satellite's volume only when the command passes `volume` (T-017 follow-up). There is no `tts.volume` key; a config that still has one is refused like any unknown key.
 
 Language is not configurable: Polish is fixed.
 
