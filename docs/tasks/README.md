@@ -183,3 +183,9 @@ Not numbered yet: firmware trimmed to continuous mode and reflashed (including t
   uses a low rate (PR #16 re-review 5569307179). This is the close, not the 5 s request read
   (`REQUEST_READ_TIMEOUT_SECONDS`, `hub/playback_http.py`) or the driver's 5 s fetch wait
   (`STREAM_REQUEST_TIMEOUT_SECONDS`, `satellites/esphome.py`); neither depends on the rate.
+- **P1 → T-022 (or the P2 soak): measure the wake miss rate.** Maciej's live test on the
+  deployed hub (main 48b5f70, voice-pe-02 and voice-pe-03, 2026-10-19) passed: most
+  "Ryszardzie" utterances woke it and nothing woke it falsely, but the misses were not
+  counted (T-010 log). Count them over a fixed set of utterances per satellite (and the false
+  wakes over a quiet period) in T-022's acceptance run, or in the 72 h soak if T-022 has no
+  room.

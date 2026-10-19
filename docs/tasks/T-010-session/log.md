@@ -71,3 +71,11 @@ fixed here as an extra commit:
   attempt.
 - (5), (6) plan.md: a partial-task crash is noticed at the next end of speech; the error state
   is shown before the first connect.
+
+## 2026-10-19: live wake test on the deployed hub
+
+- Maciej tested wake detection live on the deployed hub (main at 48b5f70, T-012's hub main
+  and compose, running this session's wake handling) with voice-pe-02 and voice-pe-03:
+  **passed**. Most "Ryszardzie" utterances woke it; there were no false wakes. The miss rate
+  was not counted; measuring it is a carry-forward (docs/tasks/README.md, T-022 or the P2
+  soak).
