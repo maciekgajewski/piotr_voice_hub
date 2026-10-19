@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import subprocess
 import sys
 import textwrap
@@ -47,7 +48,7 @@ def test_a_running_loop_keeps_it_quiet_and_stop_ends_the_thread() -> None:
     assert not fired.is_set()
 
 
-def test_a_blocked_event_loop_exits_the_process_with_1() -> None:
+def test_a_blocked_event_loop_exits_1_with_a_critical_line_and_a_traceback_dump() -> None:
     script = textwrap.dedent(
         """
         import asyncio, logging, time
@@ -73,4 +74,10 @@ def test_a_blocked_event_loop_exits_the_process_with_1() -> None:
     assert result.returncode == 1, result.stderr
     assert time.monotonic() - started < 10
     assert "not reached" not in result.stdout
-    assert "CRITICAL piotr_voice_hub.hub.watchdog: event loop stalled" in result.stderr
+    critical = result.stderr.index("CRITICAL piotr_voice_hub.hub.watchdog: event loop stalled")
+    # faulthandler's dump of all threads follows: the watchdog's own, then the blocked main one
+    dump = result.stderr[critical:]
+    assert "Current thread 0x" in dump
+    assert "(most recent call first):" in dump
+    main_thread = dump.index("Thread 0x")  # the non-current one: the blocked loop
+    assert re.search(r'File "<string>", line \d+ in main', dump[main_thread:]), dump
