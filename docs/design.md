@@ -75,7 +75,7 @@ flowchart LR
   SPK <-- HTTP :2140 --> SR[speaker-recognition<br/>SpeechBrain ECAPA]
   SES <--> API[WebSocket API :8750]
   API <--> C[Consumer]
-  API -- speak --> TTS[Wyoming Piper client] <-- :10200 --> PIPER[wyoming-piper]
+  API -- speak --> TTS[Wyoming Piper client] <-- :10201 --> PIPER[wyoming-piper]
   TTS --> PB[HTTP WAV stream :8751]
   PB -. "media_player announce URL" .-> SAT
 ```
@@ -237,7 +237,7 @@ speaker_recognition:
   timeout_seconds: 1.0
   profiles: {Maciek: /profiles/maciek/profile/speaker_profile.npz}
 
-tts: {uri: tcp://127.0.0.1:10200, voice: pl_PL-bass-high, volume: 1.0}
+tts: {uri: tcp://127.0.0.1:10201, voice: pl_PL-bass-high, volume: 1.0}
 ```
 
 Language is not configurable: Polish is fixed.
@@ -262,7 +262,7 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
 
 - **One compose file, three services**, all `network_mode: host` and `restart: unless-stopped`. Host networking lets satellites fetch the playback stream from the host IP. `.local` names are resolved by aioesphomeapi itself (zeroconf), so no Avahi or `libnss-mdns` is needed in the image (T-012). P0 (T-012) has the `hub` service only.
   - `hub` (CUDA 12.8 base, GPU): `docker/hub.Dockerfile` (adapted from the old `docker/ai-server.Dockerfile`), with only the hub's dependencies. It runs as the config owner's uid, so the config stays mode 600. It uses CPU `onnxruntime` (Silero, via faster-whisper) and must never also install `onnxruntime-gpu`.
-  - `wyoming-piper` (GPU, `--use-cuda`): from `docker-compose.yml`. **P1:** the image must install only `onnxruntime-gpu` (1.26.0), not `onnxruntime` too; the old `piotr-wyoming-piper` container has both, so it runs on CPU.
+  - `piper` (GPU, wyoming-piper `--use-cuda`, T-015): `docker/piper.Dockerfile`, on port 10201. The image installs only `onnxruntime-gpu` (1.26.0), not `onnxruntime` too (the old `piotr-wyoming-piper` container has both, so it runs on CPU), and the build fails otherwise. The voice is baked in, pinned by revision and SHA-256. The service creates the voice's session itself (CUDA EP, HEURISTIC cuDNN search), fails unless CUDA is its first provider (onnxruntime otherwise falls back to CPU silently), and warms up before it listens.
   - `speaker-recognition` (CPU): from `docker-compose.speaker-recognition.yml`, unchanged `--device cpu`.
 - **Ollama coexists.** It keeps running on the host for unrelated tasks and is *not* in the hub's compose file. The two share the GPU within the budget in §4.3.
 - **Ports:**
@@ -272,7 +272,7 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
   | 8750 | API |
   | 8751 | Playback HTTP |
   | 2140 | Speaker recognition |
-  | 10200 | Piper |
+  | 10201 | Piper (ours, T-015; the old project's Piper keeps 10200) |
   | 6053 | Outbound to satellites |
 
   The hub binds the API on all interfaces (`api.host: 0.0.0.0`, host network) and has no auth; the LAN/Tailscale perimeter (no port forwarding from the internet) is the security boundary.

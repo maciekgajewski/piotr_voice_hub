@@ -1,4 +1,5 @@
-# T-012: the P0 hub (design.md §9): one service. Piper and speaker recognition join in P1.
+# The hub (T-012, design.md §9) and its Piper TTS service (T-015). Speaker recognition joins
+# in P1 (T-018).
 # Usage (on piotr, from the repo root; see the T-012 PR checklist):
 #   export HUB_CONFIG=~/hub-wake.yaml HUB_USER="$(id -u):$(id -g)"
 #   mkdir -p ~/.cache/piotr_voice_hub/huggingface && docker compose up -d --build
@@ -42,4 +43,33 @@ services:
       start_interval: 2s
       interval: 30s
       timeout: 5s
+      retries: 3
+
+  # T-015: the hub's own wyoming-piper on the GPU (docker/piper.Dockerfile), on port 10201
+  # (`tts.uri`), next to the old project's Piper on 10200. It warms the voice up before it
+  # listens, so healthy means warm. Start it alone with `docker compose up -d --build piper`
+  # (compose still needs HUB_CONFIG and HUB_USER set to read this file).
+  piper:
+    build:
+      context: .
+      dockerfile: docker/piper.Dockerfile
+    image: piotr-voice-hub-piper:latest
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    gpus: all
+    command: ["--uri", "tcp://0.0.0.0:10201", "--voice", "pl_PL-bass-high",
+              "--data-dir", "/opt/piper/voices"]
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "5"}
+    healthcheck:
+      # A Describe/Info round trip (wyoming-piper's own check). Docker never restarts an
+      # unhealthy container: restarts come from the process exiting on any failure.
+      test: ["CMD", "python", "-m", "wyoming_piper.health_check",
+             "--uri", "tcp://127.0.0.1:10201", "--timeout", "5"]
+      start_period: 300s
+      start_interval: 2s
+      interval: 30s
+      timeout: 10s
       retries: 3
