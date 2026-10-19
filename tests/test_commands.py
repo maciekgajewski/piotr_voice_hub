@@ -7,15 +7,13 @@ import pytest
 
 from piotr_voice_hub.hub.commands import CommandError, CommandRouter, ErrorCode
 
-DEFAULT_VOLUME = 0.6
-
 
 class FakeSession:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, ...] | tuple[str, str, float]] = []
+        self.calls: list[tuple[str, ...] | tuple[str, str, float | None]] = []
         self.refuse: CommandError | None = None
 
-    def speak(self, text: str, volume: float) -> str:
+    def speak(self, text: str, volume: float | None) -> str:
         if self.refuse is not None:
             raise self.refuse
         self.calls.append(("speak", text, volume))
@@ -29,7 +27,7 @@ class FakeSession:
 
 def router() -> tuple[CommandRouter, FakeSession]:
     session = FakeSession()
-    return CommandRouter({"voice-pe-02": session}, DEFAULT_VOLUME), session
+    return CommandRouter({"voice-pe-02": session}), session
 
 
 def command(kind: str = "speak", data: object = None, **fields: object) -> str:
@@ -40,7 +38,7 @@ def command(kind: str = "speak", data: object = None, **fields: object) -> str:
     return json.dumps(message)
 
 
-def test_speak_is_acked_with_its_playback_id_and_the_default_volume() -> None:
+def test_speak_is_acked_with_its_playback_id_and_no_volume_unless_given() -> None:
     commands, session = router()
     reply = commands.handle(command(data={"text": "  Jest piąta.  "}))
     assert reply == {
@@ -49,7 +47,7 @@ def test_speak_is_acked_with_its_playback_id_and_the_default_volume() -> None:
         "satellite": "voice-pe-02",
         "data": {"playback_id": "playback-1"},
     }
-    assert session.calls == [("speak", "Jest piąta.", DEFAULT_VOLUME)]
+    assert session.calls == [("speak", "Jest piąta.", None)]  # the satellite's volume stays
 
 
 @pytest.mark.parametrize("volume", [0, 0.25, 1])
@@ -105,6 +103,17 @@ BAD = [
         '{"type":"speak","id":"c7","satellite":"voice-pe-02","data":{"text":"x","volume":NaN}}',
         id="volume-nan",
     ),
+    pytest.param(
+        '{"type":"speak","id":"c7","satellite":"voice-pe-02",'
+        '"data":{"text":"x","volume":Infinity}}',
+        id="volume-infinity",
+    ),
+    pytest.param(command(data={"text": "x", "volume": 10**400}), id="volume-huge-int"),
+    pytest.param(
+        '{"type":"speak","id":"c7","satellite":"x","data":{"volume":' + "1" * 5000 + "}}",
+        id="int-over-4300-digits",
+    ),
+    pytest.param("[" * 30000 + "]" * 30000, id="deep-nesting"),
 ]
 
 

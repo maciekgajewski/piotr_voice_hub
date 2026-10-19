@@ -70,3 +70,9 @@
   hub total of about 4.4 GB (about 4.9 GB with concurrent partials), leaving about 11 GB for
   Ollama. T-015 plan.md did not state a ~700 MiB steady state; its T-003 reference line gets
   a pointer to the production number.
+- 2026-10-19 14:50: `make check` green 3× on piotr (682 passed, 8 skipped). GPU end to end
+  with our own Piper (project `piotr-voice-hub-t017f`, image `piotr-voice-hub-piper:t017f`,
+  port 10211, fake satellite): 7 passed; `speak` 3.44 s of audio, `ack` → `playback_finished`
+  3.82 s (now without a volume). Torn down, image removed, 10211 free, production untouched.
+  `python -c "$(cat tools/speak_test.py)" --help` works (the docstring is the description), and a
+  refused connect is one stderr line and exit 1.

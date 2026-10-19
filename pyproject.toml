@@ -40,7 +40,7 @@ target-version = "py312"
 select = ["E", "F", "W", "I", "B", "UP"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "tools/speak_test.py"]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
 

@@ -37,7 +37,8 @@ busy policy and `stop` (T-019), `play` (T-021), the speaker hint (T-018).
   - `release`: `ack`, then re-arm (no cue).
   - `speak`: `ack` with a new `playback_id`; state `speaking`; open the synthesis (T-016
     client); `PlaybackBegin` with its format and the volume (the command's, else
-    `tts.volume`); a `PlaybackChunk` per PCM chunk; `PlaybackEnd`; wait for the driver's
+    `tts.volume`; **follow-up:** the command's only, else the satellite's volume is left
+    alone, and `PlaybackBegin` goes with the first chunk); a `PlaybackChunk` per PCM chunk; `PlaybackEnd`; wait for the driver's
     `PlaybackFinished`; emit `playback_finished` (`listening_for_follow_up: false`); re-arm.
     The visual stays `PROCESSING` while speaking (there is no speaking visual).
   - **Bounds:** `PlaybackBegin` → `PlaybackEnd` at most 30 s
@@ -73,6 +74,8 @@ busy policy and `stop` (T-019), `play` (T-021), the speaker hint (T-018).
 
 ## Manual test (Maciej, hardware)
 
-In the PR: speak a reply on voice-pe-02/03 with a small Python websockets script in the hub
-container, then `release`; plus the T-014 playback-end comparison (`playback_finished` vs.
+In the PR: speak a reply on voice-pe-02/03 with `tools/speak_test.py` (follow-up; it replaced
+the heredoc script), run in the hub container as
+`docker compose exec hub python -c "$(cat tools/speak_test.py)"`, then the same with
+`--release`; plus the T-014 playback-end comparison (`playback_finished` vs.
 when the audio audibly stops; there is no Home Assistant here, the hub owns the satellites).

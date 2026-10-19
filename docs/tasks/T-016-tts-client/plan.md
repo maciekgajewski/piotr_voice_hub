@@ -149,10 +149,10 @@ speaker hint (T-018).
 - **S1:** malformed framing (`KeyError`, `TypeError`, `AttributeError` from wyoming's reader,
   which catches only `ValueError`) is a `TtsError`.
 - **S2:** `TtsUnavailableError(TtsError)` for a refused, failed or timed-out connect and a
-  reset connection. `hub/main.py` `check_tts` retries only that, every 2 s, starting no attempt after 120 s (about 137 s at
-  most with the last attempt's 17 s bound; PR #20 review N1)
-  (`TTS_STARTUP_RETRY_SECONDS`, `TTS_STARTUP_TIMEOUT_SECONDS`, injectable with the clock and
-  sleep), with a WARNING per attempt; a wrong voice, any other `TtsError` and the overall
+  reset connection. `hub/main.py` `check_tts` retries only that, every 2 s, starting no
+  attempt after 120 s (about 137 s at most with the last attempt's 17 s bound; PR #20
+  review N1) (`TTS_STARTUP_RETRY_SECONDS`, `TTS_STARTUP_TIMEOUT_SECONDS`, injectable with the
+  clock and sleep), with a WARNING per attempt; a wrong voice, any other `TtsError` and the overall
   timeout stay one CRITICAL line and exit 1. Why: compose's `depends_on` orders only
   `docker compose up`; after a reboot or a daemon restart Docker starts both containers at
   once and Piper needs about 50 s. This is a startup wait, not a synthesis retry; synthesis

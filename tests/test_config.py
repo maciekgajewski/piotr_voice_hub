@@ -62,6 +62,13 @@ def test_example_config_matches_design() -> None:
         "Maciek": "/profiles/maciek/profile/speaker_profile.npz"
     }
     assert config.tts.voice == "pl_PL-bass-high"
+    assert config.tts.volume is None  # speak sets a volume only when the command passes one
+
+
+def test_a_leftover_tts_volume_still_loads(tmp_path: Path) -> None:
+    assert load_text(tmp_path, MINIMAL).tts.volume == 1.0
+    no_volume = MINIMAL.replace(", volume: 1.0}", "}")
+    assert load_text(tmp_path, no_volume).tts.volume is None
 
 
 def test_defaults_apply_and_device_values_win(tmp_path: Path) -> None:

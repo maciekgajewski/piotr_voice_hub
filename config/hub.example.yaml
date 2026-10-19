@@ -22,4 +22,4 @@ speaker_recognition:
   profiles: {Maciek: /profiles/maciek/profile/speaker_profile.npz}
 
 # Our Piper service (T-015, compose service `piper`); the old project's Piper keeps 10200.
-tts: {uri: tcp://127.0.0.1:10201, voice: pl_PL-bass-high, volume: 1.0}
+tts: {uri: tcp://127.0.0.1:10201, voice: pl_PL-bass-high}

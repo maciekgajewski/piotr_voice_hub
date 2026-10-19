@@ -217,6 +217,10 @@ async def run_hub(config: HubConfig) -> int:
     from piotr_voice_hub.stt.whisper import FasterWhisperSpeechToText
     from piotr_voice_hub.tts.wyoming_piper import WyomingPiperTts
 
+    if config.tts.volume is not None:
+        logger.warning(
+            "tts.volume is ignored: speak sets the volume only when the command passes one"
+        )
     # First, before anything is built or armed (T-016).
     tts = WyomingPiperTts(config.tts)
     if not await check_tts(tts):
@@ -240,8 +244,7 @@ async def run_hub(config: HubConfig) -> int:
     ]
     api.set_command_handler(
         CommandRouter(
-            {s.id: session for s, session in zip(config.satellites, sessions, strict=True)},
-            config.tts.volume,
+            {s.id: session for s, session in zip(config.satellites, sessions, strict=True)}
         ).handle
     )
     names = [s.id for s in config.satellites]
