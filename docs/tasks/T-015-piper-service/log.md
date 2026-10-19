@@ -57,3 +57,24 @@
   - Our service stopped and removed afterwards (`docker compose -p piotr-voice-hub-t015
     down`). The hub (`piotr-voice-hub-hub-1`, healthy) and Maciej's containers were not
     touched; no exec into any of them.
+- Rebased onto origin/main ac1457d (PR #17 merged, review 5569435450); no conflicts.
+- Review folding (Maciej): README task notes and this plan now record the decisions:
+  - ports: Piper 10201, speaker recognition 2141 (T-018), both configurable;
+  - T-020 uses the cues the devices already have with a documented substitute; the firmware
+    import stays in P2. Checked the old firmware (read only): neither device exposes the
+    follow-up sound as an API service (BOX-3 `play_follow_up_listening_cue` is a script,
+    Voice PE `follow_up_listening_sound` a sound file; both only via
+    `start_follow_up_listening`, which also starts on-device follow-up listening and must not
+    be used). So the substitute has to come from `play_message_end_cue`,
+    `play_conversation_timeout_cue` or the `LISTENING` visual alone: noted as T-020's design
+    question in the README. No T-020 plan stub: the README note is enough.
+  - T-018 can run in parallel with T-015–T-017 (table);
+  - the T-015 note: the disable-CPU-fallback option cannot be used for this voice; the guard
+    is the CUDA-first-provider check; the piper_vram.py mention is fixed the same way;
+  - T-016: the hub-side warm-up is only a reachability (`describe`) check;
+  - no host directory for the CUDA compile cache.
+- Carry-forward constant names checked in the code: the request read is
+  `REQUEST_READ_TIMEOUT_SECONDS` (`hub/playback_http.py`); `STREAM_REQUEST_TIMEOUT_SECONDS`
+  also exists (`satellites/esphome.py`, the driver's 5 s fetch wait). The README now names
+  both, with their files.
+- README row T-015: in review (PR #18).

@@ -1,11 +1,12 @@
 # T-015: GPU wyoming-piper service: plan
 
-**Status:** implemented as below and measured on piotr (2026-10-19). No design question
-changes the implementation; the open points are listed at the end.
+**Status:** implemented as below and measured on piotr (2026-10-19); in review (PR #18). The
+open points are decided (see the end).
 
 ## Scope
 
-From the P1 breakdown (PR #17, docs/tasks/README.md, not merged yet, so copied here):
+From the P1 breakdown (PR #17, merged as ac1457d; docs/tasks/README.md), as it read before
+T-015 (the README note is now corrected, see Findings):
 
 > **T-015 piper-service** (depends on T-003, T-012): the hub's own `wyoming-piper` compose
 > service on the GPU: an image with only `onnxruntime-gpu` 1.26.0 (no `onnxruntime`), the
@@ -130,13 +131,18 @@ deploying (T-022). The running hub, its checkout and Maciej's containers are not
   the warm-up absorbs it before the port opens. HEURISTIC stays (it is piper's own choice
   too), and the text cap per call stays in T-016 for bounded calls, not for this.
 
-## Open points (do not change the implementation)
+## Decided after review (Maciej, 2026-10-19)
 
-- Persisting the CUDA JIT cache on a host directory (`CUDA_CACHE_PATH`, like the hub's model
-  cache) would make a new container ready in about 5 s instead of about 50 s. Not done: it
-  is a new host directory, and 50 s once per deploy is harmless.
+- **No host cache directory for the CUDA compile cache** (`CUDA_CACHE_PATH`): simplicity;
+  about 50 s once per new container is fine. A restart of the same container keeps the cache
+  (2 s).
+- **The disable-CPU-fallback ORT option is not used** for this voice (678 shape ops always run
+  on CPU); the guard is the CUDA-first-provider check. The same applies to
+  `tools/gpu_smoke/piper_vram.py`, which is left as is.
+- **T-016's hub-side warm-up is only a reachability check** (a Wyoming `describe` round trip):
+  the service warms itself, which also covers a restart of the service alone.
+- **Ports:** Piper on 10201 (`tts.uri`), speaker recognition (T-018) on 2141; both
+  configurable.
 
-- The hub's own warm-up call in T-016 is then only a connectivity check: the service warms
-  itself, which also covers a restart of the service alone.
-- A request with another voice name gets a Wyoming `error` (the service serves exactly one
-  voice).
+A request with another voice name gets a Wyoming `error` (the service serves exactly one
+voice).
