@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from aioesphomeapi.model import MediaPlayerInfo, SupportsResponseType
 from microphone_driver_conformance import (
     assert_cue_contract,
     assert_listening_and_capture_contract,
@@ -16,6 +17,7 @@ from microphone_driver_conformance import (
 )
 
 from piotr_voice_hub.config import SatelliteConfig
+from piotr_voice_hub.hub.playback_http import PlaybackHttpServer
 from piotr_voice_hub.satellites import esphome
 from piotr_voice_hub.satellites.esphome import EsphomeSatellite
 from piotr_voice_hub.satellites.interfaces import Microphone, MicrophoneUnavailable
@@ -27,9 +29,6 @@ from piotr_voice_hub.satellites.messages import (
     ListeningStopped,
     MicrophoneCommand,
     MicrophoneEvent,
-    PlaybackBegin,
-    PlaybackChunk,
-    PlaybackEnd,
     PlayCue,
     ResetWakeCandidate,
     SetVisualState,
@@ -91,9 +90,23 @@ class LoudnessVad:
 
 
 class Service:
-    def __init__(self, name: str) -> None:
+    def __init__(
+        self, name: str, supports_response: SupportsResponseType = SupportsResponseType.NONE
+    ) -> None:
         self.name = name
         self.key = hash(name)
+        self.supports_response = supports_response
+
+
+class Response:
+    """aioesphomeapi's ExecuteServiceResponseModel, the fields the driver reads."""
+
+    def __init__(self, success: bool = True, error_message: str = "") -> None:
+        self.success = success
+        self.error_message = error_message
+
+
+MEDIA_PLAYER = MediaPlayerInfo(**{"object_id": "media_player", "key": 7, "name": "Media Player"})
 
 
 type Handler = Callable[..., Coroutine[Any, Any, Any]]
@@ -104,7 +117,16 @@ class FakeClient:
 
     def __init__(self, services: tuple[str, ...] = ALL_SERVICES) -> None:
         self.services = services
+        self.responding: dict[str, SupportsResponseType] = {}  # services with supports_response
+        self.response = Response()
+        self.response_delay = 0.0
+        self.entities: list[Any] = [MEDIA_PLAYER]
+        self.connected_address: str | None = "127.0.0.1"
+        self.media_commands: list[dict[str, Any]] = []
+        self.fetch = True  # the media player GETs an announced URL
+        self.fetched: list[bytes] = []  # each GET's whole response, once it ends
         self.calls: list[str] = []
+        self.call_kwargs: list[dict[str, Any]] = []
         self.va_events: list[Any] = []
         self.connected = False
         self.disconnects = 0
@@ -134,12 +156,22 @@ class FakeClient:
     async def list_entities_services(self) -> tuple[list[Any], list[Any]]:
         if "list" in self.hang:
             await asyncio.Event().wait()
-        return [], [Service(name) for name in self.services]
+        services = [
+            Service(name, self.responding.get(name, SupportsResponseType.NONE))
+            for name in self.services
+        ]
+        return list(self.entities), services
 
-    async def execute_service(self, service: Any, data: dict[str, Any]) -> None:
+    async def execute_service(
+        self, service: Any, data: dict[str, Any], **kwargs: Any
+    ) -> Response | None:
         if service.name in self.hang:
             await asyncio.Event().wait()
         self.calls.append(service.name)
+        self.call_kwargs.append(kwargs)
+        if kwargs.get("return_response") is not None:
+            await asyncio.sleep(self.response_delay)  # the firmware's script runs
+            return self.response
         if service.name == "start_open_mic_listening" and not self.ignore_start:
             self._later(self._start())  # the device answers after the service returns
         elif service.name == "stop_listening" and self.ack_stop:
@@ -151,6 +183,20 @@ class FakeClient:
 
     def send_voice_assistant_event(self, event_type: Any, data: Any) -> None:
         self.va_events.append(event_type)
+
+    def media_player_command(self, key: int, **kwargs: Any) -> None:
+        assert key == MEDIA_PLAYER.key
+        self.media_commands.append(kwargs)
+        if kwargs.get("media_url") and self.fetch:
+            self._later(self._get(kwargs["media_url"]))
+
+    async def _get(self, url: str) -> None:
+        host_port, path = url.removeprefix("http://").split("/", 1)
+        host, port = host_port.rsplit(":", 1)
+        reader, writer = await asyncio.open_connection(host, int(port))
+        writer.write(f"GET /{path} HTTP/1.1\r\nHost: {host_port}\r\n\r\n".encode())
+        self.fetched.append(await reader.read())  # to EOF
+        writer.close()
 
     async def _start(self) -> None:
         await self.handlers["start"]("conversation", 0, None, None)
@@ -220,11 +266,20 @@ def loud(seconds: float) -> bytes:
 
 
 def make(
-    vad: esphome.Vad | None = None, cfg: SatelliteConfig | None = None
+    vad: esphome.Vad | None = None,
+    cfg: SatelliteConfig | None = None,
+    playback_server: PlaybackHttpServer | None = None,
+    local_ip: esphome.LocalIpFor = esphome.local_ip_for,
 ) -> tuple[Checked, Clients]:
     clients = Clients()
     cfg = cfg or config()
-    driver = EsphomeSatellite(cfg, vad or LoudnessVad(cfg.end_silence_seconds), clients)
+    driver = EsphomeSatellite(
+        cfg,
+        vad or LoudnessVad(cfg.end_silence_seconds),
+        clients,
+        playback_server=playback_server,
+        local_ip=local_ip,
+    )
     return Checked(driver), clients
 
 
@@ -692,19 +747,6 @@ def test_missing_optional_services_are_logged_at_connect_and_skipped(
 
     with caplog.at_level(logging.WARNING):
         asyncio.run(run())
-
-
-@pytest.mark.parametrize(
-    "command",
-    [PlaybackBegin("p-1", 22050, 2, 1), PlaybackChunk("p-1", b"x"), PlaybackEnd("p-1")],
-)
-def test_playback_fails_loudly_until_t014(command: MicrophoneCommand) -> None:
-    async def run() -> None:
-        mic, _ = make()
-        with pytest.raises(NotImplementedError, match="T-014"):
-            await mic.driver.send_output_event(command)
-
-    asyncio.run(run())
 
 
 def test_context_and_playback_target_come_from_config() -> None:

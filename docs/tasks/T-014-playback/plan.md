@@ -1,6 +1,18 @@
 # T-014: ESPHome playback: plan
 
-**Status:** waiting on Maciej's answers to Q1–Q3 below. Nothing is implemented yet.
+**Status:** Q1–Q3 decided by Maciej on 2026-10-19 (see Decisions); implemented as proposed
+below, with unit tests only.
+
+## Decisions (2026-10-19)
+
+- **Q1: driver side only.** The driver uses the service response when the device declares
+  `supports_response`; otherwise it behaves as today. The firmware change goes into the P2
+  firmware task (a carry-forward in docs/tasks/README.md).
+- **Q2: the stream-timing estimate,** as in the old project: all audio sent, plus the
+  remaining duration, plus 0.2 s. A P1 hardware-test carry-forward compares it with the media
+  player's announcing → idle state.
+- **Q3: `play` with a consumer URL goes to P1** with the API commands. T-014 covers only the
+  streamed playback that `speak` needs (a README note).
 
 ## Scope (docs/tasks/README.md)
 
@@ -68,45 +80,60 @@ chunks to the driver), which this repo already has in `messages.py`/`protocol.py
 The one change from the old repo: one shared server on `playback_http.port` with a path per
 playback, instead of one server per playback on a random port.
 
-## Proposed implementation (the recommended answers below)
+## Implementation
 
 1. **`hub/playback_http.py`: one server, asyncio only (`asyncio.start_server`, no new
    dependency).**
-   - It binds `0.0.0.0:<playback_http.port>`, with host networking (§9), and is created and
-     closed by main like the API.
-   - `open(playback_id, rate, width, channels)` returns a stream with bounded buffering.
-     `GET /<playback_id>.wav` sends the endless WAV header and then the chunks as they arrive.
-   - An unknown id or a second GET returns 404. Every wait has a timeout. A stream nobody
-     fetched within 5 s fails loudly.
-2. **Driver (`EsphomeSatellite`):**
-   - **`PlaybackBegin`:** assert disarmed (MP-AUDIO-001, the same as cues) and no playback
-     active. Open the stream and send `media_player_command(key, media_url=…,
-     announcement=True)`, plus `volume=` first if one was given.
-     - The URL host is the local IP of the route to the satellite. Resolving it is a small
-       injectable function, so tests don't touch the network.
-     - The media player key is the single API-exposed `MediaPlayerInfo` found at connect.
-       There is no media player check at connect, so capture keeps working without one;
-       `PlaybackBegin` fails loudly instead.
-   - **`PlaybackChunk`:** write to the stream (full buffer: fail loudly).
-   - **`PlaybackEnd`:** end the stream, wait for the drain in a task, then emit
-     `PlaybackFinished`. `send_output_event` does not block for the length of the audio.
-   - **Failures:** a device that never fetches, a dropped connection or a timeout give
-     `MicrophoneUnavailable` (the session recovers). `close()` cancels the playback and closes
-     the stream.
-3. **Cues (carry-forward, Q1):**
-   - If a cue service reports `supports_response` other than NONE, call it with
-     `return_response=True` and a timeout, and emit `CueFinished` when it answers.
-   - Otherwise keep today's fire-and-forget behaviour and log it once at connect.
-4. **Tests (unit only, no hardware):**
-   - The fake client from `test_esphome_driver.py`.
-   - A real asyncio HTTP GET against the server on port 0: header, chunks, end, 404 and
-     timeouts.
-   - The order `PlaybackBegin` → chunks → `PlaybackEnd` → `PlaybackFinished`, checked by
-     `protocol.py`.
-   - Drain timing with an injected clock and sleep.
-   - Close during playback, a device that never fetches, and both cue paths.
+   - `run_hub` creates it on `0.0.0.0:<playback_http.port>` (host networking, §9). It is
+     started before everything else and closed after everything else; a failed bind exits 1.
+   - `open_stream(playback_id, rate, width, channels)` returns a `PlaybackStream` holding at
+     most `MAX_STREAM_SECONDS` (300 s) of audio; more is `StreamFull`.
+     `GET /<playback_id>.wav` gets the endless WAV header (the old driver's), then the chunks as
+     they arrive, until the stream ends or is released.
+   - One GET per stream. An unknown, released or already fetched id, or a non-GET, gets 404.
+   - Bounds: reading the request takes at most 5 s, one blocked write at most 10 s, closing at
+     most 5 s.
+2. **Driver (`EsphomeSatellite`, optional `playback_server`; the wake-test runner has none):**
+   - **`PlaybackBegin`:** assert disarmed (MP-AUDIO-001) and no playback active. Open the
+     stream, then send `media_player_command(key, media_url=…, announcement=True)`. If a volume
+     was given, it is sent first, with the old 0.1 s pause.
+     - URL host: the hub's IP on the route to the device. The device address is the API
+       connection's `connected_address`, else the configured address, found with a UDP
+       connect as in the old driver. The function is injectable.
+     - Media player: the first API-exposed `MediaPlayerInfo` found at connect. Missing gives a
+       WARNING at connect and a loud `RuntimeError` at `PlaybackBegin`; capture is unaffected.
+   - **`PlaybackChunk`:** queue the PCM. `StreamFull` makes the driver unavailable.
+   - **`PlaybackEnd`:** end the stream and return at once. A drain task then does three steps:
+     - The device must fetch the stream within 5 s, or the driver becomes unavailable.
+     - Sending all of it may take the audio length plus 30 s, and a WARNING if not, as in the
+       old driver.
+     - It then sleeps the remaining audio plus 0.2 s (Q2) and emits `PlaybackFinished`.
 
-## Questions for Maciej (each changes the implementation)
+     An incomplete stream (the device stopped reading) is a WARNING, then the same finish.
+   - **`close()`** cancels the drain and releases the stream. `StartListening` and `PlayCue`
+     assert that no playback is active.
+3. **Cues (Q1):**
+   - A cue service whose `supports_response` is OPTIONAL or ONLY is called with
+     `return_response=True`; STATUS is called with `False` (success only). Both use an 8 s
+     timeout (the session waits 10 s for `CueFinished`), and `CueFinished` follows the answer.
+   - An answer with `success=False` is a WARNING, and the cue still finishes. No answer gives
+     `MicrophoneUnavailable`.
+   - Without `supports_response` the call stays fire-and-forget. That is logged at INFO at
+     connect.
+4. **Tests (unit only; the fake media player GETs the announced URL over loopback):**
+   - The server: header, chunks written before and after the GET, the 404 cases, malformed and
+     silent requests, the stream limit, the remaining-time arithmetic, and close during a GET.
+   - The driver:
+     - the playback contract (`protocol.py`-checked), the URL, and the bytes the device got;
+     - `PlaybackFinished` not before the audio length plus 0.2 s, and `PlaybackEnd` returning
+       at once;
+     - the volume order and the route address;
+     - a device that never fetches, close during a drain, and the stream limit;
+     - no media player, no server, and playback while armed.
+   - Cues: OPTIONAL and STATUS wait for the answer; fire-and-forget without it; a failed answer
+     and a missing answer.
+
+## Questions for Maciej (decided above; kept for the record)
 
 **Q1. A true `CueFinished` needs a firmware change.** The cue services already `script.wait`,
 but without `supports_response` the API call returns at once. This repo has no firmware, and

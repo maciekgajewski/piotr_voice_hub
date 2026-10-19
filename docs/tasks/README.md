@@ -53,9 +53,20 @@ P0 is done except T-014 (playback): the hub runs on piotr under compose, and the
 - **P2 (soak):** an audio-liveness check before the soak: while armed, no audio from the device
   for a bounded time is `MicrophoneUnavailable`, so a silent stall is not mistaken for a quiet
   room (PR #9 review, B1).
-- **T-014:** a true `CueFinished`. Make the firmware cue services `supports_response` (they
-  already `script.wait`) and call `execute_service(..., return_response=True, timeout=...)`.
-  Today `CueFinished` follows a fire-and-forget call, so the cue may still be playing.
+- **T-014 (driver side done in T-014):** a true `CueFinished`. The driver calls a cue service
+  with `return_response` when the firmware declares `supports_response`, and is otherwise
+  fire-and-forget as before.
+- **P2 (firmware):** declare `supports_response: optional` on `play_message_end_cue` and
+  `play_conversation_timeout_cue` (they already `script.wait`), and on `play_follow_up_ready_cue`
+  when it is added; then reflash. Until then `CueFinished` follows the call, so the cue may still
+  be playing (T-014 decision Q1).
+- **P1 (hardware test):** compare T-014's playback-end estimate (the stream fully sent, plus the
+  rest of the audio, plus 0.2 s, as the old driver did) with the media player's own
+  `ANNOUNCING` → `IDLE` state, on Voice PE and BOX-3. Switch to the state only if the estimate
+  cuts replies off or re-arms too early (T-014 decision Q2).
+- **P1 (API commands):** `play` with a consumer URL (design §4.1 step 6) needs its own driver
+  command and its end from the media player state; T-014 only streams PCM, which `speak` needs
+  (T-014 decision Q3).
 - **P1 (follow-up):** the `play_follow_up_ready_cue` firmware service (BOX-3 already has
   `play_follow_up_listening_cue`, Voice PE `follow_up_listening_sound`) is needed when follow-up
   lands, ahead of the rest of the P2 firmware work. Until then the driver logs it as missing at
