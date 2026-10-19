@@ -1,6 +1,6 @@
 # piotr_voice_hub: design doc (rev. 3)
 
-> **Status:** Rev. 3, after Maciej's second review. Repo bootstrap (T-001) is merged; P0 (§11) is next.
+> **Status:** Rev. 3, after Maciej's second review. P0 (§11) is code-complete (T-001…T-014); the P1 task breakdown is in `docs/tasks/README.md`.
 > **Repo:** <https://github.com/maciekgajewski/piotr_voice_hub> (public, MIT). Work is tracked per task in `docs/tasks/`.
 > **Source:** all needed code, config and docs are **copied** from `maciekgajewski/piotr_the_ai_server` @ `a299643`. Paths below refer to that repo.
 
