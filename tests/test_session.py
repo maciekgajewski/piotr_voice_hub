@@ -192,6 +192,7 @@ class FakeDriver:
         self.fail_starts = 0
         self.silent: set[type] = set()  # command types the driver never answers
         self.fail_on: set[type] = set()  # command types that fail (once each) as a disconnect
+        self.slow: dict[type, float] = {}  # command type -> seconds its send takes
         self.closes = 0
         self.in_flight = False
         self.overlapped = False
@@ -211,7 +212,7 @@ class FakeDriver:
         self.overlapped |= self.in_flight
         self.in_flight = True
         try:
-            await asyncio.sleep(0.001)
+            await asyncio.sleep(self.slow.get(type(event), 0.001))
             if type(event) in self.fail_on:
                 self.fail_on.discard(type(event))
                 raise MicrophoneUnavailable("connection lost")
@@ -1027,10 +1028,12 @@ async def _test_commands_outside_the_reply_wait_are_busy_or_offline() -> None:
     assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
 
 
-@pytest.mark.parametrize("when", ["before-audio-start", "after-audio-start"])
+@pytest.mark.parametrize("when", ["before-audio-start", "after-audio-start", "cap-first"])
 def test_tts_failing_before_any_audio_plays_the_timeout_cue_and_still_finishes(
-    caplog: pytest.LogCaptureFixture, when: str
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, when: str
 ) -> None:
+    if when == "cap-first":  # PR #22 review N1: the cap fires before the first chunk
+        monkeypatch.setattr(session_module, "PLAYBACK_PRODUCE_TIMEOUT_SECONDS", 0.1)
     asyncio.run(_test_tts_failing_before_any_audio(caplog, when))
 
 
@@ -1039,10 +1042,13 @@ async def _test_tts_failing_before_any_audio(caplog: pytest.LogCaptureFixture, w
     if when == "before-audio-start":
         h.tts.fail_at_start = True
         reason = "could not connect to the TTS service: refused"
-    else:  # audio-start, then a failure before the first chunk: an empty playback
+    elif when == "after-audio-start":  # then a failure before the first chunk
         h.tts.chunks = []
         h.tts.fail_after_chunks = True
         reason = "connection closed before audio-stop"
+    else:  # audio-start, then no chunk within the cap
+        h.tts.chunk_delay = 1.0
+        reason = ""
     await accepted(h)
     playback_id = h.session.speak("Jest piąta.", 0.7)
     await h.until(lambda: h.events[-1:] == [IDLE])
@@ -1056,9 +1062,42 @@ async def _test_tts_failing_before_any_audio(caplog: pytest.LogCaptureFixture, w
     ]
     assert h.tts.open == 0
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    failure = f"TTS failed: {reason}" if reason else "audio not complete within 0.1 s"
     assert errors == [
-        f"speak playback_id={playback_id}: TTS failed: {reason}; no audio: playing the timeout cue"
+        f"speak playback_id={playback_id}: {failure}; no audio: playing the timeout cue"
     ]
+
+
+@pytest.mark.parametrize("begin_seconds", [0.15, 0.3])
+def test_a_slow_playback_begin_is_not_cut_by_the_tts_cap(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, begin_seconds: float
+) -> None:
+    monkeypatch.setattr(session_module, "PLAYBACK_PRODUCE_TIMEOUT_SECONDS", 0.2)
+    asyncio.run(_test_slow_playback_begin(caplog, begin_seconds))
+
+
+async def _test_slow_playback_begin(caplog: pytest.LogCaptureFixture, seconds: float) -> None:
+    """PR #22 review S1: the cap covers only the TTS reads, against one deadline. A slow
+    PlaybackBegin (e.g. a reconnect) is never cancelled. Within the deadline everything plays;
+    past it the begin still completes, the next read hits the deadline and what was produced
+    is played. Before, the cap cancelled the begin and the timeout cue tripped the protocol."""
+    h = Harness(reply_timeout=10)
+    h.driver.slow[PlaybackBegin] = seconds
+    await accepted(h)
+    playback_id = h.session.speak("Jest piąta.", 0.7)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    chunks = 3 if seconds < 0.2 else 1
+    assert after_processing(h) == [BEGIN, *[("chunk", CHUNK_BYTES)] * chunks] + [
+        "end",
+        VisualState.IDLE,
+        "start",
+    ]
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
+    assert h.tts.open == 0
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    capped = f"speak playback_id={playback_id}: audio not complete within 0.2 s"
+    assert errors == ([] if chunks == 3 else [f"{capped}; playing what was produced"])
 
 
 def test_a_speak_without_a_volume_leaves_the_satellite_volume_alone() -> None:

@@ -14,6 +14,7 @@ satellite fails (T-017 plan), like every `wake` ends with `transcript_final` or 
 """
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
 from collections.abc import Awaitable, Callable
@@ -65,10 +66,10 @@ EVENT_TIMEOUT_SECONDS = 10.0  # for an event the driver owes us (started, stoppe
 SHUTDOWN_TIMEOUT_SECONDS = 3.0  # stop listening (waits for the stop ack) and go idle
 SEGMENT_MARGIN_SECONDS = 0.1  # the driver ends a segment on a whole 32 ms frame
 BYTES_PER_MS = 32  # 16 kHz, 16-bit mono
-# audio-start -> PlaybackEnd (PlaybackBegin goes out with the first chunk, so this bounds
-# PlaybackBegin -> PlaybackEnd too), which is also the bound on one synthesis once its audio
-# starts (before that, the TTS client's connect and first-audio bounds). 1000 characters (the
-# cap) take about 1 s on the GPU; past this, what was produced is played and the rest dropped.
+# One deadline for the TTS reads of a speak: opening the synthesis and every chunk read. The
+# satellite commands between them (PlaybackBegin, chunks) are outside it, bounded by the
+# driver, so the cap never interrupts one (PR #22 review S1). 1000 characters (the cap) take
+# about 1 s on the GPU; past this, what was produced is played and the rest dropped.
 PLAYBACK_PRODUCE_TIMEOUT_SECONDS = 30.0
 # PlaybackEnd -> PlaybackFinished: above the driver's own drain bounds (T-014: about
 # 2 x the audio + 35 s); past this the driver is treated as unavailable.
@@ -89,6 +90,22 @@ class SttSession(Protocol):
 
 class Stt(Protocol):
     def create_streaming_session(self, session_id: str, max_audio_seconds: float) -> SttSession: ...
+
+
+class _ProduceTimeout(Exception):
+    """The speak's TTS deadline passed (PLAYBACK_PRODUCE_TIMEOUT_SECONDS)."""
+
+
+async def _tts_read[T](deadline: float, read: Awaitable[T]) -> T:
+    """One TTS read against the speak's deadline; only the read is cancelled when it passes."""
+    timeout = asyncio.timeout_at(deadline)
+    try:
+        async with timeout:
+            return await read
+    except TimeoutError:
+        if timeout.expired():
+            raise _ProduceTimeout from None
+        raise
 
 
 @dataclasses.dataclass(frozen=True)
@@ -366,12 +383,15 @@ class SatelliteSession:
         began = False
         audio_bytes = 0
         byte_rate = 1
-        produce = asyncio.timeout(PLAYBACK_PRODUCE_TIMEOUT_SECONDS)
+        deadline = asyncio.get_running_loop().time() + PLAYBACK_PRODUCE_TIMEOUT_SECONDS
         try:
-            async with self._tts.synthesize(request.text) as speech, produce:
+            async with contextlib.AsyncExitStack() as stack:
+                synthesis = stack.enter_async_context(self._tts.synthesize(request.text))
+                speech = await _tts_read(deadline, synthesis)
                 audio = speech.format
                 byte_rate = audio.rate * audio.width * audio.channels
-                async for chunk in speech:
+                chunks = aiter(speech)
+                while (chunk := await _tts_read(deadline, anext(chunks, None))) is not None:
                     if not began:
                         await self._command(
                             PlaybackBegin(
@@ -388,9 +408,7 @@ class SatelliteSession:
                 error,
                 "playing what was produced" if began else "no audio: playing the timeout cue",
             )
-        except TimeoutError:
-            if not produce.expired():
-                raise
+        except _ProduceTimeout:
             self._logger.error(
                 "speak playback_id=%s: audio not complete within %g s; %s",
                 playback_id,

@@ -33,7 +33,7 @@ thing Maciej can hear on hardware (after T-017).
 
 | Task | Scope | Depends on | Status |
 | --- | --- | --- | --- |
-| T-015 piper-service | The hub's own `wyoming-piper` compose service on the GPU (port 10201): an image with only `onnxruntime-gpu` 1.26.0 (no `onnxruntime`), the voice pinned by revision and hash, a CUDA-first provider check (no silent CPU fallback), HEURISTIC cuDNN algorithm search, warm-up before it listens; smoke test on piotr | T-003, T-012 | in review (PR #18) |
+| T-015 piper-service | The hub's own `wyoming-piper` compose service on the GPU (port 10201): an image with only `onnxruntime-gpu` 1.26.0 (no `onnxruntime`), the voice pinned by revision and hash, a CUDA-first provider check (no silent CPU fallback), HEURISTIC cuDNN algorithm search, warm-up before it listens; smoke test on piotr | T-003, T-012 | merged (PR #18) |
 | T-016 tts-client | `tts/`: Wyoming Piper client (old `PiperTextToSpeech.synthesize`), streamed PCM chunks, a timeout on every wait, a text-length cap per call; warm-up at hub startup before arming | T-004, T-015 | merged (PR #19) |
 | T-017 speak-release | API commands `speak` and `release` (`ack`/`error`) for a satellite in `PROCESSING`; session plays TTS through T-014 (`speaking` state, `playback_finished`, re-arm) with a bound on `PlaybackBegin` → `PlaybackEnd`; anything else is `busy` | T-014, T-016 | merged (PR #21) |
 | T-018 speaker-hint | Speaker-recognition service in the compose file (port 2141) and the HTTP client (`speaker/`); `transcript_final` carries `speaker` | T-012; can run in parallel with T-015–T-017 | planned |

@@ -85,3 +85,29 @@
   with the new code. The running hub reads its config only at startup, so it is not affected.
   In the same commit, docs/tasks/README.md marks T-016 `merged (PR #19)` and T-017
   `merged (PR #21)`.
+- 2026-10-19 14:55: PR #22 was merged as 789d6f3 (review 5571801954, MERGE). This is follow-up 2,
+  on branch `t-017-followup-2` from origin/main:
+  - **S1:** the 30 s cap (`PLAYBACK_PRODUCE_TIMEOUT_SECONDS`) now covers only the TTS reads,
+    meaning opening the synthesis and each chunk read. All of them run against one deadline
+    (`loop.time()` + 30 s), with `asyncio.timeout_at` around each read in `_tts_read`. The
+    satellite commands (`PlaybackBegin`, the chunks, `PlaybackEnd`, the cue) run outside it,
+    so the cap can no longer cancel a begin halfway. Before, that sent the timeout cue while
+    the protocol state was `PLAYING_AUDIO`, which tripped an assert and crashed the hub (latent).
+    Expiry is a private `_ProduceTimeout`, so a `TimeoutError` from anything else is not taken
+    for the cap. A test with a slow `PlaybackBegin` covers both cases. At 0.15 s against a
+    0.2 s cap, all chunks play with no error. At 0.3 s the begin completes, the next read hits
+    the deadline, and what was produced is played. Either way there is one `playback_finished`.
+    Decision: one deadline means a slow begin still uses up TTS time. A per-read budget that
+    leaves out the send time was not chosen: it would no longer bound the whole speak.
+    The T-016 client now logs a capped speak as `consumer failed: _ProduceTimeout`, where
+    it used to say `TimeoutError`. The playback_http docstring now names both bounds.
+  - **N1:** the empty-playback test has a third case, the cap firing before the first chunk.
+    The timeout cue plays, there is one `playback_finished`, and the ERROR line is
+    `audio not complete within 0.1 s; no audio: playing the timeout cue`.
+  - **N2:** docs/tasks/README.md: T-015 is now `merged (PR #18)`. The other rows checked:
+    T-001–T-014 say merged, T-016/T-017 say merged (PR #19/#21), and T-018 onward are planned.
+  - **N3:** re-wrapped T-017 plan.md:41 only. The plan's "Bounds" line
+    (`PlaybackBegin` → `PlaybackEnd` at most 30 s) is left as the T-017 history; this entry
+    supersedes it.
+- The 0.3 s slow-begin case fails against origin/main's `session.py`, so it reproduces
+  review S1. With this change, `make check` is green 3× on piotr (683 passed, 8 skipped).
