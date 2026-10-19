@@ -81,3 +81,35 @@ def test_a_blocked_event_loop_exits_1_with_a_critical_line_and_a_traceback_dump(
     assert "(most recent call first):" in dump
     main_thread = dump.index("Thread 0x")  # the non-current one: the blocked loop
     assert re.search(r'File "<string>", line \d+ in main', dump[main_thread:]), dump
+
+
+@pytest.mark.parametrize(
+    "break_stderr",
+    [
+        "sys.stderr.close()",  # dump_traceback: ValueError
+        "sys.stderr = None",  # dump_traceback: RuntimeError
+        "os.close(2)",  # dump_traceback: OSError (bad file descriptor)
+    ],
+)
+def test_an_unusable_stderr_still_exits_1(break_stderr: str) -> None:
+    script = textwrap.dedent(
+        f"""
+        import asyncio, os, sys, time
+        from piotr_voice_hub.hub.watchdog import Watchdog
+
+        async def main():
+            {break_stderr}
+            Watchdog(stale_seconds=0.2, check_seconds=0.05).start()  # the real exit path
+            time.sleep(30)  # a blocked loop
+            print("not reached")
+
+        asyncio.run(main())
+        """
+    )
+    started = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=20
+    )
+    assert result.returncode == 1, result.stderr
+    assert time.monotonic() - started < 10
+    assert "not reached" not in result.stdout

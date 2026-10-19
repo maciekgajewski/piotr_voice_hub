@@ -124,3 +124,16 @@
   removed.
 - n2: the `RUN_CANCEL_TIMEOUT_SECONDS` comment is finished.
 - `docs/tasks/README.md`: T-012 is merged; P0 is done except T-014 (playback).
+
+## 2026-10-19: PR #15 review 5568805649
+
+- **Blocker:** `faulthandler.dump_traceback` raises when stderr is closed or unusable, which
+  skipped `os._exit(1)`. The dump is now in `try`/`finally`, so the exit always runs. The new
+  subprocess test (stderr closed, `sys.stderr = None`, fd 2 closed) showed the same gap one step
+  earlier: with stderr closed, `logger.critical` itself raised (ValueError from the logging
+  last-resort handler) and the watchdog thread died before calling the stall action. So that
+  call is in `try`/`finally` too. The test fails without the dump guard (closed and None cases)
+  and without the logging guard (closed case).
+- Comment: a full stderr pipe that nobody reads can still block the dump and so the exit.
+  That residual risk is accepted, since Docker's log driver drains stderr.
+- The deployed hub (48b5f70) and the main checkout were not touched.
