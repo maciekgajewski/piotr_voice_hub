@@ -47,3 +47,46 @@
 
 - PR #15 was merged as 68dab8b. `t-014-playback` was rebased onto it without conflicts, and
   the T-014 row in docs/tasks/README.md now says "in review (PR #16)".
+
+## 2026-10-19: PR #16 review 5569102704
+
+- **B1:** a broken stream no longer ends in `PlaybackFinished`. If the GET fails or stalls
+  mid-stream (the API still up), the drain makes the driver unavailable, with no
+  `PlaybackFinished`, like a stream that was never fetched; the session recovers.
+  - A stalled reader is cut off by the server's per-write timeout (`SEND_TIMEOUT_SECONDS`,
+    10 s). A device that stops reading fills the socket buffers, and the next write then
+    blocks. A playing device reads at least at the audio rate.
+  - Tests: a reader that drops mid-stream (abort after header + 100 bytes) and one that stalls
+    mid-stream (30 MB at 48 kHz stereo, past the loopback buffers; write timeout 0.3 s). Both
+    end unavailable, with no `PlaybackFinished`.
+- **B2:** the P2 firmware carry-forward was wrong. ESPHome answers a service call only from
+  an explicit `api.respond`, so `supports_response` alone would make every cue wait 8 s and
+  drop the connection. Rewritten in docs/tasks/README.md and plan.md: status mode, with
+  `api.respond: {success: true}` after `script.wait` (YAML in the README). The driver already
+  calls status mode with `return_response=False`. The 8 s wait is now commented: the answer
+  comes after the about 1 s cue, below the session's 10 s. The Q1 lines in the entries above
+  (`supports_response: optional`) are superseded by this.
+- **Nits:**
+  1. A P1 carry-forward, plus comments in `playback_http.py` and `esphome.py`: nothing bounds
+     `PlaybackBegin` → `PlaybackEnd`, and the writer waits for chunks without a bound of its
+     own. The producer must bound it.
+  2. The URL is IPv4: `local_ip_for` is AF_INET only, and an IPv4-mapped `connected_address`
+     is unwrapped. A pure IPv6 connection is a WARNING at connect and unavailable at
+     `PlaybackBegin`.
+  3. The configured-address fallback is gone (it was a blocking DNS lookup in the UDP
+     connect). A missing `connected_address` is a `RuntimeError` at connect.
+  4. Formats: 16-bit PCM, 1–2 channels, 8000–48000 Hz from a fixed list. Anything else is a
+     `ValueError` before anything is sent.
+  5. A stream serves only its satellite's IP; others get 403 and the stream is still
+     fetchable.
+  6. At most 8 HTTP connections at once (`MAX_CONNECTIONS`); more are closed at once.
+  7. An unexpected drain error is logged and re-raised from `wait_for_event()`, and the driver
+     is unavailable after it.
+  8. `PlaybackBegin` waits for a pending stray-stream stop, like `StartListening`.
+  9. Tests: drop and stall mid-stream, a transport stop during the drain, plus the drain error,
+     the stray-stop wait, 403, the connection cap, formats and the IPv4/IPv6/missing address
+     cases.
+  10. PR body refreshed.
+
+  `_fail()` now releases the playback (cancels the drain), so a transport stop or any failure
+  ends it without `PlaybackFinished`.

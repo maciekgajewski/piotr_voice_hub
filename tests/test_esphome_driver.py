@@ -124,7 +124,10 @@ class FakeClient:
         self.connected_address: str | None = "127.0.0.1"
         self.media_commands: list[dict[str, Any]] = []
         self.fetch = True  # the media player GETs an announced URL
+        self.fetch_mode = "all"  # "all"; "drop" or "stall" after `fetch_bytes` (review B1)
+        self.fetch_bytes = 0
         self.fetched: list[bytes] = []  # each GET's whole response, once it ends
+        self.stalled: list[asyncio.StreamWriter] = []  # connections of a stalled reader
         self.calls: list[str] = []
         self.call_kwargs: list[dict[str, Any]] = []
         self.va_events: list[Any] = []
@@ -195,8 +198,15 @@ class FakeClient:
         host, port = host_port.rsplit(":", 1)
         reader, writer = await asyncio.open_connection(host, int(port))
         writer.write(f"GET /{path} HTTP/1.1\r\nHost: {host_port}\r\n\r\n".encode())
-        self.fetched.append(await reader.read())  # to EOF
-        writer.close()
+        if self.fetch_mode == "all":
+            self.fetched.append(await reader.read())  # to EOF
+            writer.close()
+            return
+        self.fetched.append(await reader.readexactly(self.fetch_bytes))
+        if self.fetch_mode == "drop":
+            writer.transport.abort()  # mid-stream, while the API stays up
+        else:
+            self.stalled.append(writer)  # never reads again; the test closes it
 
     async def _start(self) -> None:
         await self.handlers["start"]("conversation", 0, None, None)

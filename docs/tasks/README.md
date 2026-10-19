@@ -56,10 +56,29 @@ P0 is done except T-014 (playback): the hub runs on piotr under compose, and the
 - **T-014 (driver side done in T-014):** a true `CueFinished`. The driver calls a cue service
   with `return_response` when the firmware declares `supports_response`, and is otherwise
   fire-and-forget as before.
-- **P2 (firmware):** declare `supports_response: optional` on `play_message_end_cue` and
-  `play_conversation_timeout_cue` (they already `script.wait`), and on `play_follow_up_ready_cue`
-  when it is added; then reflash. Until then `CueFinished` follows the call, so the cue may still
-  be playing (T-014 decision Q1).
+- **P2 (firmware):** make each cue action answer once its cue has played. ESPHome sends a
+  service response only from an explicit `api.respond` action: declaring `supports_response`
+  alone makes every cue wait out the driver's 8 s and drop the connection (PR #16 review B2).
+  Use status mode, and end the action with `api.respond` after `script.wait`:
+  ```yaml
+  api:
+    actions:
+      - action: play_message_end_cue
+        supports_response: status
+        then:
+          - script.execute: play_message_end_cue
+          - script.wait: play_message_end_cue
+          - api.respond:
+              success: true
+  ```
+  Do the same for `play_conversation_timeout_cue`, and for `play_follow_up_ready_cue` when it is
+  added; then reflash. The driver calls status-mode actions with `return_response=False` and
+  waits at most 8 s. Until then `CueFinished` follows the call, so the cue may still be playing
+  (T-014 decision Q1).
+- **P1 (session, playback):** bound the time from `PlaybackBegin` to `PlaybackEnd` (TTS
+  synthesis) in the session. Neither the driver nor the playback HTTP writer, which waits for
+  the next chunk without a bound of its own, limits it; the drain's bounds start at
+  `PlaybackEnd` (PR #16 review nit 1).
 - **P1 (hardware test):** compare T-014's playback-end estimate (the stream fully sent, plus the
   rest of the audio, plus 0.2 s, as the old driver did) with the media player's own
   `ANNOUNCING` → `IDLE` state, on Voice PE and BOX-3. Switch to the state only if the estimate

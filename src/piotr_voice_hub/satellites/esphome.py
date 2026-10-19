@@ -12,10 +12,15 @@ HTTP server and sends `media_player_command(media_url, announcement=True)`; the 
 `http://<hub>:<port>/<playback_id>.wav`. `PlaybackChunk` queues PCM, `PlaybackEnd` ends the
 stream, and `PlaybackFinished` follows once the device has fetched all of it, plus the audio
 still playing and a 0.2 s grace: the old driver's estimate. A device that never fetches the
-stream makes the driver unavailable. Playback, like cues, happens only while disarmed.
+stream, or does not fetch all of it (the GET failed or stalled mid-stream, review B1), makes the
+driver unavailable instead, with no `PlaybackFinished`. Playback, like cues, happens only while
+disarmed. The URL is IPv4 (the playback server is IPv4-only) and only the satellite's own IP may
+fetch it. Nothing bounds the time from `PlaybackBegin` to `PlaybackEnd` here: that is the
+producer's (P1 session/TTS) job.
 
-Cues: a cue service that declares `supports_response` (firmware, P2) is called with a response,
-so `CueFinished` means the cue has played. Otherwise the call is fire-and-forget, as before.
+Cues: a cue service that declares `supports_response` (firmware, P2: status mode with an
+explicit `api.respond`) is called with a response, so `CueFinished` means the cue has played.
+Otherwise the call is fire-and-forget, as before.
 
 Every await on the device has a timeout. Failures raise `MicrophoneUnavailable` from
 `wait_for_event()`/`send_output_event()`; the session then calls `close()` and starts again,
@@ -33,6 +38,7 @@ import ipaddress
 import logging
 import math
 import socket
+import traceback
 from collections import deque
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
@@ -80,7 +86,11 @@ START_TIMEOUT_SECONDS = 8.0
 SERVICE_TIMEOUT_SECONDS = 5.0
 DISCONNECT_TIMEOUT_SECONDS = 5.0
 STOP_ACK_TIMEOUT_SECONDS = 2.0
-# Below the session's 10 s wait for CueFinished; the firmware's cue sounds are about 1 s.
+# The firmware answers a status-mode cue action with `api.respond` after `script.wait`, i.e.
+# once the cue sound (about 1 s) has played. 8 s is well above that and below the session's
+# 10 s wait for CueFinished. ESPHome sends no response by itself: an action that declares
+# `supports_response` without calling `api.respond` makes every cue wait out these 8 s and
+# then drop the connection (review B2), so the firmware must do both (P2 carry-forward).
 CUE_RESPONSE_TIMEOUT_SECONDS = 8.0
 # Playback drain, from the old driver: the device must fetch the stream within 5 s of
 # PlaybackEnd; sending it may then take the audio length plus 30 s; the rest of the audio
@@ -189,24 +199,30 @@ def create_api_client(target: PlaybackTarget) -> EsphomeClient:
 
 
 def local_ip_for(device_ip: str) -> str:
-    """The hub's address on the route to the device (old driver): what the device can fetch
-    from. A UDP connect sends nothing."""
-    family = socket.AF_INET6 if ":" in device_ip else socket.AF_INET
-    with socket.socket(family, socket.SOCK_DGRAM) as sock:
+    """The hub's IPv4 address on the route to the device (old driver): what the device can
+    fetch from. A UDP connect to an IP literal sends nothing and does no DNS lookup."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.connect((device_ip, API_PORT))
         return str(sock.getsockname()[0])
 
 
-def _host_for_url(host: str) -> str:
-    return f"[{host}]" if ":" in host else host
-
-
-def _is_ip(value: str) -> bool:
+def _ipv4(address: str | None) -> str | None:
+    """`address` as an IPv4 literal (also from an IPv4-mapped IPv6 one), else None."""
     try:
-        ipaddress.ip_address(value)
+        ip = ipaddress.ip_address(address or "")
     except ValueError:
-        return False
-    return True
+        return None
+    if isinstance(ip, ipaddress.IPv6Address):
+        return None if ip.ipv4_mapped is None else str(ip.ipv4_mapped)
+    return str(ip)
+
+
+@dataclass(frozen=True)
+class _Raise:
+    """Queued instead of an event: an unexpected error in a driver task; the reader re-raises
+    it, so it fails loudly in the session instead of being lost in the task."""
+
+    error: BaseException
 
 
 @dataclass(frozen=True)
@@ -243,14 +259,16 @@ class EsphomeSatellite:
         self._local_ip = local_ip
         self._max_segment_frames = math.ceil(round(config.max_segment_seconds / FRAME_SECONDS, 6))
         self._pre_roll: deque[bytes] = deque(maxlen=int(PRE_ROLL_SECONDS / FRAME_SECONDS))
-        self._events: asyncio.Queue[MicrophoneEvent | _Wake] = asyncio.Queue(MAX_QUEUED_EVENTS)
+        self._events: asyncio.Queue[MicrophoneEvent | _Wake | _Raise] = asyncio.Queue(
+            MAX_QUEUED_EVENTS
+        )
         self._readers = 0  # tasks blocked in wait_for_event()
         self._connect_lock = asyncio.Lock()
         self._client: EsphomeClient | None = None  # published only once fully connected
         self._unsubscribe: Callable[[], None] | None = None
         self._services: dict[str, Any] = {}
         self._media_player_key: int | None = None
-        self._device_ip: str | None = None  # the address the API connection actually uses
+        self._device_ip: str | None = None  # IPv4 of the API connection, None if not IPv4
         self._playback: _Playback | None = None
         self._unavailable: str | None = None  # set on failure; cleared by close()
         self._listen_id: str | None = None
@@ -275,6 +293,8 @@ class EsphomeSatellite:
             self._readers -= 1
         if isinstance(item, _Wake):
             raise MicrophoneUnavailable(item.reason)
+        if isinstance(item, _Raise):
+            raise item.error
         self._logger.debug("event %s %s", item, self._state())
         return item
 
@@ -379,7 +399,12 @@ class EsphomeSatellite:
                 players[0].name,
             )
         connected = client.connected_address
-        self._device_ip = connected if connected and _is_ip(connected) else None
+        if connected is None:  # an aioesphomeapi invariant once connected
+            await self._disconnect(client)
+            raise RuntimeError(f"connected to {self._address()} but no connected_address")
+        self._device_ip = _ipv4(connected)
+        if self._device_ip is None:
+            self._logger.warning("connected over %s, not IPv4: playback will fail", connected)
         self._unsubscribe = client.subscribe_voice_assistant(
             handle_start=self._handle_start,
             handle_stop=self._handle_stop,
@@ -423,6 +448,7 @@ class EsphomeSatellite:
         self._logger.warning("unavailable: %s %s", reason, self._state())
         self._unavailable = reason
         self._armed = False
+        self._release_playback()  # no PlaybackFinished for a playback cut short
         self._drain_events()
         self._events.put_nowait(_Wake(reason))
         # Wake a pending start or stop-ack wait now; it re-checks _unavailable.
@@ -494,11 +520,7 @@ class EsphomeSatellite:
     async def _start_listening(self, listen_id: str) -> None:
         assert self._listen_id is None, "StartListening while armed"
         assert self._playback is None, "StartListening during playback (MP-AUDIO-001)"
-        if self._stale_stop is not None:
-            await self._stale_stop  # bounded by its own timeouts
-            self._stale_stop = None
-            if self._unavailable is not None:
-                raise MicrophoneUnavailable(self._unavailable)
+        await self._await_stale_stop()
         self._drain_events()
         self._reset_capture()
         if self._dropped_chunks:
@@ -519,6 +541,14 @@ class EsphomeSatellite:
             raise MicrophoneUnavailable(self._unavailable)
         self._logger.info("listening listen_id=%s", listen_id)
         self._emit(ListeningStarted(listen_id))
+
+    async def _await_stale_stop(self) -> None:
+        """Let a pending stop of a stray device stream finish before the device is used."""
+        if self._stale_stop is not None:
+            await self._stale_stop  # bounded by its own timeouts
+            self._stale_stop = None
+            if self._unavailable is not None:
+                raise MicrophoneUnavailable(self._unavailable)
 
     async def _stop_listening(self, listen_id: str, reason: str) -> None:
         assert listen_id == self._listen_id, (listen_id, self._listen_id)
@@ -577,14 +607,19 @@ class EsphomeSatellite:
         if key is None:
             raise RuntimeError(f"ESPHome firmware at {self._address()} has no media player")
         assert client is not None  # _ensure_connected
-        device_ip = self._device_ip or self.playback_target.address
+        device_ip = self._device_ip
+        if device_ip is None:  # reconnecting may pick an IPv4 address
+            raise await self._lose_transport("the API connection is not IPv4: no playback URL")
+        await self._await_stale_stop()
         try:
             host = self._local_ip(device_ip)
         except OSError as error:
             raise await self._lose_transport(f"no route to {device_ip}: {error!r}") from error
-        stream = server.open_stream(event.playback_id, event.rate, event.width, event.channels)
+        stream = server.open_stream(  # ValueError for an unsupported format
+            event.playback_id, event.rate, event.width, event.channels, device_ip
+        )
         self._playback = _Playback(event.playback_id, stream)
-        url = f"http://{_host_for_url(host)}:{server.port}{server.path(event.playback_id)}"
+        url = f"http://{host}:{server.port}{server.path(event.playback_id)}"
         try:
             if event.volume is not None:
                 client.media_player_command(key, volume=event.volume)
@@ -620,33 +655,48 @@ class EsphomeSatellite:
         playback.drain = asyncio.create_task(self._drain(playback), name=f"drain {playback_id}")
 
     async def _drain(self, playback: _Playback) -> None:
-        """PlaybackFinished once the device has played it all (old driver's estimate)."""
+        """PlaybackFinished once the device has played it all (the old driver's estimate), or
+        unavailable if the device did not fetch all of it. Any other error fails loudly."""
+        try:
+            await self._drain_stream(playback)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # a bug: re-raised from wait_for_event(), never lost
+            self._logger.error(
+                "playback %s drain failed: %s", playback.playback_id, traceback.format_exc()
+            )
+            self._release_playback()
+            if self._unavailable is None:
+                self._unavailable = f"playback drain failed: {error!r}"
+                self._armed = False
+                self._drain_events()
+                self._events.put_nowait(_Raise(error))
+
+    async def _drain_stream(self, playback: _Playback) -> None:
         stream = playback.stream
         try:
             async with asyncio.timeout(STREAM_REQUEST_TIMEOUT_SECONDS):
                 await stream.requested.wait()
         except TimeoutError:
-            self._release_playback(cancel_drain=False)  # not this very task
             self._fail(
                 f"device did not fetch playback {playback.playback_id} within "
                 f"{STREAM_REQUEST_TIMEOUT_SECONDS:g} s"
             )
             return
+        # A stalled reader is cut off by the server's per-write timeout, which sets `done`;
+        # this outer bound only covers a server that never finishes.
         done_timeout = STREAM_DONE_EXTRA_SECONDS + stream.audio_seconds
         try:
             async with asyncio.timeout(done_timeout):
                 await stream.done.wait()
         except TimeoutError:
-            self._logger.warning(
-                "playback %s: stream not sent within %.1f s", playback.playback_id, done_timeout
+            pass  # incomplete: handled below
+        if not stream.complete:  # review B1: like a stream that was never fetched
+            self._fail(
+                f"device got {stream.sent_bytes} of {stream.queued_bytes} bytes of playback "
+                f"{playback.playback_id} (the GET failed or stalled)"
             )
-        if not stream.complete:
-            self._logger.warning(
-                "playback %s: device got %d of %d bytes",
-                playback.playback_id,
-                stream.sent_bytes,
-                stream.queued_bytes,
-            )
+            return
         if stream.first_audio_at is not None:
             await asyncio.sleep(max(0.0, stream.remaining_seconds() + PLAYBACK_DRAIN_GRACE_SECONDS))
         self._logger.info(
@@ -654,14 +704,16 @@ class EsphomeSatellite:
             playback.playback_id,
             stream.audio_seconds,
         )
-        self._release_playback(cancel_drain=False)
+        self._release_playback()
         self._emit(PlaybackFinished(playback.playback_id))
 
-    def _release_playback(self, cancel_drain: bool = True) -> None:
+    def _release_playback(self) -> None:
+        """Forget the playback: cancel its drain (unless that is the caller) and release the
+        stream, so its GET ends and a later GET gets 404."""
         playback, self._playback = self._playback, None
         if playback is None:
             return
-        if cancel_drain and playback.drain is not None:
+        if playback.drain is not None and playback.drain is not asyncio.current_task():
             playback.drain.cancel()
         if self._playback_server is not None:
             self._playback_server.release(playback.stream)
@@ -783,7 +835,7 @@ class EsphomeSatellite:
             self._events.get_nowait()
 
     def _drop_capture_events(self) -> None:
-        kept: list[MicrophoneEvent | _Wake] = []
+        kept: list[MicrophoneEvent | _Wake | _Raise] = []
         dropped = 0
         while not self._events.empty():
             event = self._events.get_nowait()

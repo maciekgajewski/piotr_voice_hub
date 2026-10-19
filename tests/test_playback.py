@@ -30,6 +30,7 @@ from piotr_voice_hub.satellites.messages import (
 
 RATE, WIDTH, CHANNELS = 22050, 2, 1
 BYTE_RATE = RATE * WIDTH * CHANNELS
+LOOPBACK = "127.0.0.1"
 OK_HEAD = b"HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nConnection: close\r\n\r\n"
 
 
@@ -76,7 +77,7 @@ def test_wav_header_is_a_44_byte_pcm_header_with_an_endless_length() -> None:
 def test_a_get_streams_the_header_then_chunks_written_before_and_after_it() -> None:
     async def scenario() -> None:
         async with serving() as server:
-            stream = server.open_stream("pb-1", RATE, WIDTH, CHANNELS)
+            stream = server.open_stream("pb-1", RATE, WIDTH, CHANNELS, LOOPBACK)
             stream.write(b"early")
             body = asyncio.create_task(get_wav(server, "pb-1"))
             await asyncio.wait_for(stream.requested.wait(), 2.0)
@@ -93,7 +94,7 @@ def test_unknown_second_and_released_gets_are_404() -> None:
     async def scenario() -> None:
         async with serving() as server:
             assert (await get_wav(server, "nope")).startswith(b"HTTP/1.1 404 Not Found\r\n")
-            stream = server.open_stream("pb-1", RATE, WIDTH, CHANNELS)
+            stream = server.open_stream("pb-1", RATE, WIDTH, CHANNELS, LOOPBACK)
             first = asyncio.create_task(get_wav(server, "pb-1"))
             await asyncio.wait_for(stream.requested.wait(), 2.0)
             assert (await get_wav(server, "pb-1")).startswith(b"HTTP/1.1 404")  # one GET only
@@ -128,7 +129,7 @@ def test_a_stream_holds_at_most_max_stream_seconds(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(playback_http, "MAX_STREAM_SECONDS", 1.0)
 
     async def scenario() -> None:
-        stream = PlaybackStream("pb-1", RATE, WIDTH, CHANNELS)
+        stream = PlaybackStream("pb-1", RATE, WIDTH, CHANNELS, LOOPBACK)
         stream.write(bytes(BYTE_RATE))
         with pytest.raises(playback_http.StreamFull, match="exceeds 1 s"):
             stream.write(b"\0\0")
@@ -139,7 +140,7 @@ def test_a_stream_holds_at_most_max_stream_seconds(monkeypatch: pytest.MonkeyPat
 def test_remaining_seconds_counts_from_the_first_chunk_sent() -> None:
     async def scenario() -> None:
         now = [100.0]
-        stream = PlaybackStream("pb-1", RATE, WIDTH, CHANNELS, clock=lambda: now[0])
+        stream = PlaybackStream("pb-1", RATE, WIDTH, CHANNELS, LOOPBACK, clock=lambda: now[0])
         stream.write(bytes(2 * BYTE_RATE))
         assert stream.audio_seconds == 2.0 and stream.remaining_seconds() == 0.0  # not sent
         stream.first_audio_at = 100.0
@@ -155,7 +156,7 @@ def test_close_ends_an_open_get_and_unblocks_its_done() -> None:
     async def scenario() -> None:
         server = PlaybackHttpServer("127.0.0.1", 0)
         await server.start()
-        stream = server.open_stream("pb-1", RATE, WIDTH, CHANNELS)
+        stream = server.open_stream("pb-1", RATE, WIDTH, CHANNELS, LOOPBACK)
         body = asyncio.create_task(get_wav(server, "pb-1"))
         await asyncio.wait_for(stream.requested.wait(), 2.0)
         await server.close()
@@ -210,26 +211,54 @@ def test_playback_finished_waits_for_the_audio_to_play_out_plus_the_grace() -> N
     run(scenario)
 
 
-def test_the_url_uses_the_local_ip_on_the_route_to_the_connected_address() -> None:
+@pytest.mark.parametrize(
+    ("connected", "route_to"), [("10.0.0.9", "10.0.0.9"), ("::ffff:10.0.0.8", "10.0.0.8")]
+)
+def test_the_url_uses_the_local_ipv4_on_the_route_to_the_connected_address(
+    connected: str, route_to: str
+) -> None:
     async def scenario() -> None:
         async with serving() as server:
             asked: list[str] = []
 
             def local_ip(device_ip: str) -> str:
                 asked.append(device_ip)
-                return "127.0.0.1"
+                return "192.168.1.2"
 
             mic, clients = make(playback_server=server, local_ip=local_ip)
-            clients.setup = lambda client: setattr(client, "connected_address", "10.0.0.9")
+
+            def setup(client: FakeClient) -> None:
+                client.connected_address = connected
+                client.fetch = False  # 192.168.1.2 is not ours to connect to
+
+            clients.setup = setup
             await mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            assert asked == [route_to]
+            url = clients.last.media_commands[0]["media_url"]
+            assert url == f"http://192.168.1.2:{server.port}/pb-1.wav"
             await mic.close()
-            mic, clients = make(playback_server=server, local_ip=local_ip)
-            clients.setup = lambda client: setattr(client, "connected_address", None)
-            await mic.send_output_event(PlaybackBegin("pb-2", RATE, WIDTH, CHANNELS))
-            await mic.close()
-            assert asked == ["10.0.0.9", "10.0.0.5"]  # else the configured address
 
     run(scenario)
+
+
+def test_an_ipv6_connection_cannot_play_and_a_missing_address_fails_loudly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = make(playback_server=server)
+            clients.setup = lambda client: setattr(client, "connected_address", "fe80::1")
+            with pytest.raises(MicrophoneUnavailable, match="not IPv4"):
+                await mic.driver.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            assert "connected over fe80::1, not IPv4" in caplog.text
+            assert clients.last.media_commands == []
+            mic, clients = make(playback_server=server)
+            clients.setup = lambda client: setattr(client, "connected_address", None)
+            with pytest.raises(RuntimeError, match="no connected_address"):  # no DNS fallback
+                await mic.driver.send_output_event(SetVisualState(VisualState.IDLE))
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
 
 
 def test_a_device_that_never_fetches_makes_the_driver_unavailable(
@@ -309,6 +338,158 @@ def test_playback_only_while_disarmed() -> None:
             await arm(mic)
             with pytest.raises(AssertionError, match="MP-AUDIO-001"):
                 await mic.driver.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+
+    run(scenario)
+
+
+def test_only_the_satellite_ip_may_fetch_a_stream() -> None:
+    async def scenario() -> None:
+        async with serving() as server:
+            stream = server.open_stream("pb-1", RATE, WIDTH, CHANNELS, "10.0.0.5")
+            assert (await get_wav(server, "pb-1")).startswith(b"HTTP/1.1 403 Forbidden\r\n")
+            assert not stream.requested.is_set()  # the satellite can still fetch it
+
+    run(scenario)
+
+
+def test_connections_over_the_cap_are_closed_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(playback_http, "MAX_CONNECTIONS", 1)
+
+    async def scenario() -> None:
+        async with serving() as server:
+            _, idle = await asyncio.open_connection(LOOPBACK, server.port)  # holds the one slot
+            await asyncio.sleep(0.05)
+            try:  # closed without a response (a reset, as the request was not read)
+                assert await get_wav(server, "nope") == b""
+            except ConnectionResetError:
+                pass
+            idle.close()
+            await asyncio.sleep(0.05)
+            assert (await get_wav(server, "nope")).startswith(b"HTTP/1.1 404")  # slot is free
+
+    run(scenario)
+
+
+@pytest.mark.parametrize(
+    ("rate", "width", "channels", "message"),
+    [(44100, 3, 1, "44100 Hz, 24 bit"), (12345, 2, 1, "12345 Hz"), (16000, 2, 3, "3 channels")],
+)
+def test_unsupported_formats_are_rejected_before_anything_is_sent(
+    rate: int, width: int, channels: int, message: str
+) -> None:
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            with pytest.raises(ValueError, match=message):
+                await mic.driver.send_output_event(PlaybackBegin("pb-1", rate, width, channels))
+            assert clients.last.media_commands == []
+            assert (await get_wav(server, "pb-1")).startswith(b"HTTP/1.1 404")
+
+    run(scenario)
+
+
+async def unavailable(mic: Checked, match: str) -> None:
+    with pytest.raises(MicrophoneUnavailable, match=match):
+        await asyncio.wait_for(mic.driver.wait_for_event(), 10.0)
+    queued = list(mic.driver._events._queue)  # type: ignore[attr-defined]
+    assert not [event for event in queued if isinstance(event, PlaybackFinished)]
+
+
+def test_a_reader_that_drops_mid_stream_makes_the_driver_unavailable() -> None:
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            clients.last.fetch_mode, clients.last.fetch_bytes = "drop", len(OK_HEAD) + 44 + 100
+            await mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            await mic.send_output_event(PlaybackChunk("pb-1", bytes(1000)))
+            await asyncio.sleep(0.2)  # fetched 100 bytes of audio, then dropped
+            for _ in range(5):  # writes to the dropped connection fail
+                await mic.send_output_event(PlaybackChunk("pb-1", bytes(BYTE_RATE)))
+                await asyncio.sleep(0.02)
+            await mic.send_output_event(PlaybackEnd("pb-1"))
+            await unavailable(mic, "device got .* bytes of playback pb-1")
+
+    run(scenario)
+
+
+def test_a_reader_that_stalls_mid_stream_makes_the_driver_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(playback_http, "SEND_TIMEOUT_SECONDS", 0.3)
+    rate, channels = 48000, 2  # 192 kB/s: 30 MB is more than the loopback socket buffers
+
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            clients.last.fetch_mode, clients.last.fetch_bytes = "stall", len(OK_HEAD) + 44 + 100
+            await mic.send_output_event(PlaybackBegin("pb-1", rate, WIDTH, channels))
+            for _ in range(30):
+                await mic.send_output_event(PlaybackChunk("pb-1", bytes(1_000_000)))
+            await mic.send_output_event(PlaybackEnd("pb-1"))
+            started = time.monotonic()
+            await unavailable(mic, "device got .* bytes of playback pb-1")
+            assert time.monotonic() - started < 5.0  # the write timeout, not 30 s + audio
+            for writer in clients.last.stalled:
+                writer.close()
+
+    run(scenario)
+
+
+def test_a_transport_stop_during_the_drain_is_unavailable_with_no_playback_finished() -> None:
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            await mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            await mic.send_output_event(PlaybackChunk("pb-1", bytes(BYTE_RATE)))  # 1 s
+            await mic.send_output_event(PlaybackEnd("pb-1"))
+            await asyncio.sleep(0.3)  # fetched; the drain waits for the audio to play out
+            on_stop = clients.last.on_stop
+            assert on_stop is not None
+            await on_stop(False)
+            await unavailable(mic, "transport stopped")
+            await asyncio.sleep(1.0)  # past the estimated end
+            queued = list(mic.driver._events._queue)  # type: ignore[attr-defined]
+            assert not [event for event in queued if isinstance(event, PlaybackFinished)]
+            assert (await get_wav(server, "pb-1")).startswith(b"HTTP/1.1 404")
+
+    run(scenario)
+
+
+def test_an_unexpected_drain_error_is_raised_to_the_reader(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def broken(self: PlaybackStream) -> float:
+        raise ZeroDivisionError("a bug")
+
+    monkeypatch.setattr(PlaybackStream, "remaining_seconds", broken)
+
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, _ = await playing(server)
+            await mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            await mic.send_output_event(PlaybackChunk("pb-1", b"audio"))
+            await mic.send_output_event(PlaybackEnd("pb-1"))
+            with pytest.raises(ZeroDivisionError, match="a bug"):
+                await asyncio.wait_for(mic.driver.wait_for_event(), 5.0)
+            with pytest.raises(MicrophoneUnavailable, match="playback drain failed"):
+                await mic.driver.send_output_event(SetVisualState(VisualState.IDLE))
+
+    with caplog.at_level(logging.ERROR):
+        run(scenario)
+    assert "playback pb-1 drain failed" in caplog.text
+
+
+def test_playback_begin_waits_for_a_pending_stray_stream_stop() -> None:
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            await clients.last.handlers["start"]("conversation", 0, None, None)  # while disarmed
+            assert mic.driver._stale_stop is not None
+            await mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            assert mic.driver._stale_stop is None
+            assert clients.last.calls[-1] == "stop_listening"  # stopped before the announce
+            assert clients.last.media_commands[0]["announcement"] is True
+            await mic.close()
 
     run(scenario)
 

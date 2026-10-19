@@ -86,36 +86,57 @@ playback, instead of one server per playback on a random port.
    dependency).**
    - `run_hub` creates it on `0.0.0.0:<playback_http.port>` (host networking, §9). It is
      started before everything else and closed after everything else; a failed bind exits 1.
-   - `open_stream(playback_id, rate, width, channels)` returns a `PlaybackStream` holding at
-     most `MAX_STREAM_SECONDS` (300 s) of audio; more is `StreamFull`.
-     `GET /<playback_id>.wav` gets the endless WAV header (the old driver's), then the chunks as
-     they arrive, until the stream ends or is released.
-   - One GET per stream. An unknown, released or already fetched id, or a non-GET, gets 404.
+   - `open_stream(playback_id, rate, width, channels, client_ip)` returns a `PlaybackStream`
+     holding at most `MAX_STREAM_SECONDS` (300 s) of audio; more is `StreamFull`.
+     - Formats: 16-bit PCM, 1 or 2 channels, at 8000, 11025, 16000, 22050, 24000, 32000, 44100
+       or 48000 Hz. Anything else is a `ValueError` before anything is sent.
+     - `GET /<playback_id>.wav` gets the endless WAV header (the old driver's), then the chunks
+       as they arrive, until the stream ends or is released.
+   - One GET per stream, and only from the satellite's IP. An unknown, released or already
+     fetched id, or a non-GET, gets 404; another IP gets 403. At most 8 connections at once;
+     more are closed at once.
    - Bounds: reading the request takes at most 5 s, one blocked write at most 10 s, closing at
      most 5 s.
+     - A device that stops reading mid-stream fills the socket buffers. The next write then
+       blocks and is cut off after 10 s, so the GET ends incomplete. A playing device reads at
+       least at the audio rate, so a healthy write never waits that long.
+     - Not bounded: the writer's wait for the next chunk, i.e. `PlaybackBegin` to
+       `PlaybackEnd`. That bound is the producer's (P1 session/TTS carry-forward).
 2. **Driver (`EsphomeSatellite`, optional `playback_server`; the wake-test runner has none):**
    - **`PlaybackBegin`:** assert disarmed (MP-AUDIO-001) and no playback active. Open the
      stream, then send `media_player_command(key, media_url=…, announcement=True)`. If a volume
      was given, it is sent first, with the old 0.1 s pause.
-     - URL host: the hub's IP on the route to the device. The device address is the API
-       connection's `connected_address`, else the configured address, found with a UDP
-       connect as in the old driver. The function is injectable.
+     - URL host: the hub's IPv4 address on the route to the device, found with a UDP connect
+       as in the old driver. The function is injectable.
+     - The device address is the API connection's `connected_address`, as IPv4 (an
+       IPv4-mapped address is unwrapped); the server is IPv4-only. There is no DNS fallback:
+       a missing `connected_address` is a `RuntimeError` at connect. A pure IPv6 connection
+       gives a WARNING at connect and makes `PlaybackBegin` unavailable (a reconnect may use
+       IPv4).
+     - It first waits for a pending stop of a stray device stream, as `StartListening` does.
      - Media player: the first API-exposed `MediaPlayerInfo` found at connect. Missing gives a
        WARNING at connect and a loud `RuntimeError` at `PlaybackBegin`; capture is unaffected.
    - **`PlaybackChunk`:** queue the PCM. `StreamFull` makes the driver unavailable.
    - **`PlaybackEnd`:** end the stream and return at once. A drain task then does three steps:
      - The device must fetch the stream within 5 s, or the driver becomes unavailable.
-     - Sending all of it may take the audio length plus 30 s, and a WARNING if not, as in the
-       old driver.
-     - It then sleeps the remaining audio plus 0.2 s (Q2) and emits `PlaybackFinished`.
+     - It waits until the GET ends, at most the audio length plus 30 s.
+     - If the device got all of it, it sleeps the remaining audio plus 0.2 s (Q2) and emits
+       `PlaybackFinished`.
 
-     An incomplete stream (the device stopped reading) is a WARNING, then the same finish.
+     An incomplete stream (the GET failed, or stalled and was cut off) makes the driver
+     unavailable, with no `PlaybackFinished`, like a stream that was never fetched (PR #16
+     review B1). The session recovers. Any other error in the drain is logged and re-raised
+     from `wait_for_event()`, so it fails loudly in the session. A transport stop during the
+     drain cancels it.
    - **`close()`** cancels the drain and releases the stream. `StartListening` and `PlayCue`
      assert that no playback is active.
 3. **Cues (Q1):**
    - A cue service whose `supports_response` is OPTIONAL or ONLY is called with
      `return_response=True`; STATUS is called with `False` (success only). Both use an 8 s
      timeout (the session waits 10 s for `CueFinished`), and `CueFinished` follows the answer.
+   - ESPHome answers only from an explicit `api.respond`. The P2 firmware uses status mode and
+     ends each cue action with `api.respond: {success: true}` after `script.wait`, so the answer
+     comes once the cue (about 1 s) has played: well inside the 8 s (PR #16 review B2).
    - An answer with `success=False` is a WARNING, and the cue still finishes. No answer gives
      `MicrophoneUnavailable`.
    - Without `supports_response` the call stays fire-and-forget. That is logged at INFO at
@@ -141,8 +162,9 @@ the devices can't be reflashed now. Options:
 - (a) Copy `firmware/esphome/` into the repo in T-014, change the two cue services, and reflash
   later.
 - (b) Driver side only, as in step 3: it uses the response when a device offers one and falls
-  back to fire-and-forget. The firmware change (`supports_response: optional` on the cue
-  services) goes into the P2 firmware task, together with the copy and the reflash.
+  back to fire-and-forget. The firmware change goes into the P2 firmware task, together with the
+  copy and the reflash: status mode with `api.respond` after `script.wait`. That is corrected in
+  review B2; `supports_response` alone is not enough.
 - (c) Defer it all to P2.
 
 *Recommendation: (b).* Small and safe now, and the firmware lives in one place (P2).

@@ -6,9 +6,17 @@ live WAV stream: an "endless" header (the length is not known in advance), then 
 as the hub hands them over. Ported from the old driver's `Box3PlaybackStream` (piotr_the_ai_server
 @ a299643), which ran one `ThreadingHTTPServer` per playback on a random port.
 
-Every wait is bounded: reading the request, and each write to a device that stopped reading.
-A stream holds at most `MAX_STREAM_SECONDS` of audio. Each stream serves one GET; an unknown
-id or a second GET gets 404.
+Every wait on the device is bounded: reading the request, and each write. A device that stops
+reading mid-stream fills the socket buffers, and the next write then blocks; after
+`SEND_TIMEOUT_SECONDS` the GET is dropped and the stream stays incomplete. The driver treats an
+incomplete stream like one that was never fetched (T-014 review B1).
+
+A stream holds at most `MAX_STREAM_SECONDS` of audio, in one of the supported formats. Each
+stream serves one GET, and only to its satellite's IP. An unknown id, a second GET or a non-GET
+gets 404; another IP gets 403. At most `MAX_CONNECTIONS` requests are served at once.
+
+Not bounded here: the writer's wait for the next chunk. The producer (the session, with TTS in
+P1) must bound the time from `PlaybackBegin` to `PlaybackEnd` (docs/tasks/README.md, P1).
 """
 
 import asyncio
@@ -21,9 +29,17 @@ from collections.abc import Callable
 WAV_HEADER_BYTES = 44
 WAV_STREAM_DATA_BYTES = 0x7FFFFFF0  # "endless": the real length is unknown while streaming
 REQUEST_READ_TIMEOUT_SECONDS = 5.0
-SEND_TIMEOUT_SECONDS = 10.0  # one write blocked this long: the device stopped reading
+# One write blocked this long: the device stopped reading. A playing device reads at least at
+# the audio rate, so a healthy write never waits anywhere near this.
+SEND_TIMEOUT_SECONDS = 10.0
 CLOSE_TIMEOUT_SECONDS = 5.0
 MAX_STREAM_SECONDS = 300.0  # of audio buffered per stream; more fails loudly
+MAX_CONNECTIONS = 8  # one GET per playback and at most a few satellites; more is not ours
+# 16-bit PCM, mono or stereo, at the rates ESPHome's audio pipeline resamples from (Piper is
+# 22050 Hz mono).
+SUPPORTED_RATES = (8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000)
+SUPPORTED_WIDTHS = (2,)
+SUPPORTED_CHANNELS = (1, 2)
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +77,15 @@ class PlaybackStream:
         rate: int,
         width: int,
         channels: int,
+        client_ip: str,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        assert rate > 0 and width > 0 and channels > 0, (rate, width, channels)
+        if rate not in SUPPORTED_RATES or width not in SUPPORTED_WIDTHS:
+            raise ValueError(f"unsupported playback format: {rate} Hz, {width * 8} bit")
+        if channels not in SUPPORTED_CHANNELS:
+            raise ValueError(f"unsupported playback format: {channels} channels")
         self.playback_id = playback_id
+        self.client_ip = client_ip  # the one address allowed to GET it
         self.rate, self.width, self.channels = rate, width, channels
         self.requested = asyncio.Event()  # the device sent its GET
         self.done = asyncio.Event()  # the GET finished (all sent, failed) or the stream closed
@@ -121,7 +142,8 @@ class PlaybackStream:
         return self.audio_seconds - (self.clock() - self.first_audio_at)
 
     async def next_chunk(self) -> bytes | None:
-        """The next chunk to send, or None at the end or when closed."""
+        """The next chunk to send, or None at the end or when closed. Waits for the producer
+        without a bound of its own: that bound is the producer's (module docstring)."""
         while not self._chunks:
             if self._ended or self._closed:
                 return None
@@ -139,6 +161,7 @@ class PlaybackHttpServer:
         self._host, self._requested_port = host, port
         self._server: asyncio.Server | None = None
         self._streams: dict[str, PlaybackStream] = {}
+        self._connections = 0
 
     @property
     def port(self) -> int:
@@ -154,9 +177,12 @@ class PlaybackHttpServer:
         self._server = await asyncio.start_server(self._handle, self._host, self._requested_port)
         logger.info("playback HTTP listening on %s:%d", self._host, self.port)
 
-    def open_stream(self, playback_id: str, rate: int, width: int, channels: int) -> PlaybackStream:
+    def open_stream(
+        self, playback_id: str, rate: int, width: int, channels: int, client_ip: str
+    ) -> PlaybackStream:
+        """Raises ValueError for an unsupported format."""
         assert playback_id not in self._streams, f"playback {playback_id} is already open"
-        stream = PlaybackStream(playback_id, rate, width, channels)
+        stream = PlaybackStream(playback_id, rate, width, channels, client_ip)
         self._streams[playback_id] = stream
         return stream
 
@@ -183,17 +209,26 @@ class PlaybackHttpServer:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername")
         stream: PlaybackStream | None = None
+        if self._connections >= MAX_CONNECTIONS:
+            logger.warning("playback HTTP: %d connections; refused %s", self._connections, peer)
+            writer.close()
+            return
+        self._connections += 1
         try:
             async with asyncio.timeout(REQUEST_READ_TIMEOUT_SECONDS):
                 head = await reader.readuntil(b"\r\n\r\n")
             method, target, _ = head.split(b"\r\n", 1)[0].decode("latin-1").split(" ", 2)
-            stream = self._stream_for(method, target.split("?", 1)[0])
-            if stream is None:
-                logger.warning("playback HTTP: %s %s from %s: not found", method, target, peer)
-                writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n")
+            found = self._stream_for(method, target.split("?", 1)[0])
+            if found is None or found.client_ip != peer[0]:
+                status = b"404 Not Found" if found is None else b"403 Forbidden"
+                logger.warning(
+                    "playback HTTP: %s %s from %s: %s", method, target, peer, status.decode()
+                )
+                writer.write(b"HTTP/1.1 " + status + b"\r\nContent-Length: 0\r\n")
                 writer.write(b"Connection: close\r\n\r\n")
                 await self._send(writer)
                 return
+            stream = found
             stream.requested.set()
             logger.info("playback %s requested by %s", stream.playback_id, peer)
             writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\n")
@@ -211,6 +246,7 @@ class PlaybackHttpServer:
             # (a request head over 64 KiB). The driver's drain notices an incomplete stream.
             logger.warning("playback HTTP from %s failed: %r", peer, error)
         finally:
+            self._connections -= 1
             if stream is not None:
                 stream.done.set()
             writer.close()
