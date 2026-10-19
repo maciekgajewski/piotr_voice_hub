@@ -103,3 +103,37 @@
   listening … reason=shutdown` for both satellites, `API closed`, `hub stopped`, `stopped by
   signal`; `docker inspect -f '{{.State.ExitCode}}'` gave `0`; `docker compose down` removed
   only our container. No other container was touched.
+
+## 2026-10-19: merged; deployed; follow-up (re-review 5568670385)
+
+- PR #14 was squash-merged as 48b5f70. The main checkout on piotr is fast-forwarded to it, and
+  the hub is deployed from there for Maciej's acceptance test, exactly as in the PR #14
+  checklist (`HUB_CONFIG=~/hub-wake.yaml`, `HUB_USER` = grok-developer,
+  `docker compose up -d --build`). It was healthy after about 12 s; `/healthz` showed
+  voice-pe-02 and voice-pe-03 connected and idle. It is left running. This follow-up is
+  worked in a separate worktree, so the deployed checkout stays on 48b5f70.
+- Event watch for a user without the repo or uv: system curl 8.18 supports `ws://`, but it
+  writes the frames with no separator. jq reads by line, so it can't split them. The command
+  pipes curl through a stdlib python3 splitter that prints one event per line (see the
+  follow-up PR body). Checked on piotr with a clean env (`PATH=/usr/bin:/bin`) in a temporary
+  HOME/cwd: it printed the two snapshot events at once and stayed connected for over 75 s
+  (curl answers the pings).
+- n1: before `os._exit(1)`, the watchdog's exit path dumps every thread's stack to stderr with
+  `faulthandler.dump_traceback(all_threads=True)`. The subprocess test asserts the dump follows
+  the CRITICAL line and shows the blocked main thread in `main`. The test fails with the dump
+  removed.
+- n2: the `RUN_CANCEL_TIMEOUT_SECONDS` comment is finished.
+- `docs/tasks/README.md`: T-012 is merged; P0 is done except T-014 (playback).
+
+## 2026-10-19: PR #15 review 5568805649
+
+- **Blocker:** `faulthandler.dump_traceback` raises when stderr is closed or unusable, which
+  skipped `os._exit(1)`. The dump is now in `try`/`finally`, so the exit always runs. The new
+  subprocess test (stderr closed, `sys.stderr = None`, fd 2 closed) showed the same gap one step
+  earlier: with stderr closed, `logger.critical` itself raised (ValueError from the logging
+  last-resort handler) and the watchdog thread died before calling the stall action. So that
+  call is in `try`/`finally` too. The test fails without the dump guard (closed and None cases)
+  and without the logging guard (closed case).
+- Comment: a full stderr pipe that nobody reads can still block the dump and so the exit.
+  That residual risk is accepted, since Docker's log driver drains stderr.
+- The deployed hub (48b5f70) and the main checkout were not touched.

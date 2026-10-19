@@ -14,7 +14,9 @@ EXIT_OK = 0
 EXIT_FAILED = 1  # a session or startup failed: Docker restarts the container (§9)
 # Other exit codes: 2 invalid config (cli), 70 STT fatal (stt.whisper.exit_process); a stalled
 # event loop exits 1 too (hub.watchdog).
-RUN_CANCEL_TIMEOUT_SECONDS = 10.0  # a cancelled run() unwinds (abandons a segment) well within
+# A cancelled run() unwinds (abandons a segment) well within this; one still running after it is
+# logged and not shut down, so a stuck session cannot hold up the exit.
+RUN_CANCEL_TIMEOUT_SECONDS = 10.0
 
 # Library loggers that are too chatty at INFO for a service log.
 QUIET_LOGGERS = {
