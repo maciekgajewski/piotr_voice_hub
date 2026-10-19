@@ -19,6 +19,7 @@ from piotr_voice_hub.hub import api as api_module
 from piotr_voice_hub.hub.api import ApiServer, event_message, format_ts
 from piotr_voice_hub.hub.events import (
     HubEvent,
+    PlaybackFinished,
     SatelliteState,
     SatelliteStatus,
     Speaker,
@@ -166,6 +167,12 @@ def test_envelope_of_every_event_type() -> None:
         "name": "Maciek",
         "confidence": 0.81,
     }
+    assert event_message(PlaybackFinished(sat, "pb1", False), TS0) == {
+        "type": "playback_finished",
+        "satellite": sat,
+        "ts": TS0,
+        "data": {"playback_id": "pb1", "listening_for_follow_up": False},
+    }
 
 
 def test_state_values_follow_the_design() -> None:
@@ -174,6 +181,7 @@ def test_state_values_follow_the_design() -> None:
         SatelliteState.IDLE: "idle",
         SatelliteState.LISTENING: "listening",
         SatelliteState.PROCESSING: "processing",
+        SatelliteState.SPEAKING: "speaking",
         SatelliteState.ERROR: "error",
     }
 
@@ -277,17 +285,54 @@ async def _test_client_disconnect_is_removed_and_others_keep_receiving() -> None
         assert utterance_ids(await receive(stays, 2)) == ["u1", "u2"]
 
 
-def test_client_messages_are_ignored(caplog: pytest.LogCaptureFixture) -> None:
+def test_a_command_gets_its_reply_on_its_own_connection_in_order_with_events() -> None:
+    asyncio.run(_test_a_command_gets_its_reply_on_its_own_connection())
+
+
+async def _test_a_command_gets_its_reply_on_its_own_connection() -> None:
+    received: list[str | bytes] = []
+
+    def handle(message: str | bytes) -> dict[str, Any]:
+        received.append(message)
+        return {"type": "ack", "reply_to": f"c{len(received)}", "satellite": "s", "data": {}}
+
+    server = ApiServer("127.0.0.1", 0, Clock())
+    server.set_command_handler(handle)
+    await server.start()
+    try:
+        async with connect(url(server)) as client, connect(url(server)) as other:
+            await until(lambda: server.client_count == 2)
+            server.publish(Wake("voice-pe-02", "u1"))
+            await client.send('{"type":"speak"}')
+            await client.send(b"\x00binary")
+            await until(lambda: len(received) == 2)
+            server.publish(Wake("voice-pe-02", "u2"))
+            messages = await receive(client, 4)
+            assert [m.get("reply_to") or m["data"]["utterance_id"] for m in messages] == [
+                "u1",
+                "c1",
+                "c2",
+                "u2",
+            ]
+            assert utterance_ids(await receive(other, 2)) == ["u1", "u2"]  # no replies
+            assert received == ['{"type":"speak"}', b"\x00binary"]
+    finally:
+        await server.close()
+    await assert_no_tasks_left()
+
+
+def test_commands_before_a_handler_is_set_are_logged_and_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     caplog.set_level(logging.INFO, logger=api_module.__name__)
-    asyncio.run(_test_client_messages_are_ignored())
-    assert caplog.text.count("ignoring client messages (commands are P1)") == 1
+    asyncio.run(_test_commands_before_a_handler())
+    assert caplog.text.count("a command before commands are set up") == 2
 
 
-async def _test_client_messages_are_ignored() -> None:
+async def _test_commands_before_a_handler() -> None:
     async with running_server() as server, connect(url(server)) as client:
         await until(lambda: server.client_count == 1)
-        for _ in range(3):
-            await client.send('{"type":"speak","id":"c1","satellite":"voice-pe-02","data":{}}')
+        await client.send('{"type":"speak","id":"c1","satellite":"voice-pe-02","data":{}}')
         await client.send(b"\x00binary")
         server.publish(Wake("voice-pe-02", "u1"))
         assert utterance_ids(await receive(client, 1)) == ["u1"]

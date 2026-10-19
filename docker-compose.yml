@@ -21,8 +21,9 @@ services:
     network_mode: host  # satellites on the LAN, .local names via zeroconf; API on api.port
     gpus: all
     # The hub checks Piper at startup (T-016). This orders `docker compose up` only: after a
-    # reboot or a daemon restart Docker starts both at once, and the hub's check then waits up
-    # to 120 s for Piper to listen (WARNING lines meanwhile) before it exits 1.
+    # reboot or a daemon restart Docker starts both at once, and the hub's check then waits for
+    # Piper to listen (WARNING lines meanwhile): new attempts for 120 s, so about 137 s at most
+    # with the last attempt's own bound, before it exits 1.
     depends_on:
       piper: {condition: service_healthy}
     user: "${HUB_USER:?set HUB_USER=$(id -u):$(id -g), the owner of HUB_CONFIG}"

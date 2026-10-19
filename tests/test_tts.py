@@ -14,6 +14,7 @@ from wyoming.info import Attribution, Describe, Info, TtsProgram, TtsVoice
 from wyoming.tts import Synthesize
 
 from piotr_voice_hub.config import TtsConfig
+from piotr_voice_hub.tts import wyoming_piper
 from piotr_voice_hub.tts.interfaces import (
     AudioFormat,
     TtsError,
@@ -441,6 +442,45 @@ def test_a_describe_reset_is_unavailable() -> None:
     run(resets_after(), test)
 
 
+@pytest.mark.parametrize("error", [ConnectionResetError, BrokenPipeError])
+@pytest.mark.parametrize("call", ["start", "synthesize"])
+def test_a_reset_while_sending_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, error: type[OSError], call: str
+) -> None:
+    """Piper goes away between the connect and the write (PR #20 review N2): retried at
+    startup like a reset while reading. A real reset cannot be timed to hit the write (the
+    kernel buffers it), so the write itself raises."""
+
+    async def failing_write(_event: Event, _writer: asyncio.StreamWriter) -> None:
+        raise error(104, "Connection reset by peer")
+
+    monkeypatch.setattr(wyoming_piper, "async_write_event", failing_write)
+
+    async def test(tts: WyomingPiperTts, _fake: FakePiper) -> None:
+        kind = "describe" if call == "start" else "synthesize"
+        with pytest.raises(TtsUnavailableError, match=f"connection reset while sending {kind}"):
+            if call == "start":
+                await tts.start()
+            else:
+                await collect(tts, "Dzień dobry.")
+
+    run(sends(), test)
+
+
+def test_other_send_errors_stay_plain_tts_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def failing_write(_event: Event, _writer: asyncio.StreamWriter) -> None:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(wyoming_piper, "async_write_event", failing_write)
+
+    async def test(tts: WyomingPiperTts, _fake: FakePiper) -> None:
+        with pytest.raises(TtsError, match="sending describe failed") as failure:
+            await tts.start()
+        assert not isinstance(failure.value, TtsUnavailableError)
+
+    run(sends(), test)
+
+
 def test_cancel_mid_stream_closes_the_connection(caplog: pytest.LogCaptureFixture) -> None:
     async def test(tts: WyomingPiperTts, fake: FakePiper) -> None:
         first = asyncio.Event()
@@ -512,3 +552,20 @@ def test_debug_lines_for_an_early_stop_and_a_failure(caplog: pytest.LogCaptureFi
     assert "synthesis 1: stopped early (closed before audio-stop) after 2 bytes" in caplog.text
     run(sends_then_closes(Error(text="boom").event()), failing)
     assert "synthesis 1: failed: service error: boom" in caplog.text
+
+
+def test_a_consumer_exception_is_logged_as_a_consumer_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Not as a deliberate early stop (PR #20 review N3)."""
+
+    async def test(tts: WyomingPiperTts, fake: FakePiper) -> None:
+        with caplog.at_level(logging.DEBUG), pytest.raises(LookupError):
+            async with tts.synthesize("Dzień dobry.") as speech:
+                async for _pcm in speech:
+                    raise LookupError("the consumer's bug")
+        await fake.closed.wait()
+
+    run(sends(START, chunk(b"\0\0")), test)
+    assert "synthesis 1: consumer failed: LookupError after 2 bytes" in caplog.text
+    assert "stopped early" not in caplog.text

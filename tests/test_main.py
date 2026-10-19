@@ -12,6 +12,7 @@ import pytest
 from piotr_voice_hub.hub import main as main_module
 from piotr_voice_hub.hub.main import EXIT_FAILED, EXIT_OK, check_tts, run_until_signal, serve
 from piotr_voice_hub.hub.watchdog import Watchdog
+from piotr_voice_hub.tts import wyoming_piper
 from piotr_voice_hub.tts.interfaces import TtsError, TtsUnavailableError
 
 TIMEOUT = 2.0
@@ -354,9 +355,9 @@ def test_the_tts_check_waits_for_an_unreachable_piper(caplog: pytest.LogCaptureF
     assert fake_time.sleeps == [main_module.TTS_STARTUP_RETRY_SECONDS] * 3
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert [w.getMessage().split(":")[0] for w in warnings] == [
-        "waiting for Piper (attempt 1, 0 s of 120 s)",
-        "waiting for Piper (attempt 2, 2 s of 120 s)",
-        "waiting for Piper (attempt 3, 4 s of 120 s)",
+        "waiting for Piper (attempt 1, 0 s; new attempts until 120 s)",
+        "waiting for Piper (attempt 2, 2 s; new attempts until 120 s)",
+        "waiting for Piper (attempt 3, 4 s; new attempts until 120 s)",
     ]
     assert "Piper reachable after 4 attempts, 6.0 s" in caplog.text
     assert not [r for r in caplog.records if r.levelno == logging.CRITICAL]
@@ -372,8 +373,8 @@ def test_the_tts_check_gives_up_after_its_timeout(caplog: pytest.LogCaptureFixtu
     record = caplog.records[-1]
     assert record.levelno == logging.CRITICAL
     assert record.getMessage() == (
-        "TTS startup check failed, exiting: Piper not reachable within 10 s (6 attempts): "
-        "connect failed"
+        "TTS startup check failed, exiting: Piper not reachable after 10 s (6 attempts; none "
+        "starts after 10 s): connect failed"
     )
 
 
@@ -391,3 +392,33 @@ def test_a_wrong_voice_after_waiting_is_critical_at_once(caplog: pytest.LogCaptu
 def test_the_tts_check_defaults() -> None:
     assert main_module.TTS_STARTUP_RETRY_SECONDS == 2.0
     assert main_module.TTS_STARTUP_TIMEOUT_SECONDS == 120.0
+    # The documented worst case (PR #20 review N1): no attempt starts after the timeout, and
+    # one attempt is the client's connect + describe send + info + close.
+    attempt = (
+        wyoming_piper.CONNECT_TIMEOUT_SECONDS
+        + 2 * wyoming_piper.INFO_TIMEOUT_SECONDS
+        + wyoming_piper.CLOSE_TIMEOUT_SECONDS
+    )
+    assert main_module.TTS_STARTUP_TIMEOUT_SECONDS + attempt == 137.0
+
+
+def test_a_cancel_during_the_retry_sleep_ends_the_check_at_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        tts = SequenceTts(*[TtsUnavailableError("refused")] * 3)
+        sleeping = asyncio.Event()
+
+        async def sleep(_seconds: float) -> None:
+            sleeping.set()
+            await asyncio.Event().wait()  # the retry wait, cancelled from outside
+
+        task = asyncio.create_task(check_tts(tts, sleep=sleep))
+        await asyncio.wait_for(sleeping.wait(), 2.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2.0)
+        assert tts.started == 1
+
+    asyncio.run(scenario())
+    assert not [r for r in caplog.records if r.levelno == logging.CRITICAL]

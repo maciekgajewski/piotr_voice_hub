@@ -4,7 +4,8 @@ One unauthenticated server: `ws://<host>:<port>/ws` broadcasts every hub event t
 the §6 envelope, `GET /healthz` (liveness) returns the satellite states. `publish` is the
 sessions' `emit` callback. At most MAX_CLIENTS clients. Each client has a bounded queue and a
 bounded send; a client that falls behind is disconnected, never fed a gapped stream (design.md
-§9). Every wait is bounded, `close()` included. Commands are P1: client messages are discarded.
+§9). Every wait is bounded, `close()` included. Client messages are commands (T-017): the command
+handler's reply goes into that client's queue only, in order with its events.
 """
 
 import asyncio
@@ -24,6 +25,7 @@ from websockets.http11 import Request, Response
 
 from piotr_voice_hub.hub.events import (
     HubEvent,
+    PlaybackFinished,
     SatelliteStatus,
     TranscriptFinal,
     TranscriptPartial,
@@ -46,6 +48,7 @@ PING_TIMEOUT_SECONDS = 20.0
 REFUSED_LOG_INTERVAL_SECONDS = 60.0  # at most one 'refusing' WARNING per interval
 
 Clock = Callable[[], datetime]
+CommandHandler = Callable[[str | bytes], dict[str, Any]]  # a message -> its reply (T-017)
 
 _logger = logging.getLogger(__name__)
 
@@ -111,6 +114,12 @@ def event_message(event: HubEvent, ts: str) -> dict[str, Any]:
                 else {"name": speaker.name, "confidence": speaker.confidence},
                 "audio_ms": event.audio_ms,
             }
+        case PlaybackFinished():
+            kind = "playback_finished"
+            data = {
+                "playback_id": event.playback_id,
+                "listening_for_follow_up": event.listening_for_follow_up,
+            }
         case _:
             assert_never(event)
     return {"type": kind, "satellite": event.satellite, "ts": ts, "data": data}
@@ -152,6 +161,7 @@ class ApiServer:
         self._monotonic = monotonic
         self._refused_logged_at: float | None = None
         self._refused_unlogged = 0  # refusals since the last 'refusing' WARNING
+        self._commands: CommandHandler | None = None
 
     @property
     def port(self) -> int:
@@ -162,6 +172,11 @@ class ApiServer:
     @property
     def client_count(self) -> int:
         return len(self._clients)
+
+    def set_command_handler(self, handler: CommandHandler) -> None:
+        """Before `start()` (main builds the sessions, which publish here, then the router)."""
+        assert self._server is None, "set the command handler before start()"
+        self._commands = handler
 
     async def start(self) -> None:
         assert self._server is None, "already started"
@@ -277,7 +292,7 @@ class ApiServer:
         self._clients.add(client)
         _logger.info("API %s connected (%d clients)", client.name, len(self._clients))
         client.sender = asyncio.create_task(self._send_events(client))
-        reader = asyncio.create_task(self._discard_messages(client))
+        reader = asyncio.create_task(self._handle_commands(client))
         tasks = {client.sender, reader}
         try:
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -310,14 +325,21 @@ class ApiServer:
         except ConnectionClosed:
             pass
 
-    async def _discard_messages(self, client: _Client) -> None:
-        """P0 has no commands. Reading keeps pings and the close handshake flowing."""
-        logged = False
+    async def _handle_commands(self, client: _Client) -> None:
+        """Each message gets one reply, queued like an event (a client whose queue is full is
+        dropped as too slow). Reading also keeps pings and the close handshake flowing."""
         try:
-            async for _ in client.connection:
-                if not logged:
-                    _logger.info("API %s: ignoring client messages (commands are P1)", client.name)
-                    logged = True
+            async for message in client.connection:
+                if self._commands is None:
+                    _logger.warning("API %s: a command before commands are set up", client.name)
+                    continue
+                reply = self._commands(message)
+                _logger.debug("API %s: reply %s", client.name, reply)
+                try:
+                    client.queue.put_nowait(_dumps(reply))
+                except asyncio.QueueFull:
+                    self._drop_slow(client, f"{client.queue.qsize()} events queued")
+                    return
         except ConnectionClosed:
             pass
 

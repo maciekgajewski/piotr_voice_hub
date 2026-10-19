@@ -19,8 +19,8 @@ stream serves one GET, and only to its satellite's IP. An unknown id, a second G
 a request from another IP gets 404. At most `MAX_CONNECTIONS` requests from other addresses are
 served at once; a satellite with an open stream is never refused.
 
-Not bounded here: the writer's wait for the next chunk. The producer (the session, with TTS in
-P1) must bound the time from `PlaybackBegin` to `PlaybackEnd` (docs/tasks/README.md, P1).
+Not bounded here: the writer's wait for the next chunk. The producer bounds the time from
+`PlaybackBegin` to `PlaybackEnd` (the session's `PLAYBACK_PRODUCE_TIMEOUT_SECONDS`, T-017).
 """
 
 import asyncio
@@ -38,8 +38,10 @@ REQUEST_READ_TIMEOUT_SECONDS = 5.0
 # 22050 Hz mono, 3 s at 8 kHz mono), so a healthy write stays well inside this.
 SEND_TIMEOUT_SECONDS = 10.0
 SEND_SLICE_BYTES = 16 * 1024
-# Tight at 8 kHz mono: flushing a full 64 KiB buffer takes about 4 s (P1 carry-forward, T-017).
-CLOSE_TIMEOUT_SECONDS = 5.0
+# Closing waits for the write buffer to flush: up to 64 KiB, at the audio rate for a stream.
+CLOSE_TIMEOUT_SECONDS = 5.0  # the least; a stream adds its buffer's play time (T-017)
+CLOSE_BUFFER_BYTES = 64 * 1024  # asyncio's default high-water mark
+CLOSE_MARGIN_SECONDS = 2.0
 MAX_STREAM_SECONDS = 300.0  # of audio buffered per stream; more fails loudly
 MAX_CONNECTIONS = 8  # one GET per playback and at most a few satellites; more is not ours
 # 16-bit PCM, mono or stereo, at the rates ESPHome's audio pipeline resamples from (Piper is
@@ -69,6 +71,14 @@ def wav_header(rate: int, width: int, channels: int) -> bytes:
         + b"data"
         + data_size.to_bytes(4, "little")
     )
+
+
+def close_timeout(byte_rate: int | None) -> float:
+    """The bound on a graceful close: 5 s, or a full buffer's play time + 2 s when longer
+    (6.1 s at 8 kHz mono; Piper's 22050 Hz mono needs 3.5 s, so 5 s)."""
+    if byte_rate is None:
+        return CLOSE_TIMEOUT_SECONDS
+    return max(CLOSE_TIMEOUT_SECONDS, CLOSE_BUFFER_BYTES / byte_rate + CLOSE_MARGIN_SECONDS)
 
 
 class StreamFull(Exception):
@@ -205,11 +215,14 @@ class PlaybackHttpServer:
         if self._server is None:
             return
         self._server.close()
+        # Each connection's own close is bounded by its rate's close timeout; the slowest
+        # supported format has the longest.
+        timeout = close_timeout(SUPPORTED_RATES[0] * SUPPORTED_WIDTHS[0] * SUPPORTED_CHANNELS[0])
         try:
-            async with asyncio.timeout(CLOSE_TIMEOUT_SECONDS):
+            async with asyncio.timeout(timeout):
                 await self._server.wait_closed()
         except TimeoutError:
-            logger.error("playback HTTP did not close within %g s", CLOSE_TIMEOUT_SECONDS)
+            logger.error("playback HTTP did not close within %g s", timeout)
         self._server = None
         logger.info("playback HTTP closed")
 
@@ -264,7 +277,8 @@ class PlaybackHttpServer:
             self._connections -= 1
             if stream is not None:
                 stream.done.set()
-            await self._close(writer, abort=failed)
+            byte_rate = None if stream is None else stream.byte_rate
+            await self._close(writer, abort=failed, timeout=close_timeout(byte_rate))
 
     def _stream_for(self, method: str, path: str) -> PlaybackStream | None:
         if method != "GET" or not path.startswith("/") or not path.endswith(".wav"):
@@ -275,7 +289,7 @@ class PlaybackHttpServer:
         return stream
 
     @staticmethod
-    async def _close(writer: asyncio.StreamWriter, abort: bool) -> None:
+    async def _close(writer: asyncio.StreamWriter, abort: bool, timeout: float) -> None:
         """Abort after an error: `close()` would first flush to a peer that may have stopped
         reading. Otherwise close (flushing the tail), and abort if that takes too long."""
         if abort:
@@ -283,7 +297,7 @@ class PlaybackHttpServer:
             return
         writer.close()
         try:
-            async with asyncio.timeout(CLOSE_TIMEOUT_SECONDS):
+            async with asyncio.timeout(timeout):
                 await writer.wait_closed()
         except (OSError, TimeoutError):
             writer.transport.abort()

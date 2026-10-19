@@ -83,6 +83,12 @@ class _Connection:
                 await async_write_event(event, self.writer)
         except TimeoutError:
             raise TtsError(f"sending {event.type} took over {timeout:g} s") from None
+        except (ConnectionResetError, BrokenPipeError) as error:
+            # Piper went away between the connect and the write: as unreachable as a reset
+            # while reading, so the startup check retries it (PR #20 review N2).
+            raise TtsUnavailableError(
+                f"connection reset while sending {event.type}: {error!r}"
+            ) from error
         except OSError as error:
             raise TtsError(f"sending {event.type} failed: {error!r}") from error
 
@@ -268,6 +274,15 @@ class WyomingPiperTts:
             raise
         except TtsError as error:
             outcome = f"failed: {error}"
+            raise
+        except Exception as error:
+            # Raised at the yield by the consumer's own code (PR #20 review N3); before the
+            # yield every failure is a TtsError, so anything else there is a bug.
+            outcome = (
+                f"consumer failed: {type(error).__name__}"
+                if speech is not None
+                else f"failed: {error!r}"
+            )
             raise
         finally:
             if connection is not None:
