@@ -823,3 +823,42 @@ async def _test_shutdown_failure_is_logged_and_still_closes() -> None:
     h.driver.send_output_event = hang  # type: ignore[method-assign]
     await h.session.shutdown()
     assert h.driver.closes == 1
+
+
+def test_shutdown_while_running_is_refused() -> None:
+    asyncio.run(_test_shutdown_while_running_is_refused())
+
+
+async def _test_shutdown_while_running_is_refused() -> None:
+    h = Harness()
+    h.start()
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    commands = len(h.driver.commands)
+    with pytest.raises(AssertionError, match="cancel run"):
+        await h.session.shutdown()
+    assert len(h.driver.commands) == commands
+    assert h.driver.closes == 0
+    await h.stop()
+    await h.session.shutdown()  # allowed once run() has stopped
+    assert h.driver.closes == 1
+
+
+def test_shutdown_swallows_an_assertion_and_still_closes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    asyncio.run(_test_shutdown_swallows_an_assertion_and_still_closes())
+    assert "shutdown: could not stop listening and go idle: AssertionError" in caplog.text
+
+
+async def _test_shutdown_swallows_an_assertion_and_still_closes() -> None:
+    h = Harness()
+    h.start()
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+
+    async def refuse(event: MicrophoneCommand) -> None:
+        raise AssertionError(f"invalid in this state: {event}")
+
+    h.driver.send_output_event = refuse  # type: ignore[method-assign]
+    await h.session.shutdown()
+    assert h.driver.closes == 1

@@ -156,7 +156,7 @@ Proposed package layout in `piotr_voice_hub/`:
 | TTS | `ai_server/microphones/tts.py` | Copy `PiperTextToSpeech.synthesize` only | Delete `_stream_to_box` (duplicate playback path). |
 | Session | `ai_server/microphones/manager.py` | Rewrite (about 400 lines) | Take the logic of `_capture_open_mic_utterance`, `_wait_for_speech_start`, `_set_visual_state`, `_play_cue`, `_recover_microphone_boundary` and the per-satellite supervision loop. No `Agent`, no conversations bridge, no processing cues. |
 | Wake matcher | `manager._text_after_wake_phrase`, `_collect_open_mic_partials` | Rewrite (small) | Normalized stem match on partial and final. |
-| API server | new (pattern from `ai_server/websocket_server.py`) | Write | aiohttp WebSocket, broadcast events, bounded per-client queue. |
+| API server | new (pattern from `ai_server/websocket_server.py`) | Write | `websockets` server (no dependencies of its own; T-011), broadcast events, bounded per-client queue. |
 | Config | `ai_server/config.py` | Rewrite (small) | Hub dataclasses only. A config path is required; CLI options override config values (rules carried from `AGENTS.md`). |
 | Not copied | `conversations/`, `orchestrator/`, `agent*/`, `domain_agents/`, `ai_tools/`, `home_assistant/`, `ollama_*`, `websocket_client/`, `custom_components/`, `openclaw_voice/`, `wakeword/`, wake-word tools | — | Out of scope. |
 | Tools | `tools/lib/mic_protocol_test.py`, `capture_voice_samples.py`, `box3_api_probe.py`, `tools/speaker-profile-build.sh` | Copy | Driver probing and voice-profile enrolment. |
@@ -178,7 +178,7 @@ Proposed package layout in `piotr_voice_hub/`:
 |---|---|
 | `satellite` | `area`, `connected`, `state` (`idle/listening/processing/speaking/error`), sent on change |
 | `wake` | `utterance_id`. Once per utterance: on the first partial that matches, or else just before `transcript_final` |
-| `wake_cancelled` | `utterance_id`. The final did not confirm, or the satellite failed before `transcript_final`. Every `wake` ends with exactly one `transcript_final` or `wake_cancelled` |
+| `wake_cancelled` | `utterance_id`. The final did not confirm, or the satellite failed before `transcript_final`. While the hub runs, every `wake` ends with exactly one `transcript_final` or `wake_cancelled` (shutdown emits no events) |
 | `transcript_partial` | `utterance_id`, `text`. Only for partials that match, carrying the post-phrase text |
 | `transcript_final` | `utterance_id`, `text`, `raw_text`, `follow_up` (bool), `speaker` `{name, confidence}` or `null`, `audio_ms` |
 | `playback_finished` | `playback_id`, `listening_for_follow_up` (bool) |
@@ -222,7 +222,7 @@ satellites:
     - {id: voice-pe-bedroom, area: bedroom, address: piotr-voice-pe-bedroom-01.local, api_key: "…"}
     - {id: voice-pe-02,      area: living_room, address: piotr-voice-pe-02.local, api_key: "…"}
     - {id: voice-pe-03,      area: kitchen, address: piotr-voice-pe-03.local, api_key: "…"}
-    - {id: box3-office,      area: office, address: piotr-box3-01.local, api_key: "…"}
+    - {id: box3-office,      area: office, address: piotr-box3-01-cbfaA8.local, api_key: "…"}
 
 wake_phrase: Ryszardzie
 

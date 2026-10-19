@@ -100,39 +100,50 @@ class SatelliteSession:
         self._segment: _Segment | None = None  # owned until finished or abandoned
         self._open_wake: str | None = None  # `wake` sent, no transcript_final/wake_cancelled yet
         self._last_status: SatelliteStatus | None = None
+        self._running = False  # run() is running; shutdown() needs it stopped
         self._logger = logging.getLogger(f"{__name__}[{config.id}]")
 
     async def run(self) -> None:
         """Run until cancelled."""
-        self._status(False, SatelliteState.ERROR)
-        backoff = BACKOFF_FIRST_SECONDS
-        while True:
-            try:
-                await self._arm()
-                backoff = BACKOFF_FIRST_SECONDS
-                await self._listen_until_accepted()
-                await self._wait_for_reply()
-            except MicrophoneUnavailable as error:
-                self._logger.warning("unavailable: %s; re-arming in %g s", error, backoff)
-                await self._recover()
-                await self._sleep(backoff)
-                backoff = min(backoff * 2, BACKOFF_MAX_SECONDS)
-            finally:
-                await self._abandon_segment()  # on cancellation or an unexpected error
+        assert not self._running, "run() is already running"
+        self._running = True
+        try:
+            self._status(False, SatelliteState.ERROR)
+            backoff = BACKOFF_FIRST_SECONDS
+            while True:
+                try:
+                    await self._arm()
+                    backoff = BACKOFF_FIRST_SECONDS
+                    await self._listen_until_accepted()
+                    await self._wait_for_reply()
+                except MicrophoneUnavailable as error:
+                    self._logger.warning("unavailable: %s; re-arming in %g s", error, backoff)
+                    await self._recover()
+                    await self._sleep(backoff)
+                    backoff = min(backoff * 2, BACKOFF_MAX_SECONDS)
+                finally:
+                    await self._abandon_segment()  # on cancellation or an unexpected error
+        finally:
+            self._running = False
 
     async def shutdown(self) -> None:
         """Clean stop on exit, after `run()` was cancelled (T-012 main calls it): best effort
         and bounded, stop listening if armed and show idle, then close the driver. A satellite
         that is offline is only closed, never reconnected for this. Emits no events."""
+        assert not self._running, "cancel run() and wait for it before shutdown()"
         listen_id, self._listen_id = self._listen_id, None
         connected = self._last_status is not None and self._last_status.connected
+        # Catching Exception swallows AssertionError on purpose: this is best effort on the way
+        # out, so an invariant failure here (e.g. a command the protocol state left by the
+        # cancelled run() refuses) is logged, and close() and the other satellites' shutdown
+        # still run. The process is exiting anyway (design.md §9).
         try:
             if connected:
                 async with asyncio.timeout(SHUTDOWN_TIMEOUT_SECONDS):
                     if listen_id is not None:
                         await self._command(StopListening(listen_id, "shutdown"))
                     await self._command(SetVisualState(VisualState.IDLE))
-        except Exception as error:  # includes TimeoutError and MicrophoneUnavailable
+        except Exception as error:  # TimeoutError, MicrophoneUnavailable, AssertionError
             self._logger.warning("shutdown: could not stop listening and go idle: %r", error)
         finally:
             await self._microphone.close()
