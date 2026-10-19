@@ -260,8 +260,8 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
 
 ## 9. Deployment
 
-- **One compose file, three services**, all `network_mode: host` and `restart: unless-stopped`. Host networking lets satellites fetch the playback stream from the host IP, and Avahi/`libnss-mdns` resolves `.local` names.
-  - `hub` (CUDA 12.8 base, GPU): from `docker/ai-server.Dockerfile`, with only the hub's dependencies. It uses CPU `onnxruntime` (Silero, via faster-whisper) and must never also install `onnxruntime-gpu`.
+- **One compose file, three services**, all `network_mode: host` and `restart: unless-stopped`. Host networking lets satellites fetch the playback stream from the host IP. `.local` names are resolved by aioesphomeapi itself (zeroconf), so no Avahi or `libnss-mdns` is needed in the image (T-012). P0 (T-012) has the `hub` service only.
+  - `hub` (CUDA 12.8 base, GPU): `docker/hub.Dockerfile` (adapted from the old `docker/ai-server.Dockerfile`), with only the hub's dependencies. It runs as the config owner's uid, so the config stays mode 600. It uses CPU `onnxruntime` (Silero, via faster-whisper) and must never also install `onnxruntime-gpu`.
   - `wyoming-piper` (GPU, `--use-cuda`): from `docker-compose.yml`. **P1:** the image must install only `onnxruntime-gpu` (1.26.0), not `onnxruntime` too; the old `piotr-wyoming-piper` container has both, so it runs on CPU.
   - `speaker-recognition` (CPU): from `docker-compose.speaker-recognition.yml`, unchanged `--device cpu`.
 - **Ollama coexists.** It keeps running on the host for unrelated tasks and is *not* in the hub's compose file. The two share the GPU within the budget in §4.3.
@@ -275,7 +275,7 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
   | 10200 | Piper |
   | 6053 | Outbound to satellites |
 
-  Bind API ports to the LAN or Tailscale interface as the external security boundary.
+  The hub binds the API on all interfaces (`api.host: 0.0.0.0`, host network) and has no auth; the LAN/Tailscale perimeter (no port forwarding from the internet) is the security boundary.
 - **Exclusive ownership.** The hub is the only ESPHome API client of the configured satellites. Neither Piotr nor Home Assistant connects to them.
 - **Reliability:**
   - One supervised task per satellite, with the existing reconnect and boundary recovery.
@@ -283,6 +283,8 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
   - Bounded queues; a slow API client is disconnected rather than buffered.
   - STT warm-up before arming.
   - Process exit on invariant failure (the existing assert policy), so Docker restarts it.
+  - An event-loop watchdog thread exits the process when the loop stalls for 30 s: Docker's healthcheck only marks a container unhealthy, it never restarts it (T-012).
+  - Container logs: `json-file`, 5 × 10 MB.
 
 ## 10. Testing
 
