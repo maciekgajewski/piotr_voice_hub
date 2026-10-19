@@ -16,26 +16,30 @@ one PR (AGENTS.md). Order is the dependency order.
 | T-007 esphome-driver | ESPHome native-API satellite driver: connection and capture with Silero segmentation (playback is T-014) | merged |
 | T-008 stt | Streaming Polish STT on faster-whisper large-v3-turbo | merged |
 | T-009 wake-matcher | Wake-phrase matcher ("Ryszardzie", vocative only) | merged |
-| **T-013 wake-test-runner** | Minimal CLI: connect to the configured satellites, run VAD, STT and the wake matcher, print wake and final transcripts with timings, so Maciej can test "Ryszardzie" live on piotr. Runs right after T-007, T-008 and T-009 merge, before T-010. Throwaway: T-012's main is built on T-010's session, not on this loop. | in progress |
-| T-010 session | Per-satellite session state machine with the wake matcher (accept, cancel, reply timeout); follow-up and busy handling are P1 | planned |
+| **T-013 wake-test-runner** | Minimal CLI: connect to the configured satellites, run VAD, STT and the wake matcher, print wake and final transcripts with timings, so Maciej can test "Ryszardzie" live on piotr. Runs right after T-007, T-008 and T-009 merge, before T-010. Throwaway: T-012's main is built on T-010's session, not on this loop. | merged |
+| T-010 session | Per-satellite session state machine with the wake matcher (accept, cancel, reply timeout); follow-up and busy handling are P1 | in progress |
 | T-011 api | WebSocket API events only (commands such as speak/play/stop/release are P1) | planned |
 | T-012 main-compose | Hub main wiring and compose with the hub only | planned |
 | T-014 esphome-playback | ESPHome playback split from T-007: shared playback HTTP server, media_player announce, drain, PlaybackFinished | planned |
 
 ## Carry-forwards
 
-- **T-010:** re-arm after `MicrophoneUnavailable` must back off (for example 1 s, doubling up to
+- **T-010 (done in T-010):** re-arm after `MicrophoneUnavailable` must back off (for example 1 s, doubling up to
   30 s, reset after a successful arm), with one log line per attempt. The driver itself never
   retries, and a refused connect fails in milliseconds (PR #9 review).
-- **T-010:** commands to one satellite are serialized: the session is the driver's only
+- **T-010 (done in T-010):** commands to one satellite are serialized: the session is the driver's only
   command sender and never sends a command while another is in flight (assert it in the
   session tests). The driver does not lock commands itself (PR #9 review).
-- **Driver follow-up (before T-010):** on disconnect, a pending start wait (`_stream_started`)
+- **Driver follow-up (done in T-010):** on disconnect, a pending start wait (`_stream_started`)
   or stop-ack wait (`_stream_stopped`) fails at once with the disconnect reason instead of
   running to its timeout and reporting a timeout (PR #9 review).
-- **Driver follow-up (before T-010):** a half-open connection is closed when the reader is
+- **Driver follow-up (done in T-010):** a half-open connection is closed when the reader is
   cancelled mid-connect (`_connect` cancelled after `client.connect()` but before the client is
   published), so no orphaned API connection stays open (PR #9 review).
+- **T-012:** on shutdown, main cancels each `SatelliteSession.run()` and then awaits
+  `SatelliteSession.shutdown()` for all of them (stop listening, idle visual, close; bounded).
+  Also raise the `aioesphomeapi` logger to ERROR: it logs its own WARNING per failed connect,
+  next to the session's one (PR #12 review).
 - **P2 (soak):** an audio-liveness check before the soak: while armed, no audio from the device
   for a bounded time is `MicrophoneUnavailable`, so a silent stall is not mistaken for a quiet
   room (PR #9 review, B1).

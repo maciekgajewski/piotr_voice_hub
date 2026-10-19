@@ -7,7 +7,6 @@ latencies. No session, agent or playback (T-010, T-012, T-014). Ctrl-C to stop.
 
 import argparse
 import asyncio
-import contextlib
 import dataclasses
 import datetime
 import logging
@@ -116,6 +115,9 @@ class SatelliteRunner:
         not armed (connecting, or backing off) is only closed, never reconnected."""
         listen_id, self._listen_id = self._listen_id, None
         if listen_id is None:
+            # Also when Ctrl-C landed during an in-flight StartListening: _listen_id is set only
+            # once it returns, so that satellite is only disconnected (the device's stream ends
+            # with the connection), never sent StopListening for an arm it may not have done.
             await self._close()
             return
         try:
@@ -160,14 +162,11 @@ class SatelliteRunner:
                     await segment.session.send_audio(event.data)
                 elif isinstance(event, SpeechEnded):
                     assert segment is not None and event.utterance_id == segment.utterance_id
-                    self._segment = None
                     await self._finish_segment(listen_id, segment, event.reason)
                 else:
                     raise AssertionError(f"unexpected event while listening: {event}")
         finally:
-            if self._segment is not None:
-                segment, self._segment = self._segment, None
-                await self._abandon(segment)
+            await self._abandon()
 
     def _start_segment(self, utterance_id: str) -> None:
         assert self._segment is None, f"segment {self._segment.utterance_id} is still open"
@@ -194,14 +193,17 @@ class SatelliteRunner:
             await self._command(SetVisualState(VisualState.LISTENING))
 
     async def _finish_segment(self, listen_id: str, segment: _Segment, reason: str) -> None:
+        # The segment stays owned (self._segment) until its STT session is closed and its
+        # partial task has ended, so a Ctrl-C or failure in here abandons it fully.
         ended_at = self.clock()
-        try:
-            text = await segment.session.transcribe_final()
-        finally:
-            await segment.session.close()
+        text = await segment.session.transcribe_final()
+        await segment.session.close()
         final_latency = self.clock() - ended_at
         assert segment.partials is not None
-        await segment.partials  # the session emitted TextEnd; re-raises a partial failure
+        await asyncio.wait({segment.partials})  # it ends at TextEnd
+        if (error := segment.partials.exception()) is not None:
+            raise error
+        self._segment = None
         match = match_wake_phrase(text)
         length = ended_at - segment.started_at
         if match is not None:
@@ -225,12 +227,23 @@ class SatelliteRunner:
                 await self._command(ResetWakeCandidate(listen_id, segment.utterance_id))
             await self._command(SetVisualState(VisualState.IDLE))
 
-    async def _abandon(self, segment: _Segment) -> None:
-        await segment.session.close()
-        if segment.partials is not None:
-            segment.partials.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await segment.partials
+    async def _abandon(self) -> None:
+        """Close the open segment's STT session and end its partial task; `_segment` is
+        cleared only once the task has ended, also when this is cancelled part-way."""
+        segment = self._segment
+        if segment is None:
+            return
+        assert segment.partials is not None
+        segment.partials.cancel()  # first: nothing below may let it send or print more
+        try:
+            await segment.session.close()
+        finally:
+            # asyncio.wait raises neither the task's error nor its cancellation, so a Ctrl-C
+            # landing here propagates; the task is cancelled, so the wait is bounded.
+            await asyncio.wait({segment.partials})
+            self._segment = None
+            if not segment.partials.cancelled() and (error := segment.partials.exception()):
+                _logger.warning("satellite %s: partial reader failed: %r", self.satellite_id, error)
 
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:

@@ -256,8 +256,12 @@ class EsphomeSatellite:
             async with asyncio.timeout(CONNECT_TIMEOUT_SECONDS):
                 await client.connect(on_stop=partial(self._on_transport_stop, client), login=True)
                 _, services = await client.list_entities_services()
+        except asyncio.CancelledError:
+            await self._disconnect(client)  # never leave a half-open connection behind
+            raise
         except EXPECTED_ERRORS as error:
-            self._logger.warning("connect to %s failed: %r", self._address(), error)
+            # INFO: the caller (the session) logs the one WARNING per failed attempt.
+            self._logger.info("connect to %s failed: %r", self._address(), error)
             await self._disconnect(client)
             raise MicrophoneUnavailable(
                 f"connect to {self._address()} failed: {error!r}"
@@ -313,6 +317,9 @@ class EsphomeSatellite:
         self._armed = False
         self._drain_events()
         self._events.put_nowait(_Wake(reason))
+        # Wake a pending start or stop-ack wait now; it re-checks _unavailable.
+        self._stream_started.set()
+        self._stream_stopped.set()
 
     async def _lose_transport(self, reason: str) -> MicrophoneUnavailable:
         self._fail(reason)
@@ -365,6 +372,8 @@ class EsphomeSatellite:
                 f"device did not start streaming within {START_TIMEOUT_SECONDS} s "
                 "(muted, busy or wrong firmware?)"
             ) from error
+        if self._unavailable is not None:  # woken by _fail(): disconnected while starting
+            raise MicrophoneUnavailable(self._unavailable)
         self._logger.info("listening listen_id=%s", listen_id)
         self._emit(ListeningStarted(listen_id))
 
@@ -390,6 +399,8 @@ class EsphomeSatellite:
             raise await self._lose_transport(
                 f"no {what} acknowledgement within {STOP_ACK_TIMEOUT_SECONDS} s"
             ) from error
+        if self._unavailable is not None:  # woken by _fail(): disconnected while stopping
+            raise MicrophoneUnavailable(self._unavailable)
         # A failure here marks the driver unavailable; the reader then gets that, not the
         # ListeningStopped the caller emits (_emit drops events once unavailable).
         self._send_run_end()

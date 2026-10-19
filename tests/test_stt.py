@@ -580,3 +580,23 @@ def test_model_error_after_close_is_still_fatal() -> None:
     assert fatal_messages == [
         "STT model call failed after its session closed: RuntimeError('CUDA error')"
     ]
+
+
+def test_cancelling_the_caller_of_close_propagates() -> None:
+    """close() waits for the partial worker with asyncio.wait, so a cancellation of its caller
+    is not swallowed together with the worker's own CancelledError."""
+
+    async def run() -> None:
+        fake = Concurrency()
+        stt = await started(fake, make_config(interval=0.01))
+        session = session_of(stt)
+        await session.send_audio(pcm(0.5))
+        await asyncio.to_thread(fake.partial_started.wait, 5)
+        closing = asyncio.create_task(session.close())
+        await asyncio.sleep(0)  # close() is now waiting for the worker
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        fake.release.set()
+
+    asyncio.run(run())

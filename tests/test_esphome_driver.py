@@ -112,7 +112,7 @@ class FakeClient:
         self.ignore_start = False  # a muted or busy device never starts its stream
         self.connect_delay = 0.0
         self.connect_error: Exception | None = None
-        self.hang: set[str] = set()  # connect / service names that never return
+        self.hang: set[str] = set()  # "connect", "list" or service names that never return
         self.started = asyncio.Event()
         self.on_stop: Callable[[bool], Coroutine[Any, Any, None]] | None = None
         self.handlers: dict[str, Handler] = {}
@@ -132,6 +132,8 @@ class FakeClient:
         self.disconnects += 1
 
     async def list_entities_services(self) -> tuple[list[Any], list[Any]]:
+        if "list" in self.hang:
+            await asyncio.Event().wait()
         return [], [Service(name) for name in self.services]
 
     async def execute_service(self, service: Any, data: dict[str, Any]) -> None:
@@ -536,19 +538,22 @@ def test_concurrent_first_calls_both_fail_when_connect_fails() -> None:
     asyncio.run(run())
 
 
-def test_connect_failure_is_logged_at_warning(caplog: pytest.LogCaptureFixture) -> None:
+def test_connect_failure_is_logged_at_info(caplog: pytest.LogCaptureFixture) -> None:
+    """The session logs the one WARNING per refused connect (PR #12 review)."""
+
     async def run() -> None:
         mic, clients = make()
         clients.setup = lambda client: setattr(client, "connect_error", OSError("refused"))
         with pytest.raises(MicrophoneUnavailable, match="refused"):
             await mic.driver.send_output_event(SetVisualState(VisualState.IDLE))
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         asyncio.run(run())
     assert any(
-        r.levelno == logging.WARNING and "connect to 10.0.0.5:6053 failed" in r.getMessage()
+        r.levelno == logging.INFO and "connect to 10.0.0.5:6053 failed" in r.getMessage()
         for r in caplog.records
     )
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_close_wakes_a_blocked_reader() -> None:
@@ -706,3 +711,65 @@ def test_context_and_playback_target_come_from_config() -> None:
     mic, _ = make()
     assert mic.context == MicrophoneContext("esphome", "kitchen", "kitchen")
     assert mic.playback_target == PlaybackTarget("esphome", "kitchen", "10.0.0.5", "a2V5")
+
+
+# T-010 carry-forwards
+
+
+def test_disconnect_during_the_start_wait_fails_fast_with_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(esphome, "START_TIMEOUT_SECONDS", 60)
+
+    async def run() -> None:
+        mic, clients = make()
+        clients.setup = lambda client: setattr(client, "ignore_start", True)
+        start = asyncio.create_task(mic.driver.send_output_event(StartListening("listen-1")))
+        while "start_open_mic_listening" not in (clients.made[-1].calls if clients.made else []):
+            await asyncio.sleep(0.001)
+        assert clients.last.on_stop is not None
+        await clients.last.on_stop(False)
+        with pytest.raises(MicrophoneUnavailable, match="transport stopped"):
+            await asyncio.wait_for(start, 1)  # not the 60 s start timeout
+
+    asyncio.run(run())
+
+
+def test_disconnect_during_the_stop_ack_wait_fails_fast_with_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(esphome, "STOP_ACK_TIMEOUT_SECONDS", 60)
+
+    async def run() -> None:
+        mic, clients = make()
+        await arm(mic)
+        await asyncio.wait_for(clients.last.started.wait(), TIMEOUT)
+        clients.last.ack_stop = False
+        stop = asyncio.create_task(mic.driver.send_output_event(StopListening("listen-1", "x")))
+        while clients.last.calls[-1] != "stop_listening":
+            await asyncio.sleep(0.001)
+        assert clients.last.on_stop is not None
+        await clients.last.on_stop(False)
+        with pytest.raises(MicrophoneUnavailable, match="transport stopped"):
+            await asyncio.wait_for(stop, 1)  # not the 60 s ack timeout
+        assert clients.last.va_events == []  # no run end on a dead transport
+
+    asyncio.run(run())
+
+
+def test_cancelling_a_reader_mid_connect_closes_the_half_open_connection() -> None:
+    async def run() -> None:
+        mic, clients = make()
+        clients.setup = lambda client: client.hang.add("list")
+        reader = asyncio.create_task(mic.driver.wait_for_event())
+        while not (clients.made and clients.last.connected):
+            await asyncio.sleep(0.001)
+        reader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reader
+        assert clients.last.disconnects == 1 and not clients.last.connected
+        clients.setup = lambda _client: None
+        await arm(mic)  # the next call connects afresh
+        assert len(clients.made) == 2
+
+    asyncio.run(run())
