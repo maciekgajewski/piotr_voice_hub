@@ -152,7 +152,12 @@ async def run_hub(config: HubConfig) -> int:
     from piotr_voice_hub.satellites.esphome import EsphomeSatellite
     from piotr_voice_hub.satellites.vad import SileroVad, load_session
     from piotr_voice_hub.stt.whisper import FasterWhisperSpeechToText
+    from piotr_voice_hub.tts.wyoming_piper import WyomingPiperTts
 
+    # First, before anything is built or armed: a missing Piper service exits 1 (T-016). The
+    # service warms itself before it listens, so this is only a reachability check.
+    tts = WyomingPiperTts(config.tts)
+    await tts.start()
     stt = FasterWhisperSpeechToText(config.stt)
     api = ApiServer(config.api.host, config.api.port)
     # All interfaces, like the API (design §9): the satellites fetch from the host's LAN IP.

@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from yaml.constructor import ConstructorError
@@ -270,7 +271,24 @@ def _parse_tts(raw: dict[str, Any]) -> TtsConfig:
     volume = _number(raw, "volume", "tts")
     if not 0.0 <= volume <= 1.0:
         raise ConfigError(f"tts.volume: must be between 0.0 and 1.0, got {volume}")
-    return TtsConfig(uri=_str(raw, "uri", "tts"), voice=_str(raw, "voice", "tts"), volume=volume)
+    uri = _str(raw, "uri", "tts")
+    try:
+        parse_tcp_uri(uri)
+    except ValueError as error:
+        raise ConfigError(f"tts.uri: {error}") from None
+    return TtsConfig(uri=uri, voice=_str(raw, "voice", "tts"), volume=volume)
+
+
+def parse_tcp_uri(uri: str) -> tuple[str, int]:
+    """`tcp://host:port` → (host, port); anything else is a ValueError."""
+    parts = urlsplit(uri)
+    try:
+        port = parts.port
+    except ValueError as error:
+        raise ValueError(f"{uri!r}: {error}") from None
+    if parts.scheme != "tcp" or not parts.hostname or port is None or parts.path not in ("", "/"):
+        raise ValueError(f"{uri!r}: expected tcp://host:port")
+    return parts.hostname, port
 
 
 def _one_line(error: Exception) -> str:

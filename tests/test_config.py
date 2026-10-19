@@ -153,6 +153,14 @@ def test_missing_file(tmp_path: Path) -> None:
         ),
         ("volume: 1.0", "volume: .nan", r"tts\.volume: must be a finite"),
         (
+            "uri: tcp://127.0.0.1:10200",
+            "uri: http://127.0.0.1:10200",
+            r"tts\.uri: .*tcp://host:port",
+        ),
+        ("uri: tcp://127.0.0.1:10200", "uri: tcp://127.0.0.1", r"tts\.uri: .*tcp://host:port"),
+        ("uri: tcp://127.0.0.1:10200", "uri: tcp://127.0.0.1:x", r"tts\.uri: .*Port could not"),
+        ("uri: tcp://127.0.0.1:10200", "uri: tcp://:10200", r"tts\.uri: .*tcp://host:port"),
+        (
             "end_silence_seconds: 0.8",
             "end_silence_seconds: -1",
             r"satellites\.defaults\.end_silence_seconds: must be > 0",

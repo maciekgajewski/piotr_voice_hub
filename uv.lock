@@ -446,6 +446,7 @@ dependencies = [
     { name = "onnxruntime" },
     { name = "pyyaml" },
     { name = "websockets" },
+    { name = "wyoming" },
 ]
 
 [package.dev-dependencies]
@@ -464,6 +465,7 @@ requires-dist = [
     { name = "onnxruntime", specifier = ">=1.20" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "websockets", specifier = ">=15,<16" },
+    { name = "wyoming", specifier = "==1.10.2" },
 ]
 
 [package.metadata.requires-dev]
@@ -688,6 +690,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ff/83/de1f7709376dc3ca9b7eeb4b9a07b4526b14876b6d372a4dc62312bebee0/websockets-15.0.1-cp312-cp312-win32.whl", hash = "sha256:c338ffa0520bdb12fbc527265235639fb76e7bc7faafbb93f6ba80d9c06578a9", size = 176395, upload-time = "2025-03-05T20:02:33.017Z" },
     { url = "https://files.pythonhosted.org/packages/7d/71/abf2ebc3bbfa40f391ce1428c7168fb20582d0ff57019b69ea20fa698043/websockets-15.0.1-cp312-cp312-win_amd64.whl", hash = "sha256:fcd5cf9e305d7b8338754470cf69cf81f420459dbae8a3b40cee57417f4614a7", size = 176841, upload-time = "2025-03-05T20:02:34.498Z" },
     { url = "https://files.pythonhosted.org/packages/fa/a8/5b41e0da817d64113292ab1f8247140aac61cbf6cfd085d6a0fa77f4984f/websockets-15.0.1-py3-none-any.whl", hash = "sha256:f7a866fbc1e97b5c617ee4116daaa09b722101d4a3c170c787450ba409f9736f", size = 169743, upload-time = "2025-03-05T20:03:39.41Z" },
+]
+
+[[package]]
+name = "wyoming"
+version = "1.10.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/de/37/bfc5d51c916c4bdab16cb7eb62556d3eaaa8b5f8eba33dbe992780dc4a46/wyoming-1.10.2.tar.gz", hash = "sha256:2a84035d9e51f4be68b27c9791273c5bce29f79f0c37137ea49cc417294f9080", size = 45540, upload-time = "2026-08-27T16:30:49.154Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/08/98/512f8d7d95eeedbf157994c39572822e3f8ae724ccbb5ae027caa09cf707/wyoming-1.10.2-py3-none-any.whl", hash = "sha256:08aec17ccad4d72fc3f919ab741beacf3f23a1df24c8b9a317ebc6e02d2b227c", size = 44869, upload-time = "2026-08-27T16:30:47.72Z" },
 ]
 
 [[package]]
