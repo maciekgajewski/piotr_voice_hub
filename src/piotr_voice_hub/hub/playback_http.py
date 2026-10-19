@@ -20,7 +20,8 @@ a request from another IP gets 404. At most `MAX_CONNECTIONS` requests from othe
 served at once; a satellite with an open stream is never refused.
 
 Not bounded here: the writer's wait for the next chunk. The producer bounds the time from
-`PlaybackBegin` to `PlaybackEnd` (the session's `PLAYBACK_PRODUCE_TIMEOUT_SECONDS`, T-017).
+`PlaybackBegin` to `PlaybackEnd`: the session's `PLAYBACK_PRODUCE_TIMEOUT_SECONDS` deadline on
+the TTS reads, plus the driver's bound on each command it sends in between (T-017).
 """
 
 import asyncio

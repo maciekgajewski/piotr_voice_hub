@@ -38,7 +38,8 @@ busy policy and `stop` (T-019), `play` (T-021), the speaker hint (T-018).
   - `speak`: `ack` with a new `playback_id`; state `speaking`; open the synthesis (T-016
     client); `PlaybackBegin` with its format and the volume (the command's, else
     `tts.volume`; **follow-up:** the command's only, else the satellite's volume is left
-    alone, and `PlaybackBegin` goes with the first chunk); a `PlaybackChunk` per PCM chunk; `PlaybackEnd`; wait for the driver's
+    alone, and `PlaybackBegin` goes with the first chunk); a `PlaybackChunk` per PCM chunk;
+    `PlaybackEnd`; wait for the driver's
     `PlaybackFinished`; emit `playback_finished` (`listening_for_follow_up: false`); re-arm.
     The visual stays `PROCESSING` while speaking (there is no speaking visual).
   - **Bounds:** `PlaybackBegin` → `PlaybackEnd` at most 30 s
