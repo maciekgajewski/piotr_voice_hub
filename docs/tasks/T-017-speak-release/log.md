@@ -263,3 +263,38 @@
     `wake_cancelled`. With the push no longer conditional, the fake driver needed
     MP-STOP-002 (drop queued capture events on `StopListening`, as the real driver does);
     without it, the queued start reached the protocol checker after the stop.
+- 2026-10-20 07:39: PR #25 review 5581142066 (MERGE; the manager holds the merge for S1),
+  fixed with new commits on `t-017-cue-race` (no force push):
+  - **S1:** any media player update after the cue call counted as the cue's, and a merged
+    cue reports only IDLE, so a volume or dial change, a stray IDLE or the late IDLE of the
+    previous announcement could end the cue at once while the player still read IDLE, and
+    bring the race back. New `CUE_MIN_SECONDS` = 0.3: after the update, the cue waits until
+    0.3 s after the call (the measured cue update is 40-200 ms; a 0.5 s gap played), and then
+    still needs the player not busy (`ANNOUNCING` or `PLAYING`). The floor waits on the player
+    event, so a disconnect still ends it at once. A test sends an extra IDLE 5 ms after the
+    call: `CueFinished` comes no earlier than 0.3 s with a short cue, and no earlier than the
+    cue's own IDLE (0.5 s) with a longer one; without the floor it fails.
+  - **S2:** three new tests: a disconnect during the cue wait (unavailable in under 0.2 s,
+    no `CueFinished`); a reconnect, where the old client's updates and the new connection's
+    first state are not counted (the cue waits out the start bound with its WARNING); and
+    the hardware sequence end to end (a merged IDLE about 0.1 s after the call, then the URL,
+    the fetch, PLAYING, IDLE, `PlaybackFinished`, no WARNING). `FakeClient` gained
+    `cue_start_seconds`, `extra_update_after`, `url_states` and a `timeline`.
+  - **N1:** the earlier "1 + 8 s stays below the session's 10 s wait" (code, design.md, PR
+    text, and this log's 07:10 entry) was wrong: the driver emits `CueFinished` before the
+    command returns, and the session's 10 s wait starts after that. The bound is the
+    driver's own: the call (at most 5 s) + 1 s + 8 s, while the session holds its command
+    lock. The comments, design.md §4.1 step 5 and the PR text now say so.
+  - **N2:** the `_wait_cue_played` docstring says not busy (ANNOUNCING or PLAYING); the
+    module docstring's Cues paragraph is reflowed.
+  - **N3:** the DEBUG line is `media player <state> volume=<v> update=<n>`.
+  - **N4:** design.md §4.1 step 5 and the constants state the worst case. A player stuck in
+    `PLAYING` makes every cue take about 9 s and delays every speak by 3 s, each with a
+    `still busy` WARNING, and a URL the device then drops ends in the 5 s fetch timeout. A
+    repeating `still busy` is a device problem.
+  - **Live re-check** (voice-pe-03, production stopped about 10 s and restored on 789d6f3,
+    healthy, both idle). The probe now reads the device volume and does not set it; it
+    restores the exact value if it changed. Before: 0.3, after: 0.3. The cue's IDLE update
+    came about 0.2 s after the call, `CueFinished` at 0.30 s (the floor), the URL 0.09 s
+    later, fetched within about 0.05 s, then PLAYING, IDLE and `PlaybackFinished`, with no
+    WARNING. The new DEBUG line showed `volume=0.30 update=1..3`.

@@ -21,14 +21,15 @@ producer's (P1 session/TTS) job.
 Cues: a cue service that declares `supports_response` (firmware, P2: status mode with an
 explicit `api.respond`) is called with a response, so `CueFinished` means the cue has played.
 Otherwise the driver follows the media player's state (`subscribe_states`): `CueFinished` comes
-once the player has reported a change after the call and is not busy (`ANNOUNCING`, or
-`PLAYING`, which is how the API reported an announcement on hardware), bounded (T-017 fix).
-It may report only the final `IDLE`: on hardware a short cue's announcement and `IDLE` reached
-the API as one update. A Voice PE silently drops an announcement URL sent while a cue is still
+once the player has reported a change after the call, at least `CUE_MIN_SECONDS` after the
+call, and is not busy (`ANNOUNCING`, or `PLAYING`, which is how the API reported an
+announcement on hardware), bounded (T-017 fix). It may report only the final `IDLE`: on
+hardware a short cue's announcement and `IDLE` reached the API as one update, so the update
+alone cannot tell the cue from a volume change; the floor lets the cue's own state arrive
+before the busy check. A Voice PE silently drops an announcement URL sent while a cue is still
 announcing (seen on hardware: no fetch at all), so playback also sends its URL only once the
-player is not busy, bounded. These bounds
-log a WARNING and go on: a cue is not worth a reconnect, and a dropped URL still ends in the
-5 s fetch timeout below.
+player is not busy, bounded. These bounds log a WARNING and go on: a cue is not worth a
+reconnect, and a dropped URL still ends in the 5 s fetch timeout below.
 
 Every await on the device has a timeout. Failures raise `MicrophoneUnavailable` from
 `wait_for_event()`/`send_output_event()`; the session then calls `close()` and starts again,
@@ -109,10 +110,17 @@ CUE_RESPONSE_TIMEOUT_SECONDS = 8.0
 # A cue called without a response: the player reports a change about 40-150 ms after the call
 # (Voice PE, T-017 fix); if it has not within this, the cue is taken as done (no sound).
 CUE_START_TIMEOUT_SECONDS = 1.0
-# ... and the cue has played once the player is not busy (ANNOUNCING or PLAYING). 1 + 8 s
-# stays below the session's 10 s wait for CueFinished.
+# ... and not before this after the call: an unrelated update (the dial, a stray IDLE) can come
+# first, and the cue's own report is in by then (measured 40-150 ms; a 0.5 s gap played).
+CUE_MIN_SECONDS = 0.3
+# ... and the cue has played once the player is not busy (ANNOUNCING or PLAYING). These bounds
+# are the driver's own: the call (at most SERVICE_TIMEOUT_SECONDS) + 1 s + 8 s, about 14 s at
+# worst, while the session holds its command lock; the session's 10 s wait for CueFinished
+# starts only after the command returns, so it does not bound this.
 CUE_END_TIMEOUT_SECONDS = 8.0
-# Before a playback URL: wait for the player not to be busy (a cue still playing).
+# Before a playback URL: wait for the player not to be busy (a cue still playing). A player
+# stuck in PLAYING (nothing else plays media here) delays every speak by these 3 s with a
+# WARNING; if the device then drops the URL, the 5 s fetch timeout below makes it unavailable.
 PLAYER_FREE_TIMEOUT_SECONDS = 3.0
 # Playback drain, from the old driver: the device must fetch the stream within 5 s of
 # PlaybackEnd; sending it may then take the audio length plus 30 s; the rest of the audio
@@ -453,7 +461,12 @@ class EsphomeSatellite:
             return
         if self._player_state is not None:  # not the initial state sent on subscribe
             self._player_updates += 1
-        self._logger.debug("media player %s", getattr(state.state, "name", state.state))
+        self._logger.debug(
+            "media player %s volume=%.2f update=%d",
+            getattr(state.state, "name", state.state),
+            state.volume,
+            self._player_updates,
+        )
         self._player_state = state.state
         self._player_changed.set()
 
@@ -559,8 +572,9 @@ class EsphomeSatellite:
         return_response = self._supports_response(name)
         if return_response is None:
             updates = self._player_updates
+            called_at = asyncio.get_running_loop().time()
             await self._call(name)
-            await self._wait_cue_played(name, updates)
+            await self._wait_cue_played(name, updates, called_at)
             return True
         client = self._client
         if client is None:
@@ -580,10 +594,11 @@ class EsphomeSatellite:
         self._logger.debug("executed service %s with a response", name)
         return True
 
-    async def _wait_cue_played(self, name: str, updates: int) -> None:
+    async def _wait_cue_played(self, name: str, updates: int, called_at: float) -> None:
         """A cue without a response has played once the media player has reported a change
-        after the call (ESPHome may merge `ANNOUNCING` and `IDLE` into one update) and is not
-        announcing. Bounded; a timeout is a WARNING, not a failure."""
+        after the call (ESPHome may merge `ANNOUNCING` and `IDLE` into one update), at least
+        `CUE_MIN_SECONDS` after the call, and is not busy (ANNOUNCING or PLAYING). Bounded; a
+        timeout is a WARNING, not a failure."""
         if self._media_player_key is None:
             return  # nothing to follow (no playback either)
         if not await self._wait_player(
@@ -595,6 +610,11 @@ class EsphomeSatellite:
                 CUE_START_TIMEOUT_SECONDS,
             )
             return
+        # The floor (review S1): the update may not be the cue's; by now its own report is in.
+        # Waiting on the player, not sleeping, still notices a disconnect at once.
+        floor = called_at + CUE_MIN_SECONDS - asyncio.get_running_loop().time()
+        if floor > 0:
+            await self._wait_player(lambda: False, floor)
         if not await self._wait_player(self._player_free, CUE_END_TIMEOUT_SECONDS):
             self._logger.warning(
                 "cue %s: the media player is still busy after %g s; going on",
