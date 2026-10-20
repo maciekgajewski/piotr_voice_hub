@@ -24,7 +24,7 @@ then `audio-start`, `audio-chunk`s and `audio-stop`. Changes from the old code:
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
@@ -139,10 +139,10 @@ class _PiperSpeech:
         self.audio_bytes = 0
         self.ended = False
 
-    def __aiter__(self) -> AsyncIterator[bytes]:
+    def __aiter__(self) -> AsyncGenerator[bytes, None]:
         return self._chunks()
 
-    async def _chunks(self) -> AsyncIterator[bytes]:
+    async def _chunks(self) -> AsyncGenerator[bytes, None]:
         while not self.ended:
             event = await self._connection.receive(self._next_event_timeout, "next audio event")
             if AudioStop.is_type(event.type):

@@ -92,8 +92,14 @@ flowchart LR
    - Normalize each word: lowercase, strip diacritics (ł folded explicitly).
    - Match only the vocative `ryszardzie` as a whole word within the first three words; repeats right after it are skipped. Other case forms (Ryszard, Ryszarda, Ryszardem…) don't wake: TV and radio talk *about* a Ryszard, people address the hub in the vocative. Revisit at hardware acceptance if Whisper drops the vocative ending.
    - **On a partial match:** emit `wake`, set the `LISTENING` visual (wake candidate).
-   - **On the final:** if the phrase is confirmed and the remaining text is non-empty, accept. Otherwise emit `wake_cancelled`, call `reset_open_mic_wake_candidate`, set `IDLE`, and keep listening.
-   - This is today's `_capture_open_mic_utterance` / `_text_after_wake_phrase` logic, made tolerant to punctuation, case and diacritics.
+   - **On the final:** if the phrase is confirmed and the remaining text is non-empty, accept. If there is no phrase, emit `wake_cancelled` (if a partial sent `wake`), call `reset_open_mic_wake_candidate`, set `IDLE`, and keep listening.
+   - **The wake word alone** (T-017 fix): the final is only the vocative ("Ryszardzie", possibly repeated, with punctuation, then a pause long enough to end the segment). A sentence that ends in the vocative ("Dziękuję, Ryszardzie.") is not, and takes the cancel path above.
+     - Keep the wake open (`wake` sent, `LISTENING` shown) and keep listening.
+     - If the next segment starts within 3 s of the wake segment's end (`SpeechEnded`, not the final transcript; `WAKE_PAUSE_SECONDS`, like the old project's 3 s `initial_silence_seconds` after its device wake word), its whole text is the request, less a leading wake word.
+     - Accept it as one utterance: the wake's `utterance_id`, and `raw_text` and `audio_ms` cover all its segments. The wake word said again in the window keeps the same wake and restarts the window.
+     - If no segment starts in time, or the next one has no letter or digit, emit `wake_cancelled`, call `reset_open_mic_wake_candidate`, stop listening, play the timeout cue and re-arm.
+     - **Known limitation:** a bare "Ryszardzie!" on TV or radio, followed within 3 s by more dialogue, becomes a request. Check it on hardware with the TV on before settling the window length.
+   - This is the old project's `_capture_open_mic_utterance` / `_text_after_wake_phrase` logic, made tolerant to punctuation, case and diacritics. The old logic discarded the wake word alone; the pause handling above is new.
 5. **Accept.**
    - Stop listening and play the `accepted` cue.
    - Set the `PROCESSING` visual.
@@ -180,9 +186,9 @@ Proposed package layout in `piotr_voice_hub/`:
 | Type | Data |
 |---|---|
 | `satellite` | `area`, `connected`, `state` (`idle/listening/processing/speaking/error`), sent on change |
-| `wake` | `utterance_id`. Once per utterance: on the first partial that matches, or else just before `transcript_final` |
-| `wake_cancelled` | `utterance_id`. The final did not confirm, or the satellite failed before `transcript_final`. While the hub runs, every `wake` ends with exactly one `transcript_final` or `wake_cancelled` (shutdown emits no events) |
-| `transcript_partial` | `utterance_id`, `text`. Only for partials that match, carrying the post-phrase text |
+| `wake` | `utterance_id`. Once per utterance: on the first partial that matches, or else when the final matches |
+| `wake_cancelled` | `utterance_id`. The final did not confirm, no request followed the wake word alone (§4.1 step 4), or the satellite failed before `transcript_final`. While the hub runs, every `wake` ends with exactly one `transcript_final` or `wake_cancelled` (shutdown emits no events) |
+| `transcript_partial` | `utterance_id`, `text`. Only for partials that match, carrying the post-phrase text; after the wake word alone, the next segment's partials (with the wake's `utterance_id`) |
 | `transcript_final` | `utterance_id`, `text`, `raw_text`, `follow_up` (bool), `speaker` `{name, confidence}` or `null`, `audio_ms` |
 | `playback_finished` | `playback_id`, `listening_for_follow_up` (bool) |
 | `follow_up_timeout` | none |

@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 import pytest
@@ -137,7 +137,7 @@ class FakeSpeech:
         self.format = tts.format
         self._tts = tts
 
-    async def __aiter__(self) -> AsyncIterator[bytes]:
+    async def __aiter__(self) -> AsyncGenerator[bytes, None]:
         for chunk in self._tts.chunks:
             await asyncio.sleep(self._tts.chunk_delay)
             yield chunk
@@ -433,22 +433,297 @@ async def _test_partial_candidate_rejected_by_the_final_is_cancelled() -> None:
     ]
 
 
-def test_wake_word_with_nothing_after_it_is_rejected() -> None:
-    asyncio.run(_test_wake_word_with_nothing_after_it_is_rejected())
+# The wake word alone, a pause, then the request (T-017 fix, hardware test 2026-10-20)
 
 
-async def _test_wake_word_with_nothing_after_it_is_rejected() -> None:
+@pytest.mark.parametrize(
+    ("first", "partials", "second", "text"),
+    [
+        ("Ryszardzie.", ("Ryszardzie",), "Która godzina?", "Która godzina"),
+        ("Ryszardzie,", (), "która godzina", "która godzina"),  # only the final matched
+        ("Ryszardzie...", ("Ryszardzie",), "Ryszardzie, która godzina?", "która godzina"),
+        # The whole request, also before a later vocative (PR #24 review N1).
+        (
+            "Ryszardzie.",
+            ("Ryszardzie",),
+            "Powiedz, Ryszardzie, która godzina?",
+            "Powiedz, Ryszardzie, która godzina",
+        ),
+    ],
+)
+def test_the_wake_word_alone_then_the_request_is_one_utterance(
+    first: str, partials: tuple[str, ...], second: str, text: str
+) -> None:
+    asyncio.run(_test_wake_word_alone_then_request(first, partials, second, text))
+
+
+async def _test_wake_word_alone_then_request(
+    first: str, partials: tuple[str, ...], second: str, text: str
+) -> None:
     h = Harness()
-    h.stt.say("u1", "Ryszardzie...", ("Ryszardzie",))
+    h.stt.say("u1", first, partials)
+    h.stt.say("u2", second, (second.split()[0],))
+    h.driver.after_arm[0] = segments("u1", "u2")
+    h.start()
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    final = TranscriptFinal("kitchen", "u1", text, f"{first} {second}", False, None, 80)
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal) == [Wake("kitchen", "u1"), final]
+    # The LEDs stay listening from the wake word to the accept; no reset, no second wake.
+    assert h.driver.without_ids() == [
+        VisualState.IDLE,
+        "start",
+        VisualState.LISTENING,
+        ("stop", "accepted"),
+        CueType.UTTERANCE_ACCEPTED,
+        VisualState.PROCESSING,
+        CueType.TIMEOUT,  # the reply timeout
+        VisualState.IDLE,
+        "start",
+    ]
+    assert h.events.count(LISTENING) == 1
+    assert all(e.utterance_id == "u1" for e in h.events if isinstance(e, TranscriptPartial))
+
+
+def test_the_wake_word_alone_and_then_silence_cancels_with_the_timeout_cue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_module, "WAKE_PAUSE_SECONDS", 0.05)
+    asyncio.run(_test_wake_word_alone_then_silence())
+
+
+async def _test_wake_word_alone_then_silence() -> None:
+    h = Harness(reply_timeout=10)
+    h.stt.say("u1", "Ryszardzie.", ("Ryszardzie",))
     h.driver.after_arm[0] = segments("u1")
     h.start()
-    await h.until(lambda: bool(h.hub(WakeCancelled)))
-    await h.until(lambda: h.driver.without_ids()[-1] == VisualState.IDLE)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
     await h.stop()
-    assert not h.hub(TranscriptFinal, TranscriptPartial)
-    assert h.driver.without_ids()[-2:] == [("reset", "u1"), VisualState.IDLE]
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal, TranscriptPartial) == [
+        Wake("kitchen", "u1"),
+        WakeCancelled("kitchen", "u1"),
+    ]
+    assert h.driver.without_ids() == [
+        VisualState.IDLE,
+        "start",
+        VisualState.LISTENING,
+        ("reset", "u1"),
+        ("stop", "no_request"),
+        CueType.TIMEOUT,
+        VisualState.IDLE,
+        "start",
+    ]
+    first, second = h.driver.starts()
     reset = next(c for c in h.driver.commands if isinstance(c, ResetWakeCandidate))
-    assert reset.listen_id == h.driver.starts()[0].listen_id
+    assert reset.listen_id == first.listen_id != second.listen_id
+
+
+@pytest.mark.parametrize("second", ["", "♪", "..."])
+def test_the_wake_word_alone_then_no_speech_cancels_with_the_timeout_cue(second: str) -> None:
+    asyncio.run(_test_wake_word_alone_then_no_speech(second))
+
+
+async def _test_wake_word_alone_then_no_speech(second: str) -> None:
+    h = Harness(reply_timeout=10)
+    h.stt.say("u1", "Ryszardzie.", ("Ryszardzie",))
+    h.stt.say("u2", second)
+    h.driver.after_arm[0] = segments("u1", "u2")
+    h.start()
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal, TranscriptPartial) == [
+        Wake("kitchen", "u1"),
+        WakeCancelled("kitchen", "u1"),
+    ]
+    assert h.driver.without_ids()[2:6] == [
+        VisualState.LISTENING,
+        ("reset", "u1"),
+        ("stop", "no_request"),
+        CueType.TIMEOUT,
+    ]
+    assert all(session.closed for _, session in h.stt.sessions.values())
+
+
+def test_a_sentence_ending_in_the_vocative_is_cancelled_and_opens_no_window() -> None:
+    asyncio.run(_test_sentence_ending_in_the_vocative())
+
+
+async def _test_sentence_ending_in_the_vocative() -> None:
+    """PR #24 review B1: "Dziękuję, Ryszardzie." (TV, radio, people) is not the wake word
+    alone, so the next speech is not a request."""
+    h = Harness(reply_timeout=10)
+    h.stt.say("u1", "Dziękuję, Ryszardzie.", ("Dziękuję, Ryszardzie",))
+    h.stt.say("u2", "No to idziemy do kina.", ("No to",))
+    h.driver.after_arm[0] = segments("u1", "u2")
+    h.start()
+    await h.until(lambda: "u2" in h.stt.sessions and h.stt.sessions["u2"][1].closed)
+    await h.stop()
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal, TranscriptPartial) == [
+        Wake("kitchen", "u1"),
+        WakeCancelled("kitchen", "u1"),
+    ]
+    assert h.driver.without_ids() == [
+        VisualState.IDLE,
+        "start",
+        VisualState.LISTENING,
+        ("reset", "u1"),
+        VisualState.IDLE,
+    ]
+    assert len(h.driver.starts()) == 1  # still listening, no cue
+
+
+def test_a_request_that_starts_in_the_window_and_ends_after_it_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_module, "WAKE_PAUSE_SECONDS", 0.05)
+    asyncio.run(_test_request_ends_after_the_window())
+
+
+async def _test_request_ends_after_the_window() -> None:
+    h = Harness(reply_timeout=10)
+    h.stt.say("u1", "Ryszardzie.", ("Ryszardzie",))
+    h.stt.say("u2", "która godzina", ("która",), delay=0.2)  # the window only bounds the start
+    h.driver.after_arm[0] = segments("u1", "u2")
+    h.start()
+    await h.until(lambda: bool(h.hub(TranscriptFinal)))
+    await h.stop()
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal) == [
+        Wake("kitchen", "u1"),
+        TranscriptFinal(
+            "kitchen", "u1", "która godzina", "Ryszardzie. która godzina", False, None, 80
+        ),
+    ]
+
+
+def test_the_wake_word_said_again_keeps_one_wake_and_restarts_the_window() -> None:
+    asyncio.run(_test_wake_word_said_again())
+
+
+async def _test_wake_word_said_again() -> None:
+    h = Harness(reply_timeout=10)
+    h.stt.say("u1", "Ryszardzie.", ("Ryszardzie",))
+    h.stt.say("u2", "Ryszardzie?", ("Ryszardzie",))
+    h.stt.say("u3", "która godzina", ("która",))
+    h.driver.after_arm[0] = segments("u1", "u2", "u3")
+    h.start()
+    await h.until(lambda: bool(h.hub(TranscriptFinal)))
+    await h.stop()
+    # raw_text and audio_ms cover all three segments (PR #24 review N2).
+    final = TranscriptFinal(
+        "kitchen", "u1", "która godzina", "Ryszardzie. Ryszardzie? która godzina", False, None, 120
+    )
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal) == [Wake("kitchen", "u1"), final]
+    assert all(e.utterance_id == "u1" for e in h.events if isinstance(e, TranscriptPartial))
+
+
+def test_the_window_runs_from_the_end_of_the_wake_segment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(session_module, "WAKE_PAUSE_SECONDS", 0.1)
+    asyncio.run(_test_window_from_the_segment_end())
+
+
+async def _test_window_from_the_segment_end() -> None:
+    """PR #24 review S1: the 3 s count from SpeechEnded, not from when the (slow) final is
+    done. The next speech starts 0.35 s after the end, past the 0.1 s window; the final
+    alone takes 0.3 s. Before, the window opened at 0.3 s and took it as the request."""
+    h = Harness(reply_timeout=10)
+    h.stt.say("u1", "Ryszardzie.", ("Ryszardzie",), delay=0.3)
+    h.stt.say("u2", "która godzina", ("która",))
+    h.driver.after_arm[0] = segments("u1")
+    h.start()
+    await h.until(
+        lambda: h.stt.sessions.get("u1") is not None and h.stt.sessions["u1"][1].final_started
+    )
+    await asyncio.sleep(0.35)
+    first = h.driver.starts()[0].listen_id
+    if not any(isinstance(c, StopListening) for c in h.driver.commands):  # still listening
+        h.driver.push(*segments("u2")(first))
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal) == [
+        Wake("kitchen", "u1"),
+        WakeCancelled("kitchen", "u1"),
+    ]
+    assert ("stop", "no_request") in h.driver.without_ids()
+    assert CueType.TIMEOUT in h.driver.without_ids()
+
+
+def test_a_request_with_partials_and_an_empty_final_cancels_the_wake_once() -> None:
+    asyncio.run(_test_request_partials_then_empty_final())
+
+
+async def _test_request_partials_then_empty_final() -> None:
+    h = Harness(reply_timeout=10)
+    h.stt.say("u1", "Ryszardzie.", ("Ryszardzie",))
+    h.stt.say("u2", "…", ("która",))
+    h.driver.after_arm[0] = segments("u1", "u2")
+    h.start()
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal, TranscriptPartial) == [
+        Wake("kitchen", "u1"),
+        TranscriptPartial("kitchen", "u1", "która"),
+        WakeCancelled("kitchen", "u1"),
+    ]
+    assert CueType.TIMEOUT in h.driver.without_ids()
+
+
+def test_a_disconnect_inside_the_request_segment_cancels_the_wake_once() -> None:
+    asyncio.run(_test_disconnect_inside_the_request())
+
+
+async def _test_disconnect_inside_the_request() -> None:
+    h = Harness(reply_timeout=10)
+    h.stt.say("u1", "Ryszardzie.", ("Ryszardzie",))
+    h.stt.say("u2", "która godzina", ("która",))
+
+    def script(listen_id: str) -> list[Item]:
+        return [
+            *segments("u1")(listen_id),
+            SpeechStarted(listen_id, "u2", 16000, 2, 1),
+            AudioChunk(listen_id, "u2", CHUNK),
+            MicrophoneUnavailable("connection lost"),
+        ]
+
+    h.driver.after_arm[0] = script
+    h.start()
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal) == [
+        Wake("kitchen", "u1"),
+        WakeCancelled("kitchen", "u1"),
+    ]
+    assert all(session.closed for _, session in h.stt.sessions.values())
+    assert CueType.TIMEOUT not in h.driver.without_ids() and h.driver.closes == 1
+
+
+def test_a_disconnect_while_waiting_for_the_request_cancels_the_wake_once() -> None:
+    asyncio.run(_test_disconnect_while_waiting_for_the_request())
+
+
+async def _test_disconnect_while_waiting_for_the_request() -> None:
+    h = Harness(reply_timeout=10)
+    h.stt.say("u1", "Ryszardzie.", ("Ryszardzie",))
+    h.stt.say("u3", "która godzina")  # after the re-arm: no wake word, so nothing
+    h.driver.after_arm[0] = lambda listen_id: [
+        *segments("u1")(listen_id),
+        MicrophoneUnavailable("connection lost"),
+    ]
+    h.driver.after_arm[1] = segments("u3")
+    h.start()
+    await h.until(lambda: "u3" in h.stt.sessions and h.stt.sessions["u3"][1].closed)
+    await h.stop()
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal, TranscriptPartial) == [
+        Wake("kitchen", "u1"),
+        WakeCancelled("kitchen", "u1"),
+    ]
+    assert OFFLINE in h.events[3:] and CueType.TIMEOUT not in h.driver.without_ids()
+    assert h.driver.closes == 1
 
 
 def test_no_wake_emits_nothing_and_segments_are_strictly_ordered() -> None:
