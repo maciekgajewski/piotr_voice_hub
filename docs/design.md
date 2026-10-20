@@ -101,7 +101,7 @@ flowchart LR
      - **Known limitation:** a bare "Ryszardzie!" on TV or radio, followed within 3 s by more dialogue, becomes a request. Check it on hardware with the TV on before settling the window length.
    - This is the old project's `_capture_open_mic_utterance` / `_text_after_wake_phrase` logic, made tolerant to punctuation, case and diacritics. The old logic discarded the wake word alone; the pause handling above is new.
 5. **Accept.**
-   - Stop listening and play the `accepted` cue.
+   - Stop listening and play the `accepted` cue. A cue ends (`CueFinished`) once it has played: from the service response when the firmware declares one, otherwise once the media player has reported a change after the call and is not busy, `ANNOUNCING` or `PLAYING` (about 1 s for the change, 8 s to end; past a bound the driver logs a warning and goes on). Playback sends its URL only once the media player is not busy: a Voice PE drops an announcement URL that arrives during a cue (T-017 fix).
    - Set the `PROCESSING` visual.
    - Run speaker recognition on the segment audio.
    - Emit `transcript_final` (text after the phrase, plus the speaker hint).

@@ -212,3 +212,39 @@
   - **N2:** the wake word said again in the window now extends the open `_BareWake`:
     `raw_text` and `audio_bytes` add the new segment, and the deadline is the new end + 3 s.
   - **N3:** re-wrapped the whole Bounds bullet in T-017 plan.md (line 48 was 134 characters).
+- 2026-10-20 07:10: T-017 fix, branch `t-017-cue-race` from origin/main d69ea7b. Bug: after
+  deploying 789d6f3, `speak` on voice-pe-03 played nothing and the satellite went unavailable.
+  Diagnosis (device logs, hub stopped): the accepted cue is fire-and-forget (no
+  `supports_response` yet, P2), so `CueFinished` followed the call and the playback URL went
+  out about 0.09 s later, while the cue was still `ANNOUNCING`. The Voice PE silently drops
+  that URL: no fetch, no device log, then the 5 s fetch timeout. A direct URL with no cue was
+  fetched in 0.1 s; the same session replay with a 0.5 s gap played.
+  - The driver now subscribes to entity states and follows the media player. A fire-and-forget
+    cue ends once the player has reported an update after the call and is not busy:
+    `ANNOUNCING` or `PLAYING` (the API reported the device's announcement as `PLAYING`).
+    Bounds: `CUE_START_TIMEOUT_SECONDS` 1 s (a cue that never shows finishes) and
+    `CUE_END_TIMEOUT_SECONDS` 8 s; 1 + 8 s stays under the session's 10 s wait for
+    `CueFinished`.
+  - Deviation from the brief ("ANNOUNCING and back to IDLE"): the first live run waited for an
+    `ANNOUNCING` update, and the device never sent one. The cue's `ANNOUNCING` lasted about
+    0.1 s on the device log and reached the API merged into a single `IDLE` update, so every
+    cue waited out the 1 s start bound with a WARNING (playback still worked). Any update after
+    the call now counts; the state wait then covers a longer cue that is still announcing.
+  - `_begin_playback` sends the URL only once the player is not busy, at most
+    `PLAYER_FREE_TIMEOUT_SECONDS` 3 s.
+  - Decision: every bound logs a WARNING and goes on, it does not make the satellite
+    unavailable. design.md has no rule for it; a late cue is not worth a reconnect, and a URL
+    the device still drops ends in the existing 5 s fetch timeout, which does go unavailable.
+    A disconnect during a wait is unavailable at once, as before.
+  - Not changed: `session.py`. Firmware P2 (`api.respond`) still gives the exact end where
+    declared; the state wait covers the firmware as flashed.
+  - The plan's manual test, the T-022 row and the PR checklist get a real-device playback check.
+  - Live check on voice-pe-03 (production hub stopped about 10 s per run, then restored on
+    789d6f3): the session replay (`StartListening`, accepted stop, accepted cue, `PROCESSING`,
+    0.09 s gap, a 0.6 s quiet tone) through this branch's driver. The cue's update came 0.10 s
+    after its `ANNOUNCING` started, `CueFinished` followed, the URL went out 0.09 s later, the
+    device fetched it in about 0.11 s, and `PlaybackFinished` came with no WARNING. The API
+    reported the playback as `PLAYING`, so busy is `ANNOUNCING` or `PLAYING`. On origin/main
+    the same replay sent the URL during the cue, and there was no fetch.
+  - voice-pe-03's volume: the diagnosis left it at 0.3 (set by the probe); the previous value
+    was not read, so it is not restored (for Maciej).

@@ -40,7 +40,7 @@ thing Maciej can hear on hardware (after T-017).
 | T-019 announce-busy-stop | `speak` to an idle satellite (announcement: stop listening, play, re-arm), the full busy policy (design §6), and `stop` | T-017 | planned |
 | T-020 follow-up | `listen_after`: `FOLLOW_UP_READY` cue, `follow_up_seconds` window without the phrase, `follow_up_timeout`, `follow_up` and `listening_for_follow_up` flags | T-019 | planned |
 | T-021 play-url | `play` with a consumer URL: its own driver command, its end from the media player state (bounded), `listen_after` and `stop` as for `speak` | T-020 | planned |
-| T-022 p1-acceptance | Deploy the three-service compose on piotr and run the P1 exit criteria on all four satellites (PR checklist only, no code unless a fix is needed) | T-015 … T-021 | planned |
+| T-022 p1-acceptance | Deploy the three-service compose on piotr and run the P1 exit criteria on all four satellites, including a real-device playback check: the satellite fetches the URL and audio is heard right after the accepted cue, with a fast Piper reply (PR checklist only, no code unless a fix is needed) | T-015 … T-021 | planned |
 
 Task notes (they go into each task's plan.md):
 - **T-015 (Piper on the GPU):**
@@ -153,8 +153,10 @@ Not numbered yet: firmware trimmed to continuous mode and reflashed (including t
   ```
   Do the same for `play_conversation_timeout_cue`, and for `play_follow_up_ready_cue` when it is
   added; then reflash. The driver calls status-mode actions with `return_response=False` and
-  waits at most 8 s. Until then `CueFinished` follows the call, so the cue may still be playing
-  (T-014 decision Q1).
+  waits at most 8 s. Until then `CueFinished` follows the media player state: the driver waits
+  for a media player update after the call and for it not to be busy, `ANNOUNCING` or `PLAYING` (about 1 s for the
+  update, 8 s to end, then a warning and on). Before the T-017 fix it followed the call, and the playback URL sent right
+  after the accepted cue was dropped by the device (T-014 decision Q1, superseded).
 - **P1 → T-017 (session, playback):** bound the time from `PlaybackBegin` to `PlaybackEnd` (TTS
   synthesis) in the session. Neither the driver nor the playback HTTP writer, which waits for
   the next chunk without a bound of its own, limits it; the drain's bounds start at
