@@ -196,13 +196,16 @@ class FakeDriver:
         self.closes = 0
         self.in_flight = False
         self.overlapped = False
+        # Like the real ESPHome driver: a queued event is returned without yielding first.
+        self.eager = False
 
     def push(self, *items: Item) -> None:
         for item in items:
             self.events.put_nowait(item)
 
     async def wait_for_event(self) -> MicrophoneEvent:
-        await asyncio.sleep(0)  # like a real reader: other tasks run between events
+        if not (self.eager and not self.events.empty()):
+            await asyncio.sleep(0)  # like a real reader: other tasks run between events
         item = await self.events.get()
         if isinstance(item, Exception):
             raise item
@@ -227,6 +230,7 @@ class FakeDriver:
                 self.push(ListeningStarted(event.listen_id), *script(event.listen_id))
                 self.arms += 1
             elif isinstance(event, StopListening):
+                self._drop_capture_events()
                 self.push(ListeningStopped(event.listen_id, event.reason))
             elif isinstance(event, PlayCue):
                 self.push(CueFinished(event.cue_id))
@@ -234,6 +238,13 @@ class FakeDriver:
                 self.push(DriverPlaybackFinished(event.playback_id))
         finally:
             self.in_flight = False
+
+    def _drop_capture_events(self) -> None:
+        """MP-STOP-002, like the real driver: queued capture events are dropped on a stop."""
+        kept = [self.events.get_nowait() for _ in range(self.events.qsize())]
+        for item in kept:
+            if not isinstance(item, SpeechStarted | AudioChunk | SpeechEnded):
+                self.events.put_nowait(item)
 
     async def close(self) -> None:
         self.closes += 1
@@ -624,31 +635,75 @@ def test_the_window_runs_from_the_end_of_the_wake_segment(monkeypatch: pytest.Mo
     asyncio.run(_test_window_from_the_segment_end())
 
 
+def late_request(h: Harness, delay: float) -> list[bool]:
+    """Arm 0 queues "u1"; a task pushes "u2" `delay` s later, while the slow final of "u1" is
+    still running. The list records whether the session was still listening at the push."""
+    pushed: list[bool] = []
+    tasks: list[asyncio.Task[None]] = []  # keeps the task referenced
+
+    async def push_later(listen_id: str) -> None:
+        await asyncio.sleep(delay)
+        pushed.append(not any(isinstance(c, StopListening) for c in h.driver.commands))
+        h.driver.push(*segments("u2")(listen_id))
+
+    def script(listen_id: str) -> list[Item]:
+        tasks.append(asyncio.create_task(push_later(listen_id)))
+        return segments("u1")(listen_id)
+
+    h.driver.after_arm[0] = script
+    return pushed
+
+
 async def _test_window_from_the_segment_end() -> None:
-    """PR #24 review S1: the 3 s count from SpeechEnded, not from when the (slow) final is
-    done. The next speech starts 0.35 s after the end, past the 0.1 s window; the final
-    alone takes 0.3 s. Before, the window opened at 0.3 s and took it as the request."""
+    """PR #24 review S1: the 0.1 s count from SpeechEnded, not from when the (slow, 0.3 s)
+    final is done. The next speech starts 0.2 s after the end, during the final and past the
+    window. Before S1 the window opened at 0.3 s and took it as the request. A reader that
+    yields before a queued event (this fake's default) lets the deadline win."""
     h = Harness(reply_timeout=10)
     h.stt.say("u1", "Ryszardzie.", ("Ryszardzie",), delay=0.3)
     h.stt.say("u2", "która godzina", ("która",))
-    h.driver.after_arm[0] = segments("u1")
+    pushed = late_request(h, 0.2)
     h.start()
-    await h.until(
-        lambda: h.stt.sessions.get("u1") is not None and h.stt.sessions["u1"][1].final_started
-    )
-    await asyncio.sleep(0.35)
-    first = h.driver.starts()[0].listen_id
-    if not any(isinstance(c, StopListening) for c in h.driver.commands):  # still listening
-        h.driver.push(*segments("u2")(first))
     await h.until(lambda: len(h.driver.starts()) == 2)
     await h.until(lambda: h.events[-1:] == [IDLE])
     await h.stop()
+    assert pushed == [True]  # the late start was really fed in while listening
     assert h.hub(Wake, WakeCancelled, TranscriptFinal) == [
         Wake("kitchen", "u1"),
         WakeCancelled("kitchen", "u1"),
     ]
     assert ("stop", "no_request") in h.driver.without_ids()
     assert CueType.TIMEOUT in h.driver.without_ids()
+
+
+def test_a_start_queued_during_a_slow_final_is_accepted_and_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(session_module, "WAKE_PAUSE_SECONDS", 0.1)
+    caplog.set_level(logging.DEBUG)
+    asyncio.run(_test_start_queued_during_a_slow_final())
+    assert "speech u2 read" in caplog.text
+    assert "after the pause deadline (queued during a slow final); accepted" in caplog.text
+
+
+async def _test_start_queued_during_a_slow_final() -> None:
+    """PR #24 re-review N1, the documented behaviour kept: the real driver returns a queued
+    event without yielding, so a start queued past the deadline during a slow final is read
+    before the timeout fires and is the request (bounded: it needs a final slower than the
+    window). The session logs it at DEBUG."""
+    h = Harness(reply_timeout=10)
+    h.driver.eager = True
+    h.stt.say("u1", "Ryszardzie.", ("Ryszardzie",), delay=0.3)
+    h.stt.say("u2", "która godzina", ("która",))
+    pushed = late_request(h, 0.2)
+    h.start()
+    await h.until(lambda: bool(h.hub(TranscriptFinal)))
+    await h.stop()
+    assert pushed == [True]
+    final = TranscriptFinal(
+        "kitchen", "u1", "która godzina", "Ryszardzie. która godzina", False, None, 80
+    )
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal) == [Wake("kitchen", "u1"), final]
 
 
 def test_a_request_with_partials_and_an_empty_final_cancels_the_wake_once() -> None:

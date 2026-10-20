@@ -9,7 +9,12 @@ from typing import Any
 
 import numpy as np
 import pytest
-from aioesphomeapi.model import MediaPlayerInfo, SupportsResponseType
+from aioesphomeapi.model import (
+    MediaPlayerEntityState,
+    MediaPlayerInfo,
+    MediaPlayerState,
+    SupportsResponseType,
+)
 from microphone_driver_conformance import (
     assert_cue_contract,
     assert_listening_and_capture_contract,
@@ -113,7 +118,14 @@ type Handler = Callable[..., Coroutine[Any, Any, Any]]
 
 
 class FakeClient:
-    """Fake aioesphomeapi.APIClient: services, voice-assistant callbacks, transport stop."""
+    """Fake aioesphomeapi.APIClient: services, voice-assistant callbacks, transport stop, and
+    the media player's state: a cue called without a response announces (PLAYING, as the API
+    reported a Voice PE's announcement, then IDLE after `cue_seconds`); `cue_merged = True`
+    reports only the IDLE, as ESPHome did on hardware for a short cue; `cue_announces = False`
+    never announces. `cue_start_seconds` is the delay before the cue's first report;
+    `extra_update_after` sends an unrelated IDLE update (a volume change) that long after a cue
+    call. With `url_states`, an announced URL reports PLAYING once fetched and IDLE at its end.
+    `timeline` records each reported state and each URL with its loop time."""
 
     def __init__(self, services: tuple[str, ...] = ALL_SERVICES) -> None:
         self.services = services
@@ -141,6 +153,14 @@ class FakeClient:
         self.started = asyncio.Event()
         self.on_stop: Callable[[bool], Coroutine[Any, Any, None]] | None = None
         self.handlers: dict[str, Handler] = {}
+        self.on_state: Callable[[Any], None] | None = None
+        self.cue_announces = True
+        self.cue_merged = False
+        self.cue_seconds = 0.0
+        self.cue_start_seconds = 0.01  # the firmware's script starts it after the call returns
+        self.extra_update_after: float | None = None
+        self.url_states = False
+        self.timeline: list[tuple[str, float]] = []
         self._tasks: set[asyncio.Task[Any]] = set()
 
     async def connect(self, on_stop: Any = None, login: bool = False) -> None:
@@ -175,6 +195,11 @@ class FakeClient:
         if kwargs.get("return_response") is not None:
             await asyncio.sleep(self.response_delay)  # the firmware's script runs
             return self.response
+        if service.name in esphome.CUE_SERVICES.values():
+            if self.extra_update_after is not None:
+                self._later(self._extra_update(self.extra_update_after))
+            if self.cue_announces:
+                self._later(self._announce(self.cue_seconds))
         if service.name == "start_open_mic_listening" and not self.ignore_start:
             self._later(self._start())  # the device answers after the service returns
         elif service.name == "stop_listening" and self.ack_stop:
@@ -187,9 +212,32 @@ class FakeClient:
     def send_voice_assistant_event(self, event_type: Any, data: Any) -> None:
         self.va_events.append(event_type)
 
+    def subscribe_states(self, on_state: Callable[[Any], None]) -> None:
+        self.on_state = on_state
+        self._later(self.player(MediaPlayerState.IDLE))  # the initial state, as ESPHome sends
+
+    async def player(self, state: MediaPlayerState, volume: float = 0.3) -> None:
+        assert self.on_state is not None
+        self.timeline.append((state.name, asyncio.get_running_loop().time()))
+        fields = {"key": MEDIA_PLAYER.key, "state": state, "volume": volume}
+        self.on_state(MediaPlayerEntityState(**fields))
+
+    async def _extra_update(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+        await self.player(MediaPlayerState.IDLE, volume=0.4)  # the dial turned
+
+    async def _announce(self, seconds: float) -> None:
+        await asyncio.sleep(self.cue_start_seconds)
+        if not self.cue_merged:
+            await self.player(MediaPlayerState.PLAYING)
+        await asyncio.sleep(seconds)
+        await self.player(MediaPlayerState.IDLE)
+
     def media_player_command(self, key: int, **kwargs: Any) -> None:
         assert key == MEDIA_PLAYER.key
         self.media_commands.append(kwargs)
+        if kwargs.get("media_url"):
+            self.timeline.append(("url", asyncio.get_running_loop().time()))
         if kwargs.get("media_url") and self.fetch:
             self._later(self._get(kwargs["media_url"]))
 
@@ -199,8 +247,12 @@ class FakeClient:
         reader, writer = await asyncio.open_connection(host, int(port))
         writer.write(f"GET /{path} HTTP/1.1\r\nHost: {host_port}\r\n\r\n".encode())
         if self.fetch_mode == "all":
+            if self.url_states:
+                await self.player(MediaPlayerState.PLAYING)
             self.fetched.append(await reader.read())  # to EOF
             writer.close()
+            if self.url_states:
+                await self.player(MediaPlayerState.IDLE)
             return
         self.fetched.append(await reader.readexactly(self.fetch_bytes))
         if self.fetch_mode == "drop":

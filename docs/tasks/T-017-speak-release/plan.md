@@ -80,3 +80,8 @@ the heredoc script), run in the hub container as
 `docker compose exec hub python -c "$(cat tools/speak_test.py)"`, then the same with
 `--release`; plus the T-014 playback-end comparison (`playback_finished` vs.
 when the audio audibly stops; there is no Home Assistant here, the hub owns the satellites).
+
+Real-device playback check (added by the T-017 fix): wake a satellite, speak, and have the
+consumer `speak` a short reply at once (fast Piper). The satellite fetches the URL (the hub logs
+the request) and the audio is heard right after the accepted cue. Unit tests with fake clients
+did not catch the cue/URL race; only a real device does.

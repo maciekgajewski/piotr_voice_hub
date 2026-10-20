@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 import pytest
-from aioesphomeapi.model import SupportsResponseType
+from aioesphomeapi.model import MediaPlayerState, SupportsResponseType
 from microphone_driver_conformance import assert_playback_contract
 from test_esphome_driver import ALL_SERVICES, Checked, Clients, FakeClient, Response, arm, make
 
@@ -27,6 +27,7 @@ from piotr_voice_hub.satellites.messages import (
     SetVisualState,
     VisualState,
 )
+from piotr_voice_hub.satellites.protocol import MicrophoneProtocolState
 
 RATE, WIDTH, CHANNELS = 22050, 2, 1
 BYTE_RATE = RATE * WIDTH * CHANNELS
@@ -660,12 +661,15 @@ def test_a_cue_service_with_supports_response_finishes_when_the_firmware_answers
     run(scenario)
 
 
-def test_a_cue_without_supports_response_stays_fire_and_forget(
+def test_a_cue_without_supports_response_finishes_once_its_announcement_ends(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def scenario() -> None:
         mic, clients = make()
+        clients.setup = lambda client: setattr(client, "cue_seconds", 0.3)
+        started = time.monotonic()
         await mic.send_output_event(PlayCue("cue-1", CueType.TIMEOUT))
+        assert time.monotonic() - started >= 0.3  # PLAYING, then IDLE (T-017 fix)
         assert await mic.wait_for_event() == CueFinished("cue-1")
         assert clients.last.call_kwargs == [{}]
 
@@ -674,6 +678,243 @@ def test_a_cue_without_supports_response_stays_fire_and_forget(
     assert "cue services without supports_response" in caplog.text
     names = [n for n in ALL_SERVICES if n.startswith("play_")]
     assert str(names) in caplog.text
+    assert "going on" not in caplog.text
+
+
+def test_a_cue_whose_announcing_update_is_merged_into_idle_still_finishes_at_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """On hardware (T-017 fix), a short cue's ANNOUNCING and IDLE reached the API as one IDLE."""
+
+    async def scenario() -> None:
+        mic, clients = make()
+        clients.setup = lambda client: setattr(client, "cue_merged", True)
+        started = time.monotonic()
+        await mic.send_output_event(PlayCue("cue-1", CueType.UTTERANCE_ACCEPTED))
+        assert time.monotonic() - started < 0.5  # not the 1 s start bound
+        assert await mic.wait_for_event() == CueFinished("cue-1")
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
+    assert "going on" not in caplog.text
+
+
+def test_a_cue_that_never_announces_finishes_after_the_start_bound(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(esphome, "CUE_START_TIMEOUT_SECONDS", 0.1)
+
+    async def scenario() -> None:
+        mic, clients = make()
+        clients.setup = lambda client: setattr(client, "cue_announces", False)
+        started = time.monotonic()
+        await mic.send_output_event(PlayCue("cue-1", CueType.UTTERANCE_ACCEPTED))
+        assert time.monotonic() - started >= 0.1
+        assert await mic.wait_for_event() == CueFinished("cue-1")  # not unavailable
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
+    assert "cue play_message_end_cue: the media player reported no change" in caplog.text
+
+
+def test_a_cue_that_announces_too_long_finishes_after_the_end_bound(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(esphome, "CUE_END_TIMEOUT_SECONDS", 0.1)
+
+    async def scenario() -> None:
+        mic, clients = make()
+        clients.setup = lambda client: setattr(client, "cue_seconds", 5.0)
+        started = time.monotonic()
+        await mic.send_output_event(PlayCue("cue-1", CueType.UTTERANCE_ACCEPTED))
+        assert time.monotonic() - started < 1.0
+        assert await mic.wait_for_event() == CueFinished("cue-1")
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
+    assert "cue play_message_end_cue: the media player is still busy after" in caplog.text
+
+
+def test_playback_sends_its_url_only_once_the_player_stops_announcing() -> None:
+    """The hardware race (T-017 fix): a Voice PE drops a URL sent while a cue announces."""
+
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            client = clients.last
+            await asyncio.sleep(0.05)  # the initial IDLE state has arrived
+            await client.player(MediaPlayerState.ANNOUNCING)
+            begin = asyncio.create_task(
+                mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            )
+            await asyncio.sleep(0.2)
+            assert not begin.done() and client.media_commands == []
+            await client.player(MediaPlayerState.IDLE)
+            await begin
+            assert client.media_commands[0]["announcement"] is True
+            await mic.send_output_event(PlaybackChunk("pb-1", bytes(BYTE_RATE // 10)))
+            await mic.send_output_event(PlaybackEnd("pb-1"))
+            assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+
+    run(scenario)
+
+
+def test_playback_sends_its_url_anyway_after_the_player_free_bound(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(esphome, "PLAYER_FREE_TIMEOUT_SECONDS", 0.1)
+
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            await asyncio.sleep(0.05)
+            await clients.last.player(MediaPlayerState.PLAYING)  # and it stays so
+            await mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            assert clients.last.media_commands[0]["announcement"] is True
+            await mic.send_output_event(PlaybackChunk("pb-1", bytes(BYTE_RATE // 10)))
+            await mic.send_output_event(PlaybackEnd("pb-1"))
+            assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
+    assert "playback pb-1: the media player is still busy after 0.1 s" in caplog.text
+
+
+def test_a_disconnect_while_waiting_for_the_player_is_unavailable_at_once() -> None:
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            client = clients.last
+            await asyncio.sleep(0.05)
+            await client.player(MediaPlayerState.ANNOUNCING)
+            begin = asyncio.create_task(
+                mic.driver.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            )
+            await asyncio.sleep(0.05)
+            assert client.on_stop is not None
+            await client.on_stop(False)
+            with pytest.raises(MicrophoneUnavailable, match="transport stopped"):
+                await asyncio.wait_for(begin, 1.0)
+            assert client.media_commands == []
+
+    run(scenario)
+
+
+def test_an_unrelated_update_right_after_the_cue_call_does_not_finish_the_cue() -> None:
+    """PR #25 review S1: an IDLE (the dial) 5 ms after the call counts as an update, but the
+    cue is not finished before CUE_MIN_SECONDS, nor while its own PLAYING lasts."""
+
+    async def scenario(cue_end: float, earliest: float) -> None:
+        mic, clients = make()
+
+        def setup(client: FakeClient) -> None:
+            client.extra_update_after = 0.005
+            client.cue_start_seconds = 0.05
+            client.cue_seconds = cue_end - 0.05
+
+        clients.setup = setup
+        await mic.send_output_event(SetVisualState(VisualState.IDLE))  # connect
+        await asyncio.sleep(0.05)  # the initial state has arrived
+        started = time.monotonic()
+        await mic.send_output_event(PlayCue("cue-1", CueType.UTTERANCE_ACCEPTED))
+        assert time.monotonic() - started >= earliest
+        assert await mic.wait_for_event() == CueFinished("cue-1")
+        assert [name for name, _ in clients.last.timeline][-3:] == ["IDLE", "PLAYING", "IDLE"]
+
+    run(lambda: scenario(0.2, esphome.CUE_MIN_SECONDS))  # the floor holds
+    run(lambda: scenario(0.5, 0.5))  # then the cue's own PLAYING holds
+
+
+def test_a_disconnect_during_the_cue_wait_is_unavailable_at_once() -> None:
+    async def scenario() -> None:
+        mic, clients = make()
+        clients.setup = lambda client: setattr(client, "cue_seconds", 5.0)
+        await mic.send_output_event(SetVisualState(VisualState.IDLE))  # connect
+        client = clients.last
+        cue = asyncio.create_task(
+            mic.driver.send_output_event(PlayCue("cue-1", CueType.UTTERANCE_ACCEPTED))
+        )
+        await asyncio.sleep(0.1)  # PLAYING, inside the end wait
+        assert not cue.done()
+        assert client.on_stop is not None
+        started = time.monotonic()
+        await client.on_stop(False)
+        with pytest.raises(MicrophoneUnavailable, match="transport stopped"):
+            await asyncio.wait_for(cue, 1.0)
+        assert time.monotonic() - started < 0.2
+
+    run(scenario)
+
+
+def test_a_reconnect_ignores_old_updates_and_its_first_state(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The old client's updates change nothing, and the new connection's initial state (it
+    arrives during the cue wait here) is not the cue's update."""
+    monkeypatch.setattr(esphome, "CUE_START_TIMEOUT_SECONDS", 0.5)
+
+    async def scenario() -> None:
+        mic, clients = make()
+        await mic.send_output_event(SetVisualState(VisualState.IDLE))  # connect
+        old = clients.last
+        await asyncio.sleep(0.05)
+        assert old.on_stop is not None
+        await old.on_stop(False)
+        with pytest.raises(MicrophoneUnavailable):
+            await mic.wait_for_event()
+        await mic.close()
+        mic.protocol = MicrophoneProtocolState()  # the session recreates its boundary
+        clients.setup = lambda client: setattr(client, "cue_announces", False)
+
+        async def old_updates() -> None:
+            for _ in range(30):
+                await old.player(MediaPlayerState.PLAYING)  # would also block playback
+                await old.player(MediaPlayerState.IDLE)
+                await asyncio.sleep(0.02)
+
+        noise = asyncio.create_task(old_updates())
+        started = time.monotonic()
+        await mic.send_output_event(PlayCue("cue-1", CueType.UTTERANCE_ACCEPTED))  # reconnects
+        assert time.monotonic() - started >= 0.5  # waited out the start bound
+        assert await mic.wait_for_event() == CueFinished("cue-1")
+        await noise
+        assert len(clients.made) == 2
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
+    assert "cue play_message_end_cue: the media player reported no change" in caplog.text
+
+
+def test_the_hardware_sequence_cue_then_url_end_to_end(caplog: pytest.LogCaptureFixture) -> None:
+    """The sequence that failed on voice-pe-03: the accepted cue reports one merged IDLE about
+    0.1 s after the call; the URL goes out only after it (and the floor), is fetched, and the
+    player reports PLAYING, then IDLE."""
+
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            client = clients.last
+            client.cue_merged = True
+            client.cue_start_seconds = 0.0
+            client.cue_seconds = 0.1
+            client.url_states = True
+            await asyncio.sleep(0.05)
+            called = asyncio.get_running_loop().time()
+            await mic.send_output_event(PlayCue("cue-1", CueType.UTTERANCE_ACCEPTED))
+            assert await mic.wait_for_event() == CueFinished("cue-1")
+            await mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            await mic.send_output_event(PlaybackChunk("pb-1", bytes(BYTE_RATE // 10)))
+            await mic.send_output_event(PlaybackEnd("pb-1"))
+            assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+            after = [(name, t - called) for name, t in client.timeline if t >= called]
+            assert [name for name, _ in after] == ["IDLE", "url", "PLAYING", "IDLE"]
+            cue_idle, url = after[0][1], after[1][1]
+            assert cue_idle < url
+            assert url >= esphome.CUE_MIN_SECONDS
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
+    assert "still busy" not in caplog.text and "reported no change" not in caplog.text
 
 
 def test_a_failed_cue_response_is_logged_and_the_cue_still_finishes(
