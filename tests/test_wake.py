@@ -2,7 +2,7 @@ import unicodedata
 
 import pytest
 
-from piotr_voice_hub.hub.wake import WakeMatch, match_wake_phrase, normalize_word
+from piotr_voice_hub.hub.wake import WakeMatch, match_wake_phrase, normalize_word, request_text
 
 
 def test_vocative_matches() -> None:
@@ -152,3 +152,18 @@ def test_remainder_with_symbols_and_a_word_is_kept() -> None:
 )
 def test_unicode_whitespace_is_stripped(text: str) -> None:
     assert match_wake_phrase(text) == WakeMatch("Ryszardzie", "włącz radio")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Która godzina?", "Która godzina"),
+        (" — włącz światło. ", "włącz światło"),
+        ("ustaw jasność na 50%", "ustaw jasność na 50%"),
+        ("", ""),
+        ("♪", ""),
+        ("...", ""),
+    ],
+)
+def test_request_text_after_the_wake_word_alone(text: str, expected: str) -> None:
+    assert request_text(text) == expected

@@ -48,6 +48,12 @@ def match_wake_phrase(text: str) -> WakeMatch | None:
     return None
 
 
+def request_text(text: str) -> str:
+    """The request in a segment that follows the wake word alone (T-017 fix): the whole text,
+    edges stripped like a remainder; "" if it has no letter or digit."""
+    return _remainder(unicodedata.normalize("NFC", text))
+
+
 def _remainder(text: str) -> str:
     while (stripped := text.strip().strip(_EDGE_PUNCTUATION)) != text:
         text = stripped

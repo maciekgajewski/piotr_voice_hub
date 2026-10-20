@@ -42,10 +42,10 @@ busy policy and `stop` (T-019), `play` (T-021), the speaker hint (T-018).
     `PlaybackEnd`; wait for the driver's
     `PlaybackFinished`; emit `playback_finished` (`listening_for_follow_up: false`); re-arm.
     The visual stays `PROCESSING` while speaking (there is no speaking visual).
-  - **Bounds:** `PlaybackBegin` → `PlaybackEnd` at most 30 s
-    (`PLAYBACK_PRODUCE_TIMEOUT_SECONDS`; 1000 characters take about 1 s). This is also the
-    per-synthesis bound: before it, the client's connect (5 s) and first-audio (10 s) bounds;
-    within it, the next-chunk bound (10 s). The wait for `PlaybackFinished` is bounded at
+  - **Bounds:** one 30 s deadline on the TTS reads (opening the synthesis and each chunk;
+    satellite commands outside it; `PLAYBACK_PRODUCE_TIMEOUT_SECONDS`, follow-up 2; 1000
+    characters take about 1 s). This is also the per-synthesis bound: before it, the client's
+    connect (5 s) and first-audio (10 s) bounds; within it, the next-chunk bound (10 s). The wait for `PlaybackFinished` is bounded at
     2 × the audio length + 60 s, above the driver's own drain bounds; past it the driver is
     treated as unavailable.
   - **Failures:** a `TtsError` before the first audio (Piper down, slow, refused): no

@@ -1,6 +1,6 @@
 """The TTS interface (T-016, design.md §5): the format, then the PCM chunks of one synthesis."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Protocol
@@ -33,7 +33,7 @@ class Speech(Protocol):
 
     format: AudioFormat
 
-    def __aiter__(self) -> AsyncIterator[bytes]: ...
+    def __aiter__(self) -> AsyncGenerator[bytes, None]: ...  # closable (contextlib.aclosing)
 
 
 class TextToSpeech(Protocol):

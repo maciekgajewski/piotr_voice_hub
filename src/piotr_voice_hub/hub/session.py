@@ -11,6 +11,10 @@ exception, including a protocol invariant failure, propagates (fail loudly, desi
 request to `run()` through a one-shot future, so `run()` stays the only command sender. Every
 `ack`ed `speak` ends with exactly one `playback_finished` while the hub runs, also when TTS or the
 satellite fails (T-017 plan), like every `wake` ends with `transcript_final` or `wake_cancelled`.
+
+A segment that is the wake word alone ("Ryszardzie", then a pause) keeps the wake open: the next
+segment, if it starts within `WAKE_PAUSE_SECONDS`, is the request (T-017 fix, design.md §4.1
+step 4). Otherwise the wake is cancelled and the timeout cue plays.
 """
 
 import asyncio
@@ -32,7 +36,7 @@ from piotr_voice_hub.hub.events import (
     Wake,
     WakeCancelled,
 )
-from piotr_voice_hub.hub.wake import WakeMatch, match_wake_phrase
+from piotr_voice_hub.hub.wake import match_wake_phrase, request_text
 from piotr_voice_hub.ids import new_id
 from piotr_voice_hub.satellites.interfaces import Microphone, MicrophoneUnavailable
 from piotr_voice_hub.satellites.messages import (
@@ -66,6 +70,10 @@ EVENT_TIMEOUT_SECONDS = 10.0  # for an event the driver owes us (started, stoppe
 SHUTDOWN_TIMEOUT_SECONDS = 3.0  # stop listening (waits for the stop ack) and go idle
 SEGMENT_MARGIN_SECONDS = 0.1  # the driver ends a segment on a whole 32 ms frame
 BYTES_PER_MS = 32  # 16 kHz, 16-bit mono
+# After a segment that is the wake word alone: how long the next segment may take to start and
+# still be the request. The old project gave speech 3 s to start after its device wake word
+# (`initial_silence_seconds`, piotr_the_ai_server ai_server/config.py:30).
+WAKE_PAUSE_SECONDS = 3.0
 # One deadline for the TTS reads of a speak: opening the synthesis and every chunk read. The
 # satellite commands between them (PlaybackBegin, chunks) are outside it, bounded by the
 # driver, so the cap never interrupts one (PR #22 review S1). 1000 characters (the cap) take
@@ -120,6 +128,15 @@ class _Release:
     pass
 
 
+@dataclasses.dataclass(frozen=True)
+class _BareWake:
+    """A segment that was the wake word alone; its `wake` is still open."""
+
+    utterance_id: str  # the wake's; transcript_final and partials of the request carry it
+    raw_text: str
+    audio_bytes: int
+
+
 @dataclasses.dataclass
 class _Segment:
     utterance_id: str
@@ -127,6 +144,7 @@ class _Segment:
     partials: "asyncio.Task[None] | None" = None
     audio_bytes: int = 0
     candidate: bool = False  # a partial matched: `wake` sent, LISTENING visual set
+    follows: _BareWake | None = None  # set if this segment may be the request after it
 
 
 class SatelliteSession:
@@ -152,6 +170,7 @@ class SatelliteSession:
         self._listen_id: str | None = None
         self._segment: _Segment | None = None  # owned until finished or abandoned
         self._open_wake: str | None = None  # `wake` sent, no transcript_final/wake_cancelled yet
+        self._bare_wake: _BareWake | None = None  # the wake word alone; waiting for the request
         self._reply: asyncio.Future[_Speak | _Release] | None = None  # set while one is awaited
         self._open_playback: str | None = None  # `speak` acked, no playback_finished yet
         self._last_status: SatelliteStatus | None = None
@@ -169,8 +188,8 @@ class SatelliteSession:
                 try:
                     await self._arm()
                     backoff = BACKOFF_FIRST_SECONDS
-                    await self._listen_until_accepted()
-                    await self._wait_for_reply()
+                    if await self._listen_until_accepted():
+                        await self._wait_for_reply()
                 except MicrophoneUnavailable as error:
                     self._logger.warning("unavailable: %s; re-arming in %g s", error, backoff)
                     await self._recover()
@@ -239,9 +258,22 @@ class SatelliteSession:
         self._logger.info("listening listen_id=%s", listen_id)
         self._status(True, SatelliteState.IDLE)
 
-    async def _listen_until_accepted(self) -> None:
+    async def _listen_until_accepted(self) -> bool:
+        """True once an utterance is accepted; False if the wake word came alone and no request
+        followed (disarmed, the timeout cue played)."""
         while True:
-            event = await self._event()
+            if self._bare_wake is not None and self._segment is None:
+                try:
+                    async with asyncio.timeout(WAKE_PAUSE_SECONDS):
+                        event = await self._event()  # wait_for_event is cancel-safe
+                except TimeoutError:
+                    self._logger.info(
+                        "no request within %g s after the wake word", WAKE_PAUSE_SECONDS
+                    )
+                    await self._no_request()
+                    return False
+            else:
+                event = await self._event()
             segment = self._segment
             if isinstance(event, SpeechStarted):
                 self._start_segment(event.utterance_id)
@@ -251,29 +283,34 @@ class SatelliteSession:
                 await segment.stt.send_audio(event.data)
             elif isinstance(event, SpeechEnded):
                 assert segment is not None
-                if await self._finish_segment(segment, event.reason):
-                    return
+                outcome = await self._finish_segment(segment, event.reason)
+                if outcome is not None:
+                    return outcome
             else:
                 raise AssertionError(f"unexpected event while listening: {event}")
 
     def _start_segment(self, utterance_id: str) -> None:
         assert self._segment is None, f"segment {self._segment.utterance_id} is still open"
         stt = self._stt.create_streaming_session(utterance_id, self._max_audio_seconds)
-        segment = _Segment(utterance_id, stt)
+        segment = _Segment(utterance_id, stt, follows=self._bare_wake)
+        segment.candidate = segment.follows is not None  # `wake` sent, LISTENING shown
         segment.partials = asyncio.create_task(self._read_partials(segment))
         self._segment = segment
 
     async def _read_partials(self, segment: _Segment) -> None:
         while not isinstance(event := await segment.stt.receive_text(), TextEnd):
             match = match_wake_phrase(event.text)
-            if match is None:
+            if segment.follows is not None:  # the request after the wake word alone
+                text = match.remainder if match is not None else request_text(event.text)
+                utterance_id = segment.follows.utterance_id
+            elif match is None:
                 continue
-            if not segment.candidate:
-                await self._raise_candidate(segment)
-            if match.remainder:
-                self._emit(
-                    TranscriptPartial(self._config.id, segment.utterance_id, match.remainder)
-                )
+            else:
+                if not segment.candidate:
+                    await self._raise_candidate(segment)
+                text, utterance_id = match.remainder, segment.utterance_id
+            if text:
+                self._emit(TranscriptPartial(self._config.id, utterance_id, text))
 
     async def _raise_candidate(self, segment: _Segment) -> None:
         segment.candidate = True
@@ -281,8 +318,9 @@ class SatelliteSession:
         await self._command(SetVisualState(VisualState.LISTENING))
         self._status(True, SatelliteState.LISTENING)
 
-    async def _finish_segment(self, segment: _Segment, reason: str) -> bool:
-        """Take the final; return True if the utterance was accepted.
+    async def _finish_segment(self, segment: _Segment, reason: str) -> bool | None:
+        """Take the final. True: accepted. False: no request after the wake word alone
+        (disarmed, the timeout cue played). None: keep listening.
 
         The segment stays owned (`self._segment`) until its STT session is closed and its
         partial task has ended, so a cancellation or failure in here abandons it fully.
@@ -295,26 +333,63 @@ class SatelliteSession:
             raise error
         self._segment = None
         match = match_wake_phrase(raw_text)
+        follows, self._bare_wake = segment.follows, None
+        if match is not None and match.remainder:
+            text = match.remainder
+        elif match is None and follows is not None:
+            text = request_text(raw_text)
+        else:
+            text = ""
         self._logger.info(
-            "segment utterance_id=%s reason=%s audio_ms=%d candidate=%s wake=%s",
+            "segment utterance_id=%s reason=%s audio_ms=%d candidate=%s wake=%s%s",
             segment.utterance_id,
             reason,
             segment.audio_bytes // BYTES_PER_MS,
             segment.candidate,
-            match is not None and bool(match.remainder),
+            bool(text),
+            "" if follows is None else f" after the wake word of {follows.utterance_id}",
         )
-        if match is not None and match.remainder:
-            await self._accept(segment, match, raw_text)
+        if text:
+            if follows is not None:
+                raw_text = f"{follows.raw_text} {raw_text}"
+            await self._accept(segment, text, raw_text, follows)
             return True
+        if match is not None:  # the wake word alone ("Ryszardzie", a pause): keep it open
+            if not segment.candidate:
+                await self._raise_candidate(segment)
+            self._bare_wake = follows or _BareWake(
+                segment.utterance_id, raw_text, segment.audio_bytes
+            )
+            self._logger.info(
+                "wake word alone: waiting up to %g s for the request", WAKE_PAUSE_SECONDS
+            )
+            return None
+        if follows is not None:  # no request after the wake word alone (silence, noise)
+            await self._no_request()
+            return False
         if segment.candidate:
             assert self._listen_id is not None
             self._cancel_wake()
             await self._command(ResetWakeCandidate(self._listen_id, segment.utterance_id))
             await self._command(SetVisualState(VisualState.IDLE))
             self._status(True, SatelliteState.IDLE)
-        return False
+        return None
 
-    async def _accept(self, segment: _Segment, match: WakeMatch, raw_text: str) -> None:
+    async def _no_request(self) -> None:
+        """The wake word came alone and no request followed: cancel the wake, stop listening
+        and play the timeout cue, as for a reply timeout. The caller re-arms."""
+        self._bare_wake = None
+        listen_id, self._listen_id = self._listen_id, None
+        assert listen_id is not None and self._open_wake is not None
+        await self._command(ResetWakeCandidate(listen_id, self._open_wake))
+        self._cancel_wake()
+        await self._command(StopListening(listen_id, "no_request"))
+        await self._expect(ListeningStopped(listen_id, "no_request"))
+        await self._play_cue(CueType.TIMEOUT)
+
+    async def _accept(
+        self, segment: _Segment, text: str, raw_text: str, follows: _BareWake | None
+    ) -> None:
         if not segment.candidate:
             self._wake(segment.utterance_id)
         listen_id, self._listen_id = self._listen_id, None
@@ -325,15 +400,16 @@ class SatelliteSession:
         await self._command(SetVisualState(VisualState.PROCESSING))
         self._status(True, SatelliteState.PROCESSING)
         self._open_wake = None
+        audio_bytes = segment.audio_bytes + (0 if follows is None else follows.audio_bytes)
         self._emit(
             TranscriptFinal(
                 self._config.id,
-                segment.utterance_id,
-                text=match.remainder,
+                segment.utterance_id if follows is None else follows.utterance_id,
+                text=text,
                 raw_text=raw_text,
                 follow_up=False,
                 speaker=None,
-                audio_ms=segment.audio_bytes // BYTES_PER_MS,
+                audio_ms=audio_bytes // BYTES_PER_MS,
             )
         )
 
@@ -390,7 +466,8 @@ class SatelliteSession:
                 speech = await _tts_read(deadline, synthesis)
                 audio = speech.format
                 byte_rate = audio.rate * audio.width * audio.channels
-                chunks = aiter(speech)
+                # Closed before the synthesis (PR #23 review N1), also on a satellite failure.
+                chunks = await stack.enter_async_context(contextlib.aclosing(aiter(speech)))
                 while (chunk := await _tts_read(deadline, anext(chunks, None))) is not None:
                     if not began:
                         await self._command(
@@ -457,6 +534,7 @@ class SatelliteSession:
 
     async def _recover(self) -> None:
         self._listen_id = None
+        self._bare_wake = None
         await self._abandon_segment()
         self._cancel_wake()  # every `wake` ends with transcript_final or wake_cancelled
         self._finish_playback()  # every acked `speak` ends with playback_finished

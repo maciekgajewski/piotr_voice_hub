@@ -111,3 +111,69 @@
     supersedes it.
 - The 0.3 s slow-begin case fails against origin/main's `session.py`, so it reproduces
   review S1. With this change, `make check` is green 3× on piotr (683 passed, 8 skipped).
+- 2026-10-20 07:05: **Bug from Maciej's T-017 hardware test (wake word, then a pause).** On
+  voice-pe-03, 2026-10-20 04:53–04:55Z (06:53–06:55 Warsaw), he said "Ryszardzie, która
+  godzina?" with a natural pause after the name, and nothing was accepted (4 times). Fix on
+  branch `t-017-split-wake` from origin/main d69ea7b.
+  - **Evidence (production, read-only `docker logs`, INFO level).** The logs have no
+    transcripts: the hub logs at INFO, and nothing logs the text. The segment lines come in
+    pairs, e.g. 04:53:53.595 `utterance-…-365 audio_ms=2176 candidate=True wake=False`, then
+    04:53:55.356 `-366 audio_ms=1792 candidate=False wake=False`. The other pairs are
+    -367/-368, -370/-371 and -375/-376. The one `device ended its voice-assistant stream
+    while listening` (04:54:32Z) re-armed in 1 s and is unrelated.
+  - **Cause (from the code, reproduced by a test).** `_finish_segment` accepted only when
+    `match_wake_phrase(final)` matched *and* `match.remainder` was non-empty, and
+    `wake=` logged exactly that. A final of "Ryszardzie." / "Ryszardzie," has the match with
+    an empty remainder (`_remainder` strips the punctuation; `test_phrase_alone_gives_empty_
+    remainder`). So the candidate was cancelled: `wake_cancelled`, reset, `IDLE`. The next
+    segment ("Która godzina?") has no wake word, so it was dropped as unrelated speech. The
+    new test of the wake word alone, then the request, fails on main's `session.py` with
+    `WakeCancelled` where `TranscriptFinal` is expected. It is not a punctuation-only problem
+    in the matcher: the matcher is right; the session had no notion of a request in a later
+    segment.
+  - **Old project (read-only, ~/src/piotr_the_ai_server at a299643).** The same rule, with no
+    follow-on window. In `ai_server/microphones/manager.py:319-342`, an empty text after the
+    phrase (`_text_after_wake_phrase`, `:1155-1159`) is "open-mic speech discarded …;
+    continuing stream". That sends `ResetWakeCandidate`, sets `IDLE` and waits for the next
+    speech start, which needs the wake word again. design.md already called our rule
+    "today's `_capture_open_mic_utterance` logic". Its only grace period after a wake is
+    `initial_silence_seconds` = 3 s (`ai_server/config.py:30`, `config.example.yaml:122`).
+    That is how long speech may take to start after the *device* wake word (not used in
+    open-mic mode, `box3_esphome.py:1012-1013`).
+  - **VAD end-of-speech silence.** Ours: Silero, end after 0.8 s with p < 0.35
+    (`end_silence_seconds: 0.8`, design §4.1 step 2; start after 250 ms with p ≥ 0.5; 1 s
+    pre-roll). Old: amplitude peak below 500 for `end_silence_seconds` = 0.9 s
+    (`config.py:31`, `box3_esphome.py:1076`). A 0.1 s difference is not "clearly too short",
+    and a natural pause after a name is often longer than either. Not changed; the window
+    handles the pause whatever the VAD does.
+  - **Fix (smallest change in the session).** A segment that is the wake word alone keeps
+    the wake open (`wake` sent, `LISTENING` stays) and keeps listening. If the next segment
+    starts within `WAKE_PAUSE_SECONDS` = 3 s (the old 3 s grace above), its whole text is
+    the request (`wake.request_text`: edges stripped like a remainder). `transcript_final`
+    carries the wake's `utterance_id`, `raw_text` = both finals and `audio_ms` = both
+    segments, and the request's partials come with the wake's id.
+    - **No request:** if no segment starts in time, or the next one has no letter or digit,
+      the hub sends `wake_cancelled` and `ResetWakeCandidate`, then
+      `StopListening(no_request)`, the timeout cue and a re-arm.
+    - **Exactly one end per wake:** a disconnect in the window goes through `_recover`
+      (one `wake_cancelled`, the pending state cleared). A second "Ryszardzie" in the window
+      keeps the same wake and restarts the window.
+    - **Decision:** the window is a module constant like the other protocol bounds, not a
+      config key, so the deployed config still loads.
+  - **Tests.** Each case checks `wake` → exactly one `transcript_final`/`wake_cancelled`.
+    - The wake word alone, then the request: 3 cases (a partial candidate, the final alone,
+      and the wake word repeated in the request). The LEDs stay `LISTENING`, there is no
+      reset and no second `wake`.
+    - The wake word alone, then silence: `wake_cancelled`, reset, stop, timeout cue, re-arm.
+    - The next segment is empty, "♪" or "...": the same.
+    - A disconnect in the window: one `wake_cancelled`, no cue, and the next segment
+      without a wake word is not taken as a request.
+    - One breath is unchanged (the existing tests).
+    - The old `test_wake_word_with_nothing_after_it_is_rejected` encoded the bug and is
+      replaced.
+  - **PR #23 review nits, in the same PR.**
+    - **N1:** the TTS chunk generator is entered as `contextlib.aclosing(aiter(speech))` on
+      the speak's exit stack, so it closes before the synthesis, also on a satellite failure.
+      `Speech.__aiter__` is now typed `AsyncGenerator[bytes, None]` (it always was one).
+    - **N2:** T-017 plan.md's Bounds line now describes the one 30 s deadline on the TTS
+      reads.
