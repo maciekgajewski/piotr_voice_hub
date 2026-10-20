@@ -177,3 +177,38 @@
       `Speech.__aiter__` is now typed `AsyncGenerator[bytes, None]` (it always was one).
     - **N2:** T-017 plan.md's Bounds line now describes the one 30 s deadline on the TTS
       reads.
+- 2026-10-20 07:16: PR #24 review 5581004177 (CHANGES NEEDED) is fixed with a new commit on
+  `t-017-split-wake`. Before the fix, the new B1, S1, N1 and N2 session tests fail on the
+  previous head (fe4734a).
+  - **B1:** the window opens only when the final is the vocative alone. The new helper
+    `wake.is_wake_word_alone` checks that every word normalizes to `ryszardzie`, so
+    punctuation, whitespace and repeats are allowed. A sentence that ends in the vocative
+    ("Dziękuję, Ryszardzie.", "Dobranoc, Ryszardzie!") takes the old cancel path: wake_cancelled,
+    reset, `IDLE`, keep listening, no cue. Tests: a session test ("Dziękuję, Ryszardzie."
+    followed by "No to idziemy do kina." gives no `transcript_final`) and helper cases in
+    test_wake.py.
+  - **S1:** the window now starts when `SpeechEnded` is read, before the final is taken.
+    `_BareWake.deadline` = that loop time + 3 s, and the wait uses `asyncio.timeout_at`.
+    If a slow final already used the window, the wait ends at the first point where the read
+    would have to wait; a `SpeechStarted` already queued is still read. Test: a 0.3 s final,
+    a 0.1 s window, and speech pushed 0.35 s after the end. It is cancelled now, and the
+    previous head accepted it.
+  - **S2:** the tests the reviewer listed are added:
+    - the sentence-final vocative;
+    - a request that starts in the window and ends after it (one `transcript_final`);
+    - the wake word said again (one wake, `u1`, all three segments in `raw_text`/`audio_ms`);
+    - a disconnect inside the request segment (one `wake_cancelled`, every STT session
+      closed, no cue);
+    - S1's late start;
+    - a request with a partial and an empty final (the partial under the wake's id, then
+      exactly one `wake_cancelled`).
+    The TV case (a bare "Ryszardzie!" followed by dialogue within 3 s becomes a request) is
+    now a known limitation in design.md §4.1 step 4 and in the PR's hardware checklist.
+  - **N1 (manager's decision):** the code now keeps the whole request, as design.md says,
+    because that is the simpler of the two options. `wake.request_text` drops only a leading
+    wake word (and its repeats). One function serves the final and the partials, and the
+    session no longer branches on the match there. "Powiedz, Ryszardzie, która godzina" stays
+    whole (tested).
+  - **N2:** the wake word said again in the window now extends the open `_BareWake`:
+    `raw_text` and `audio_bytes` add the new segment, and the deadline is the new end + 3 s.
+  - **N3:** re-wrapped the whole Bounds bullet in T-017 plan.md (line 48 was 134 characters).

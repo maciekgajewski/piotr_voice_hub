@@ -48,10 +48,25 @@ def match_wake_phrase(text: str) -> WakeMatch | None:
     return None
 
 
+def is_wake_word_alone(text: str) -> bool:
+    """True if every word is the wake word ("Ryszardzie.", "Ryszardzie, Ryszardzie!"): the
+    only segment after which the request may follow in the next one (PR #24 review B1). A
+    sentence ending in the vocative ("Dziękuję, Ryszardzie.") is not."""
+    words = _WORD.findall(unicodedata.normalize("NFC", text))
+    return bool(words) and all(normalize_word(word) == WAKE_WORD for word in words)
+
+
 def request_text(text: str) -> str:
     """The request in a segment that follows the wake word alone (T-017 fix): the whole text,
-    edges stripped like a remainder; "" if it has no letter or digit."""
-    return _remainder(unicodedata.normalize("NFC", text))
+    without a leading wake word (repeats included), edges stripped like a remainder; "" if it
+    has no letter or digit. A wake word later on stays ("Powiedz, Ryszardzie, która godzina")."""
+    text = unicodedata.normalize("NFC", text)
+    start = 0
+    for word in _WORD.finditer(text):
+        if normalize_word(word.group()) != WAKE_WORD:
+            break
+        start = word.end()
+    return _remainder(text[start:])
 
 
 def _remainder(text: str) -> str:

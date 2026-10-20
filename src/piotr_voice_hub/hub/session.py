@@ -36,7 +36,7 @@ from piotr_voice_hub.hub.events import (
     Wake,
     WakeCancelled,
 )
-from piotr_voice_hub.hub.wake import match_wake_phrase, request_text
+from piotr_voice_hub.hub.wake import is_wake_word_alone, match_wake_phrase, request_text
 from piotr_voice_hub.ids import new_id
 from piotr_voice_hub.satellites.interfaces import Microphone, MicrophoneUnavailable
 from piotr_voice_hub.satellites.messages import (
@@ -70,9 +70,10 @@ EVENT_TIMEOUT_SECONDS = 10.0  # for an event the driver owes us (started, stoppe
 SHUTDOWN_TIMEOUT_SECONDS = 3.0  # stop listening (waits for the stop ack) and go idle
 SEGMENT_MARGIN_SECONDS = 0.1  # the driver ends a segment on a whole 32 ms frame
 BYTES_PER_MS = 32  # 16 kHz, 16-bit mono
-# After a segment that is the wake word alone: how long the next segment may take to start and
-# still be the request. The old project gave speech 3 s to start after its device wake word
-# (`initial_silence_seconds`, piotr_the_ai_server ai_server/config.py:30).
+# After a segment that is the wake word alone: how long after its end (SpeechEnded, not after
+# the final transcript) the next segment may start and still be the request. The old project
+# gave speech 3 s to start after its device wake word (`initial_silence_seconds`,
+# piotr_the_ai_server ai_server/config.py:30).
 WAKE_PAUSE_SECONDS = 3.0
 # One deadline for the TTS reads of a speak: opening the synthesis and every chunk read. The
 # satellite commands between them (PlaybackBegin, chunks) are outside it, bounded by the
@@ -133,8 +134,9 @@ class _BareWake:
     """A segment that was the wake word alone; its `wake` is still open."""
 
     utterance_id: str  # the wake's; transcript_final and partials of the request carry it
-    raw_text: str
-    audio_bytes: int
+    raw_text: str  # all its segments so far
+    audio_bytes: int  # all its segments so far
+    deadline: float  # loop time: the request must start by then
 
 
 @dataclasses.dataclass
@@ -264,7 +266,9 @@ class SatelliteSession:
         while True:
             if self._bare_wake is not None and self._segment is None:
                 try:
-                    async with asyncio.timeout(WAKE_PAUSE_SECONDS):
+                    # Already passed (a slow final): a queued SpeechStarted is still read if
+                    # the read does not have to wait.
+                    async with asyncio.timeout_at(self._bare_wake.deadline):
                         event = await self._event()  # wait_for_event is cancel-safe
                 except TimeoutError:
                     self._logger.info(
@@ -283,7 +287,8 @@ class SatelliteSession:
                 await segment.stt.send_audio(event.data)
             elif isinstance(event, SpeechEnded):
                 assert segment is not None
-                outcome = await self._finish_segment(segment, event.reason)
+                ended_at = asyncio.get_running_loop().time()  # the pause starts here (S1)
+                outcome = await self._finish_segment(segment, event.reason, ended_at)
                 if outcome is not None:
                     return outcome
             else:
@@ -301,8 +306,7 @@ class SatelliteSession:
         while not isinstance(event := await segment.stt.receive_text(), TextEnd):
             match = match_wake_phrase(event.text)
             if segment.follows is not None:  # the request after the wake word alone
-                text = match.remainder if match is not None else request_text(event.text)
-                utterance_id = segment.follows.utterance_id
+                text, utterance_id = request_text(event.text), segment.follows.utterance_id
             elif match is None:
                 continue
             else:
@@ -318,7 +322,7 @@ class SatelliteSession:
         await self._command(SetVisualState(VisualState.LISTENING))
         self._status(True, SatelliteState.LISTENING)
 
-    async def _finish_segment(self, segment: _Segment, reason: str) -> bool | None:
+    async def _finish_segment(self, segment: _Segment, reason: str, ended_at: float) -> bool | None:
         """Take the final. True: accepted. False: no request after the wake word alone
         (disarmed, the timeout cue played). None: keep listening.
 
@@ -334,10 +338,10 @@ class SatelliteSession:
         self._segment = None
         match = match_wake_phrase(raw_text)
         follows, self._bare_wake = segment.follows, None
-        if match is not None and match.remainder:
-            text = match.remainder
-        elif match is None and follows is not None:
+        if follows is not None:  # the request: the whole text, less a leading wake word
             text = request_text(raw_text)
+        elif match is not None:
+            text = match.remainder
         else:
             text = ""
         self._logger.info(
@@ -354,12 +358,21 @@ class SatelliteSession:
                 raw_text = f"{follows.raw_text} {raw_text}"
             await self._accept(segment, text, raw_text, follows)
             return True
-        if match is not None:  # the wake word alone ("Ryszardzie", a pause): keep it open
+        if is_wake_word_alone(raw_text):  # "Ryszardzie", a pause: keep the wake open
             if not segment.candidate:
                 await self._raise_candidate(segment)
-            self._bare_wake = follows or _BareWake(
-                segment.utterance_id, raw_text, segment.audio_bytes
-            )
+            deadline = ended_at + WAKE_PAUSE_SECONDS
+            if follows is None:
+                self._bare_wake = _BareWake(
+                    segment.utterance_id, raw_text, segment.audio_bytes, deadline
+                )
+            else:  # said again: one wake, its segments so far, a new window (N2)
+                self._bare_wake = _BareWake(
+                    follows.utterance_id,
+                    f"{follows.raw_text} {raw_text}",
+                    follows.audio_bytes + segment.audio_bytes,
+                    deadline,
+                )
             self._logger.info(
                 "wake word alone: waiting up to %g s for the request", WAKE_PAUSE_SECONDS
             )
