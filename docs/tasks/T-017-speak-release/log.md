@@ -248,3 +248,18 @@
     the same replay sent the URL during the cue, and there was no fetch.
   - voice-pe-03's volume: the diagnosis left it at 0.3 (set by the probe); the previous value
     was not read, so it is not restored (for Maciej).
+- 2026-10-20 07:28: PR #25 rebased onto origin/main 133caac (PR #24 merged, review
+  5581062362, MERGE). The only conflict was this log; both appends are kept, in time order. The
+  fix commit's author is now the box identity (Piotr Developer (Grok Bot)), as on earlier PR
+  branches; it had been committed as Maciej by mistake. The #24 re-review nits are a separate
+  commit, in `session.py` and its tests:
+  - **N1 (behaviour kept):** a `SpeechStarted` read after the pause deadline (queued during a
+    final slower than the window; the real driver returns a queued event without yielding)
+    is still the request, and the session now logs it at DEBUG with how late it was read. A
+    new test covers it with `FakeDriver.eager`, which returns queued events without yielding,
+    like the ESPHome driver.
+  - **N2:** the S1 test pushes `u2` from a delayed task (0.2 s, during the 0.3 s final and
+    past the 0.1 s window) and asserts that the push happened while still listening, then
+    `wake_cancelled`. With the push no longer conditional, the fake driver needed
+    MP-STOP-002 (drop queued capture events on `StopListening`, as the real driver does);
+    without it, the queued start reached the protocol checker after the stop.

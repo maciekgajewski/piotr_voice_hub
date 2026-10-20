@@ -265,11 +265,20 @@ class SatelliteSession:
         followed (disarmed, the timeout cue played)."""
         while True:
             if self._bare_wake is not None and self._segment is None:
+                deadline = self._bare_wake.deadline
                 try:
                     # Already passed (a slow final): a queued SpeechStarted is still read if
                     # the read does not have to wait.
-                    async with asyncio.timeout_at(self._bare_wake.deadline):
+                    async with asyncio.timeout_at(deadline):
                         event = await self._event()  # wait_for_event is cancel-safe
+                    late = asyncio.get_running_loop().time() - deadline
+                    if isinstance(event, SpeechStarted) and late >= 0:
+                        self._logger.debug(
+                            "speech %s read %.3f s after the pause deadline (queued during a "
+                            "slow final); accepted as the request",
+                            event.utterance_id,
+                            late,
+                        )
                 except TimeoutError:
                     self._logger.info(
                         "no request within %g s after the wake word", WAKE_PAUSE_SECONDS
