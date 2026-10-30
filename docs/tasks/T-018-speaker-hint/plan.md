@@ -1,5 +1,7 @@
 # T-018: speaker hint: plan
 
+**Status:** done (merged as PR #27, 2026-10-30).
+
 ## Goal
 
 `transcript_final` carries `speaker`: `{name, confidence}` for the top ECAPA match above the

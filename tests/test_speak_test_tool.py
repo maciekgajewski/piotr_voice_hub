@@ -121,11 +121,13 @@ def test_it_needs_only_websockets_and_the_standard_library() -> None:
 
 
 async def scripted_hub(
-    script: Callable[[ServerConnection, list[dict[str, Any]]], Awaitable[None]], *options: str
+    script: Callable[[ServerConnection, list[dict[str, Any]]], Awaitable[None]],
+    *options: str,
+    tool: ModuleType | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Runs `script` for the connection, then waits for the tool to leave. The commands
     received and the tool's exit code."""
-    tool = load_tool()
+    tool = load_tool() if tool is None else tool
     received: list[dict[str, Any]] = []
 
     async def handler(connection: ServerConnection) -> None:
@@ -222,14 +224,37 @@ def test_announce_long_with_stop_after(capsys: pytest.CaptureFixture[str]) -> No
     assert times[1] - times[0] >= 0.15
 
 
-def test_stop_alone_exits_0_on_any_answer(capsys: pytest.CaptureFixture[str]) -> None:
+def test_an_announcement_that_never_finishes_times_out(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def lost(connection: ServerConnection, received: list[dict[str, Any]]) -> None:
+        speak = await receive(connection, received)
+        await connection.send(reply(speak, {"playback_id": "p1"}))  # no playback_finished
+
+    tool = load_tool()
+    monkeypatch.setattr(tool, "ANNOUNCE_TIMEOUT_SECONDS", 0.2)
+    _, code = asyncio.run(scripted_hub(lost, "--announce", "voice-pe-02", tool=tool))
+    assert code == 1
+    assert "no playback_finished for speak-test-1 within 0.2 s" in capsys.readouterr().err
+
+
+def test_stop_alone_exits_0_on_its_ack(capsys: pytest.CaptureFixture[str]) -> None:
+    async def acked(connection: ServerConnection, received: list[dict[str, Any]]) -> None:
+        stop = await receive(connection, received)
+        await connection.send(reply(stop, {}))
+
+    _, code = asyncio.run(scripted_hub(acked, "--stop", "voice-pe-02"))
+    assert code == 0
+
+
+def test_stop_alone_exits_1_on_an_error(capsys: pytest.CaptureFixture[str]) -> None:
     async def busy(connection: ServerConnection, received: list[dict[str, Any]]) -> None:
         stop = await receive(connection, received)
         error = {"code": "busy", "message": "voice-pe-02 is busy (idle): nothing is playing"}
         await connection.send(reply(stop, error, "error"))
 
     received, code = asyncio.run(scripted_hub(busy, "--stop", "voice-pe-02"))
-    assert code == 0
+    assert code == 1
     assert received == [
         {"type": "stop", "id": "speak-test-1", "satellite": "voice-pe-02", "data": {}}
     ]
@@ -246,7 +271,7 @@ def test_replies_with_stop_after(capsys: pytest.CaptureFixture[str]) -> None:
         await connection.send(finished("p1"))
         await connection.close()
 
-    received, code = asyncio.run(scripted_hub(replied, "--long", "--stop-after", "0"))
+    received, code = asyncio.run(scripted_hub(replied, "--long", "--stop-after", "0.01"))
     assert code == 1  # the hub closed the connection
     assert [(c["type"], c["satellite"]) for c in received] == [
         ("speak", "voice-pe-03"),
@@ -264,6 +289,8 @@ def test_replies_with_stop_after(capsys: pytest.CaptureFixture[str]) -> None:
         ("--announce", "voice-pe-02", "--stop", "voice-pe-02"),
         ("--long", "--text", "x"),
         ("--stop-after", "-1"),
+        ("--stop-after", "0"),
+        ("--stop", "voice-pe-02", "--stop-after", "0"),
     ],
 )
 def test_bad_option_combinations(options: tuple[str, ...]) -> None:

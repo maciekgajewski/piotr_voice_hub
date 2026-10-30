@@ -32,3 +32,24 @@
   estimated, Piper not run here). Existing options and the reply behaviour are unchanged; option
   clashes are argparse errors. 12 new tool tests against a fake hub. Checklist: production has
   only voice-pe-02 (living_room) and voice-pe-03 (study); box3-office dropped.
+
+- PR #28 review round 1 (head 176db23):
+  - S1: design §6 said clients send their next item after `playback_finished`, but it goes out
+    before the re-arm, so that `speak` is `busy (speaking)`. Code unchanged; §6 now says to wait
+    for the `idle` status. Test (reply and announcement): a `speak` sent just after
+    `playback_finished` is `busy`, one sent after the `idle` status is taken. The test harness
+    got an `on_event` hook for a consumer's reaction.
+  - S2: tests for a stop whose `PlaybackStop` fails as the satellite disconnects (mid-stream and
+    draining, reply and announcement) and for an announcement acked in the same step as a
+    disconnect. Both end with one `playback_finished`, then `error` and the re-arm, and nothing
+    hangs; no bug found (`_recover` ends the open playback in both).
+  - N1, N2: microphone-protocol.md and design §6 say "for a reply" (`PROCESSING` during
+    playback, the timeout cue on a TTS failure).
+  - N3: tasks README T-018 row "merged (PR #27)"; T-018 plan.md status done.
+  - N4: the busy-while-accepting test the plan promised: speak, release and stop are `busy`
+    while the speaker hint is pending, with and without a partial (without one the status is
+    still `idle`, and the speak is still no announcement); the release after it works.
+  - N5: `tools/speak_test.py`: `--stop` exits 1 on an error reply (0 on its ack);
+    `--stop-after` must be > 0 (0 is an option error); `--announce` gives up after 120 s
+    (`ANNOUNCE_TIMEOUT_SECONDS`, exit 1, "no playback_finished for … within 120 s"). Tool tests
+    adjusted and added. Hardware checklist step 5 now expects exit 1 on the busy reply.

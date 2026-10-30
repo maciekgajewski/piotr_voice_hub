@@ -265,7 +265,7 @@ After `SpeechEnded`, the final transcript determines acceptance.
 - `PlaybackEnd` means no more bytes will be sent; `PlaybackFinished` means the device has drained the audio and playback is complete.
 - The manager MUST NOT re-arm listening before `PlaybackFinished`.
 - After `PlaybackStop` the manager sends no more `PlaybackChunk`, `PlaybackEnd` or `PlaybackStop` for that playback. If the drain had already finished, `PlaybackStop` does nothing and the queued `PlaybackFinished` is the one. Exactly one `PlaybackFinished` ends each playback either way.
-- Visual `PROCESSING` remains active while assistant playback drains.
+- Visual `PROCESSING` remains active while playback for a reply drains.
 - A driver MAY advertise full-duplex capability in a future interface revision, but no current behavior may assume it.
 
 ## Timeouts and cancellation

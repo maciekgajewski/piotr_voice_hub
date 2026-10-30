@@ -15,12 +15,14 @@ From a checkout with uv: `uv run --locked python tools/speak_test.py [--url ...]
 It prints every message from the hub, and each command it sends prefixed with `>>> `, one per
 line. By default it replies `Usłyszałem: <text>`; `--text` sends a fixed sentence instead,
 `--long` a Polish text of about 20 s, and `--release` sends `release` (no reply). It never sets
-a volume. `--stop-after N` sends `stop` to the satellite N seconds after each `speak` ack.
+a volume. `--stop-after N` (N > 0) sends `stop` to the satellite N seconds after each `speak`
+ack.
 
 One-shot modes (T-019), which need no wake phrase: `--announce SATELLITE` sends one `speak`
 (an announcement to an idle satellite; `--text`/`--long`/`--stop-after` apply) and exits 0
-after its `playback_finished`, 1 on an error reply. `--stop SATELLITE` sends one `stop` and
-exits 0 once the hub answers (`busy` when nothing plays).
+after its `playback_finished`, 1 on an error reply or if it has not finished within 120 s.
+`--stop SATELLITE` sends one `stop`: exit 0 on its `ack`, 1 on an error reply (`busy` when
+nothing plays).
 
 A dead hub is noticed by the websockets keepalive (pings every 20 s).
 Exit 0 on Ctrl-C, 1 if it cannot connect or the hub closes the connection.
@@ -38,6 +40,7 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidURI
 
 DEFAULT_URL = "ws://localhost:8750/ws"
 OPEN_TIMEOUT_SECONDS = 5.0
+ANNOUNCE_TIMEOUT_SECONDS = 120.0  # --announce: from the speak to its playback_finished
 ANNOUNCEMENT = "To jest test ogłoszenia z huba."
 LONG_TEXT = (  # about 20 s with Piper
     "To jest długi test zatrzymywania odtwarzania. Za oknem powoli zapada zmrok, a w domu "
@@ -106,27 +109,39 @@ async def run(
         if first is not None:
             await send(websocket, first)
         playback_id = None
+        # --announce: the whole wait, so a lost playback_finished cannot hang it (None: none).
+        limit = ANNOUNCE_TIMEOUT_SECONDS if announce is not None else None
         try:
-            async for raw in websocket:
-                print(raw, flush=True)
-                message = json.loads(raw)
-                kind, data = message.get("type"), message.get("data") or {}
-                if kind == "ack" and message.get("reply_to") in speaks and stop_after is not None:
-                    satellite = speaks[message["reply_to"]]
-                    timers.add(asyncio.create_task(stop_later(websocket, satellite)))
-                if first is None:
-                    if kind == "transcript_final":
-                        command = command_for(message, text, release, next(numbers))
-                        assert command is not None
-                        await send(websocket, command)
-                elif message.get("reply_to") == first["id"]:
-                    if first["type"] == "stop":
-                        return 0  # ack or error: the answer is the result
-                    if kind == "error":
-                        return 1
-                    playback_id = data.get("playback_id")
-                elif kind == "playback_finished" and data.get("playback_id") == playback_id:
-                    return 0
+            async with asyncio.timeout(limit):
+                async for raw in websocket:
+                    print(raw, flush=True)
+                    message = json.loads(raw)
+                    kind, data = message.get("type"), message.get("data") or {}
+                    if (
+                        kind == "ack"
+                        and message.get("reply_to") in speaks
+                        and stop_after is not None
+                    ):
+                        satellite = speaks[message["reply_to"]]
+                        timers.add(asyncio.create_task(stop_later(websocket, satellite)))
+                    if first is None:
+                        if kind == "transcript_final":
+                            command = command_for(message, text, release, next(numbers))
+                            assert command is not None
+                            await send(websocket, command)
+                    elif message.get("reply_to") == first["id"]:
+                        if kind == "error":
+                            return 1
+                        if first["type"] == "stop":
+                            return 0
+                        playback_id = data.get("playback_id")
+                    elif kind == "playback_finished" and data.get("playback_id") == playback_id:
+                        return 0
+        except TimeoutError:
+            if limit is None or first is None:
+                raise
+            print(f"no playback_finished for {first['id']} within {limit:g} s", file=sys.stderr)
+            return 1
         finally:
             for timer in timers:
                 timer.cancel()
@@ -147,12 +162,14 @@ def main(argv: list[str] | None = None) -> int:
         "--stop-after", type=float, metavar="SECONDS", help="send stop this long after a speak ack"
     )
     args = parser.parse_args(argv)
-    if args.stop is not None and (args.text or args.long or args.release or args.stop_after):
+    if args.stop is not None and (
+        args.text or args.long or args.release or args.stop_after is not None
+    ):
         parser.error("--stop takes no other option than --url")
     if args.release and (args.announce is not None or args.stop_after is not None):
         parser.error("--release does not speak: no --announce or --stop-after")
-    if args.stop_after is not None and args.stop_after < 0:
-        parser.error("--stop-after must not be negative")
+    if args.stop_after is not None and not args.stop_after > 0:
+        parser.error("--stop-after must be more than 0")
     text = LONG_TEXT if args.long else args.text
     try:
         code = asyncio.run(
