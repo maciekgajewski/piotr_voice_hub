@@ -3,8 +3,8 @@
 A client message is `{"type", "id", "satellite", "data"}`. `CommandRouter.handle` validates it,
 calls the satellite's session and returns the reply for that client: `ack` (with the command's
 result) or `error` (`{"code", "message"}`), both with `reply_to` and no `ts` (design.md's
-example). It never raises for a client's mistake. `play` and `listen_after` are later tasks
-(T-021, T-020) and are refused as not supported yet.
+example). It never raises for a client's mistake. `play` is a later task (T-021) and is refused
+as not supported yet. `speak` takes `listen_after` (T-020).
 """
 
 import json
@@ -45,7 +45,7 @@ class Speaker(Protocol):
     """What a command needs from a satellite's session. Each raises CommandError (busy,
     satellite_offline) when the session cannot take the command now."""
 
-    def speak(self, text: str, volume: float | None) -> str: ...  # the playback_id
+    def speak(self, text: str, volume: float | None, listen_after: bool) -> str: ...  # its id
 
     def release(self) -> None: ...
 
@@ -127,12 +127,12 @@ class CommandRouter:
             else:
                 session.stop()
             return {}
-        text, volume = self._speak_args(data)
-        return {"playback_id": session.speak(text, volume)}
+        text, volume, listen_after = self._speak_args(data)
+        return {"playback_id": session.speak(text, volume, listen_after)}
 
-    def _speak_args(self, data: dict[str, Any]) -> tuple[str, float | None]:
-        """The text, and the volume: None (the satellite's volume is not touched) unless the
-        command passes one (T-017 follow-up)."""
+    def _speak_args(self, data: dict[str, Any]) -> tuple[str, float | None, bool]:
+        """The text; the volume: None (the satellite's volume is not touched) unless the
+        command passes one (T-017 follow-up); `listen_after` (default false, T-020)."""
         if unknown := set(data) - SPEAK_KEYS:
             raise CommandError(ErrorCode.BAD_REQUEST, f"unknown speak keys {sorted(unknown)}")
         text = data.get("text")
@@ -145,15 +145,13 @@ class CommandRouter:
         listen_after = data.get("listen_after", False)
         if not isinstance(listen_after, bool):
             raise CommandError(ErrorCode.BAD_REQUEST, "'listen_after' must be a boolean")
-        if listen_after:
-            raise CommandError(ErrorCode.BAD_REQUEST, "'listen_after' is not supported yet (T-020)")
         if "volume" not in data:
-            return text, None
+            return text, None, listen_after
         volume = data["volume"]
         # No math.isfinite: it overflows on a huge int. NaN and infinities fail the range.
         if isinstance(volume, bool) or not isinstance(volume, int | float) or not 0 <= volume <= 1:
             raise CommandError(ErrorCode.BAD_REQUEST, "'volume' must be a number from 0 to 1")
-        return text, float(volume)
+        return text, float(volume), listen_after
 
 
 def _valid_str(value: object) -> str | None:

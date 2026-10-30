@@ -7,7 +7,7 @@ from enum import Enum
 
 class SatelliteState(Enum):
     IDLE = "idle"  # armed, no wake candidate
-    LISTENING = "listening"  # wake candidate open
+    LISTENING = "listening"  # wake candidate open, or the follow-up window (T-020)
     PROCESSING = "processing"  # accepted; waiting for a reply
     SPEAKING = "speaking"  # playing a reply (T-017)
     ERROR = "error"  # offline
@@ -63,9 +63,22 @@ class PlaybackFinished:
 
     satellite: str
     playback_id: str
-    listening_for_follow_up: bool  # follow-up is T-020: always False until then
+    listening_for_follow_up: bool  # the follow-up window opens next (T-020)
+
+
+@dataclass(frozen=True)
+class FollowUpTimeout:
+    """The follow-up window passed with no request (T-020); the satellite re-arms idle."""
+
+    satellite: str
 
 
 type HubEvent = (
-    SatelliteStatus | Wake | WakeCancelled | TranscriptPartial | TranscriptFinal | PlaybackFinished
+    SatelliteStatus
+    | Wake
+    | WakeCancelled
+    | TranscriptPartial
+    | TranscriptFinal
+    | PlaybackFinished
+    | FollowUpTimeout
 )

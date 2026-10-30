@@ -291,9 +291,51 @@ def test_replies_with_stop_after(capsys: pytest.CaptureFixture[str]) -> None:
         ("--stop-after", "-1"),
         ("--stop-after", "0"),
         ("--stop", "voice-pe-02", "--stop-after", "0"),
+        ("--stop", "voice-pe-02", "--listen-after"),
+        ("--release", "--listen-after"),
     ],
 )
 def test_bad_option_combinations(options: tuple[str, ...]) -> None:
     with pytest.raises(SystemExit) as exit_:
         load_tool().main(list(options))
     assert exit_.value.code == 2
+
+
+# Follow-up listening (T-020)
+
+
+def test_listen_after_on_every_reply(capsys: pytest.CaptureFixture[str]) -> None:
+    received, _ = asyncio.run(fake_hub("--listen-after", "--text", "Wziąć parasol?"))
+    assert [c["data"] for c in received] == [{"text": "Wziąć parasol?", "listen_after": True}] * 2
+
+
+def test_a_follow_up_is_answered_like_any_transcript(capsys: pytest.CaptureFixture[str]) -> None:
+    async def follow_up(connection: ServerConnection, received: list[dict[str, Any]]) -> None:
+        await connection.send(final("voice-pe-02", "czy pada"))
+        speak = await receive(connection, received)
+        await connection.send(reply(speak, {"playback_id": "p1"}))
+        data = {"playback_id": "p1", "listening_for_follow_up": True}
+        await connection.send(
+            json.dumps({"type": "playback_finished", "satellite": "voice-pe-02", "data": data})
+        )
+        data = {"utterance_id": "u2", "text": "a jutro", "raw_text": "A jutro?", "follow_up": True}
+        await connection.send(
+            json.dumps({"type": "transcript_final", "satellite": "voice-pe-02", "data": data})
+        )
+        await receive(connection, received)
+        await connection.close()
+
+    received, code = asyncio.run(scripted_hub(follow_up, "--listen-after"))
+    assert code == 1  # the hub closed the connection
+    assert [c["data"] for c in received] == [
+        {"text": "Usłyszałem: czy pada", "listen_after": True},
+        {"text": "Usłyszałem: a jutro", "listen_after": True},
+    ]
+
+
+def test_announce_with_listen_after(capsys: pytest.CaptureFixture[str]) -> None:
+    received, code = asyncio.run(
+        scripted_hub(acked_speak, "--announce", "voice-pe-02", "--listen-after")
+    )
+    assert code == 0
+    assert received[0]["data"] == {"text": load_tool().ANNOUNCEMENT, "listen_after": True}

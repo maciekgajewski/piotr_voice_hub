@@ -24,6 +24,7 @@ from websockets.frames import CloseCode
 from websockets.http11 import Request, Response
 
 from piotr_voice_hub.hub.events import (
+    FollowUpTimeout,
     HubEvent,
     PlaybackFinished,
     SatelliteStatus,
@@ -120,6 +121,8 @@ def event_message(event: HubEvent, ts: str) -> dict[str, Any]:
                 "playback_id": event.playback_id,
                 "listening_for_follow_up": event.listening_for_follow_up,
             }
+        case FollowUpTimeout():
+            kind, data = "follow_up_timeout", {}
         case _:
             assert_never(event)
     return {"type": kind, "satellite": event.satellite, "ts": ts, "data": data}

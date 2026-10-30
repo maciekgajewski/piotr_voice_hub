@@ -211,7 +211,7 @@ After `StopListening`, the driver MUST drop any capture events (`SpeechStarted`,
 | Waiting for the consumer's reply (`speak`/`play`/`release`) | `PROCESSING` |
 | Assistant audio is playing | `PROCESSING` |
 | Playback finishes and no follow-up is requested | `IDLE` |
-| Playback finishes and follow-up is requested, including while its ready cue plays | `LISTENING` |
+| Playback finishes and follow-up is requested, including while its ready cue plays (until the P2 firmware: no ready cue, the visual alone) | `LISTENING` |
 | Follow-up window or reply timeout expires | `IDLE` after the timeout cue completes |
 | Server connection is lost | Firmware-owned `ERROR` |
 
@@ -273,7 +273,7 @@ After `SpeechEnded`, the final transcript determines acceptance.
 | Timeout | Starts | Successful completion | Failure meaning | Owner |
 |---|---|---|---|---|
 | Arm acknowledgement | `StartListening` | `ListeningStarted` | Device did not enter requested mode | Manager |
-| Follow-up speech start | follow-up ready cue finished and listening re-armed | `SpeechStarted` within `follow_up_seconds` | User did not begin follow-up | Manager |
+| Follow-up speech start | follow-up ready cue finished (none until the P2 firmware) and listening re-armed | `SpeechStarted` within `follow_up_seconds` | User did not begin follow-up | Manager |
 | Reply | `transcript_final` emitted | consumer `speak`/`play`/`release` within `reply_timeout_seconds` | Consumer did not answer | Manager |
 | Segment liveness | `SpeechStarted` or last segment event | next `AudioChunk`, `AudioProgress`, or `SpeechEnded` | Active capture stalled | Manager |
 | Cue completion | `PlayCue` | `CueFinished` | Cue operation stalled | Manager |
