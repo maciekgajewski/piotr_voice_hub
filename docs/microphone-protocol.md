@@ -83,6 +83,7 @@ There is one listening mode, continuous open-mic: the driver detects zero or mor
 | `PlaybackBegin` | `playback_id`, `rate`, `width`, `channels`, optional `volume` | Begin one assistant playback stream while disarmed |
 | `PlaybackChunk` | `playback_id`, `data` | Append bytes to the matching playback stream |
 | `PlaybackEnd` | `playback_id` | Declare that no more bytes will be sent |
+| `PlaybackStop` | `playback_id` | Stop the playback now, before or after `PlaybackEnd`; it still ends with one `PlaybackFinished` (T-019) |
 | `Close` | none | Permanently release the driver |
 
 `SetVisualState` is independent of audio state and is valid in every connected, non-closed driver state. Duplicate commands are idempotent. (`MP-VISUAL-002`)
@@ -166,7 +167,8 @@ The table covers audio-state events. `SetVisualState` is independently valid in 
 | `PLAYING_CUE` | matching `MicrophoneUnavailable` | Abort cue | `DISARMED` |
 | `PLAYING_AUDIO` | matching `PlaybackChunk` | Append audio | `PLAYING_AUDIO` |
 | `PLAYING_AUDIO` | matching `PlaybackEnd` | Finish input and drain device | `PLAYING_AUDIO` |
-| `PLAYING_AUDIO` | matching `PlaybackFinished` after `PlaybackEnd` | Complete playback | `DISARMED` |
+| `PLAYING_AUDIO` | matching `PlaybackStop` | Stop device playback, release the stream | `PLAYING_AUDIO` |
+| `PLAYING_AUDIO` | matching `PlaybackFinished` after `PlaybackEnd` or `PlaybackStop` | Complete playback | `DISARMED` |
 | `PLAYING_AUDIO` | matching `MicrophoneUnavailable` | Abort playback | `DISARMED` |
 | any non-closed state | `Close` | Abort operation and release resources | `CLOSED` |
 | any non-closed state | `DriverClosed` | Discard the active operation; the driver is permanently unavailable | `CLOSED` |
@@ -262,6 +264,7 @@ After `SpeechEnded`, the final transcript determines acceptance.
 - The manager MUST await `CueFinished` before starting a conflicting listening or playback operation.
 - `PlaybackEnd` means no more bytes will be sent; `PlaybackFinished` means the device has drained the audio and playback is complete.
 - The manager MUST NOT re-arm listening before `PlaybackFinished`.
+- After `PlaybackStop` the manager sends no more `PlaybackChunk`, `PlaybackEnd` or `PlaybackStop` for that playback. If the drain had already finished, `PlaybackStop` does nothing and the queued `PlaybackFinished` is the one. Exactly one `PlaybackFinished` ends each playback either way.
 - Visual `PROCESSING` remains active while assistant playback drains.
 - A driver MAY advertise full-duplex capability in a future interface revision, but no current behavior may assume it.
 

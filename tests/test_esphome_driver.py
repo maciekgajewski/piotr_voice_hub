@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pytest
 from aioesphomeapi.model import (
+    MediaPlayerCommand,
     MediaPlayerEntityState,
     MediaPlayerInfo,
     MediaPlayerState,
@@ -240,6 +241,8 @@ class FakeClient:
             self.timeline.append(("url", asyncio.get_running_loop().time()))
         if kwargs.get("media_url") and self.fetch:
             self._later(self._get(kwargs["media_url"]))
+        if kwargs.get("command") is MediaPlayerCommand.STOP and self.url_states:
+            self._later(self.player(MediaPlayerState.IDLE))
 
     async def _get(self, url: str) -> None:
         host_port, path = url.removeprefix("http://").split("/", 1)

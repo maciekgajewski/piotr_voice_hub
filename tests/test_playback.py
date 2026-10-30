@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 import pytest
-from aioesphomeapi.model import MediaPlayerState, SupportsResponseType
+from aioesphomeapi.model import MediaPlayerCommand, MediaPlayerState, SupportsResponseType
 from microphone_driver_conformance import assert_playback_contract
 from test_esphome_driver import ALL_SERVICES, Checked, Clients, FakeClient, Response, arm, make
 
@@ -23,6 +23,7 @@ from piotr_voice_hub.satellites.messages import (
     PlaybackChunk,
     PlaybackEnd,
     PlaybackFinished,
+    PlaybackStop,
     PlayCue,
     SetVisualState,
     VisualState,
@@ -322,6 +323,95 @@ def test_close_during_playback_cancels_it_and_releases_the_stream() -> None:
             assert (await get_wav(server, "pb-1")).startswith(b"HTTP/1.1 404")
             await asyncio.sleep(0.1)
             assert mic.driver._events.empty()  # no PlaybackFinished after close
+
+    run(scenario)
+
+
+STOP = {"command": MediaPlayerCommand.STOP, "announcement": True}
+
+
+@pytest.mark.parametrize("ended", [False, True])
+def test_playback_stop_stops_the_device_and_releases_the_stream(ended: bool) -> None:
+    """T-019: STOP to the announcement pipeline, the GET ends, a later GET is 404, then one
+    PlaybackFinished once the player is idle; the drain never emits a second one."""
+
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            client = clients.last
+            client.url_states = True  # PLAYING while fetching, IDLE after the STOP
+            await mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            await mic.send_output_event(PlaybackChunk("pb-1", bytes(BYTE_RATE)))  # 1 s
+            if ended:
+                await mic.send_output_event(PlaybackEnd("pb-1"))
+            await asyncio.sleep(0.2)  # fetched and playing
+            started = time.monotonic()
+            await mic.send_output_event(PlaybackStop("pb-1"))
+            assert time.monotonic() - started < 0.5
+            assert client.media_commands[-1] == STOP
+            assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+            assert (await get_wav(server, "pb-1")).startswith(b"HTTP/1.1 404")
+            await asyncio.sleep(1.2)  # past the audio's own end
+            assert mic.driver._events.empty()
+            assert len(client.fetched) == 1  # the GET ended when the stream was released
+
+    run(scenario)
+
+
+def test_playback_stop_waits_for_a_busy_player_bounded(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(esphome, "PLAYER_FREE_TIMEOUT_SECONDS", 0.2)
+
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            client = clients.last
+            client.fetch = False
+            await mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            await asyncio.sleep(0.05)  # the initial IDLE is in
+            await client.player(MediaPlayerState.PLAYING)  # and it never reports IDLE
+            started = time.monotonic()
+            await mic.send_output_event(PlaybackStop("pb-1"))
+            assert time.monotonic() - started >= 0.2
+            assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+            assert "still busy 0.2 s after the stop" in caplog.text
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
+
+
+def test_playback_stop_after_the_drain_finished_does_nothing() -> None:
+    """The session may stop a playback whose PlaybackFinished is queued but not yet read."""
+
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            await mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            await mic.send_output_event(PlaybackChunk("pb-1", b"audio"))
+            await mic.send_output_event(PlaybackEnd("pb-1"))
+            while mic.driver._playback is not None:  # bounded by run()
+                await asyncio.sleep(0.01)
+            await mic.send_output_event(PlaybackStop("pb-1"))
+            assert STOP not in clients.last.media_commands
+            assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+            assert mic.driver._events.empty()
+
+    run(scenario)
+
+
+def test_playback_stop_on_an_unavailable_driver_raises() -> None:
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            clients.last.fetch = False
+            await mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            on_stop = clients.last.on_stop
+            assert on_stop is not None
+            await on_stop(False)
+            with pytest.raises(MicrophoneUnavailable, match="transport stopped"):
+                await mic.driver.send_output_event(PlaybackStop("pb-1"))
+            assert STOP not in clients.last.media_commands
 
     run(scenario)
 

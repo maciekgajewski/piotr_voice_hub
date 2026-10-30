@@ -36,8 +36,8 @@ thing Maciej can hear on hardware (after T-017).
 | T-015 piper-service | The hub's own `wyoming-piper` compose service on the GPU (port 10201): an image with only `onnxruntime-gpu` 1.26.0 (no `onnxruntime`), the voice pinned by revision and hash, a CUDA-first provider check (no silent CPU fallback), HEURISTIC cuDNN algorithm search, warm-up before it listens; smoke test on piotr | T-003, T-012 | merged (PR #18) |
 | T-016 tts-client | `tts/`: Wyoming Piper client (old `PiperTextToSpeech.synthesize`), streamed PCM chunks, a timeout on every wait, a text-length cap per call; warm-up at hub startup before arming | T-004, T-015 | merged (PR #19) |
 | T-017 speak-release | API commands `speak` and `release` (`ack`/`error`) for a satellite in `PROCESSING`; session plays TTS through T-014 (`speaking` state, `playback_finished`, re-arm) with a bound on `PlaybackBegin` → `PlaybackEnd`; anything else is `busy` | T-014, T-016 | merged (PR #21) |
-| T-018 speaker-hint | Speaker-recognition service in the compose file (port 2141) and the HTTP client (`speaker/`); `transcript_final` carries `speaker` | T-012; can run in parallel with T-015–T-017 | in review |
-| T-019 announce-busy-stop | `speak` to an idle satellite (announcement: stop listening, play, re-arm), the full busy policy (design §6), and `stop` | T-017 | planned |
+| T-018 speaker-hint | Speaker-recognition service in the compose file (port 2141) and the HTTP client (`speaker/`); `transcript_final` carries `speaker` | T-012; can run in parallel with T-015–T-017 | merged |
+| T-019 announce-busy-stop | `speak` to an idle satellite (announcement: stop listening, play, re-arm), the full busy policy (design §6), and `stop` | T-017 | in review |
 | T-020 follow-up | `listen_after`: `FOLLOW_UP_READY` cue, `follow_up_seconds` window without the phrase, `follow_up_timeout`, `follow_up` and `listening_for_follow_up` flags | T-019 | planned |
 | T-021 play-url | `play` with a consumer URL: its own driver command, its end from the media player state (bounded), `listen_after` and `stop` as for `speak` | T-020 | planned |
 | T-022 p1-acceptance | Deploy the three-service compose on piotr and run the P1 exit criteria on all four satellites, including a real-device playback check: the satellite fetches the URL and audio is heard right after the accepted cue, with a fast Piper reply (PR checklist only, no code unless a fix is needed) | T-015 … T-021 | planned |
@@ -180,7 +180,8 @@ Not numbered yet: firmware trimmed to continuous mode and reflashed (including t
 - **P1 → T-017, T-019, T-020, T-021 (from T-010, T-011):** busy handling (T-019), follow-up
   (T-020) and the commands `speak`/`release` (T-017), `stop` (T-019) and `play` (T-021) were
   left out of P0. **T-017:** `speak` and `release` done; `play`, `stop` and `listen_after: true`
-  are refused as `bad_request` "not supported yet" until their tasks.
+  are refused as `bad_request` "not supported yet" until their tasks. **T-019:** `stop` done
+  (`speak` only; T-021 makes it stop `play` too); `play` and `listen_after: true` remain.
 - **P1 → T-017 (playback close at low rates):** the graceful close of a finished stream
   (`CLOSE_TIMEOUT_SECONDS`, 5 s, `hub/playback_http.py`) is tight at 8 kHz mono (16 KB/s):
   flushing a full 64 KiB asyncio write buffer takes about 4 s. If it fires, `abort()` drops the
