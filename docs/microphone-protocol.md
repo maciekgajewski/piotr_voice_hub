@@ -69,7 +69,7 @@ There is one listening mode, continuous open-mic: the driver detects zero or mor
 |---|---|
 | `UTTERANCE_ACCEPTED` | Full utterance was accepted and will be processed |
 | `FOLLOW_UP_READY` | Device is ready for follow-up speech |
-| `TIMEOUT` | The reply timeout or the follow-up window expired |
+| `TIMEOUT` | The reply timeout expired, or no request followed the wake word alone. Not the follow-up window: it ends silently (T-020) |
 
 ## Manager-to-driver events
 
@@ -212,7 +212,8 @@ After `StopListening`, the driver MUST drop any capture events (`SpeechStarted`,
 | Assistant audio is playing | `PROCESSING` |
 | Playback finishes and no follow-up is requested | `IDLE` |
 | Playback finishes and follow-up is requested, including while its ready cue plays (until the P2 firmware: no ready cue, the visual alone) | `LISTENING` |
-| Follow-up window or reply timeout expires | `IDLE` after the timeout cue completes |
+| Reply timeout expires | `IDLE` after the timeout cue completes |
+| Follow-up window expires, or ends on a segment with no request | `IDLE` at once, no cue, still listening |
 | Server connection is lost | Firmware-owned `ERROR` |
 
 `PROCESSING` MUST remain active throughout assistant playback. (`MP-VISUAL-007`)

@@ -34,8 +34,10 @@ Follow-up (T-020): a `speak` with `listen_after` whose audio played and was not 
 with the `LISTENING` visual (no cue until the P2 firmware) and status `listening`. The next
 segment that starts within `follow_up_seconds` of `ListeningStarted` is the request, without the
 wake phrase (its whole text less a leading wake word, `follow_up: true`). No segment in time, or
-one with no request text, emits `follow_up_timeout`, stops listening, plays the timeout cue and
-re-arms idle. The window is busy for every command, like an open wake.
+one with no request text, ends the window in place, like a cancelled wake candidate: an open
+`wake` is cancelled, `follow_up_timeout`, the `IDLE` visual and status `idle`, and listening goes
+on (no cue: the window is the hub's offer, not a request; PR #29 review S1). The window is busy
+for every command, like an open wake.
 """
 
 import asyncio
@@ -335,8 +337,8 @@ class SatelliteSession:
 
     async def _listen_until_accepted(self) -> bool:
         """True once an utterance is accepted; False if the wake word came alone and no request
-        followed, or the follow-up window passed (disarmed, the timeout cue played), or an
-        announcement was played (disarmed). Either way the caller re-arms."""
+        followed (disarmed, the timeout cue played), or an announcement was played (disarmed).
+        Either way the caller re-arms. The follow-up window ends in here, still listening."""
         while True:
             if self._follow_up_deadline is not None:
                 assert self._segment is None and self._bare_wake is None
@@ -346,7 +348,7 @@ class SatelliteSession:
                 except TimeoutError:
                     self._logger.info("no follow-up within %g s", self._config.follow_up_seconds)
                     await self._end_follow_up()
-                    return False
+                    continue  # on to the idle wait, same listen
             elif self._bare_wake is not None and self._segment is None:
                 deadline = self._bare_wake.deadline
                 try:
@@ -522,7 +524,7 @@ class SatelliteSession:
             return False
         if segment.follow_up:  # no request in the follow-up window (noise, music): it ends
             await self._end_follow_up()
-            return False
+            return None
         if segment.candidate:
             assert self._listen_id is not None
             self._cancel_wake()
@@ -545,18 +547,17 @@ class SatelliteSession:
 
     async def _end_follow_up(self) -> None:
         """The follow-up window passed with no request (no speech in time, or a segment with no
-        request text): `follow_up_timeout`, stop listening and the timeout cue (design.md §4.1
-        step 7). A `wake` a partial sent is cancelled first. The caller re-arms idle."""
+        request text). It ends in place, like a cancelled wake candidate: a `wake` a partial
+        sent is reset and cancelled, then `follow_up_timeout`, the `IDLE` visual and status
+        `idle`. No cue and no disarm: listening goes on (design.md §4.1 step 7, PR #29 S1)."""
         self._follow_up_deadline = None
-        listen_id, self._listen_id = self._listen_id, None
-        assert listen_id is not None
+        assert self._listen_id is not None
         if self._open_wake is not None:
-            await self._command(ResetWakeCandidate(listen_id, self._open_wake))
+            await self._command(ResetWakeCandidate(self._listen_id, self._open_wake))
             self._cancel_wake()
         self._emit(FollowUpTimeout(self._config.id))
-        await self._command(StopListening(listen_id, "follow_up_timeout"))
-        await self._expect(ListeningStopped(listen_id, "follow_up_timeout"))
-        await self._play_cue(CueType.TIMEOUT)
+        await self._command(SetVisualState(VisualState.IDLE))
+        self._status(True, SatelliteState.IDLE)
 
     async def _accept(
         self, segment: _Segment, text: str, raw_text: str, follows: _BareWake | None

@@ -33,12 +33,16 @@ until the P2 firmware. design.md §4.1 step 7 otherwise as written. Out of scope
    or at the final; `transcript_partial`s with the segment's `utterance_id`;
    `transcript_final.follow_up: true`. The accept is the normal one (accepted cue,
    `PROCESSING`, speaker hint, reply wait).
-7. **Timeout.** No speech by the deadline: `follow_up_timeout`, `StopListening`
-   (`follow_up_timeout`), the timeout cue (step 7 says so; the "no sound" decision is about the
-   ready cue only), `IDLE`, re-arm.
-8. **A segment with no request text** (noise, music, "..."): ends the window like the timeout
-   (the bare-wake precedent, T-017 fix): a `wake` a partial sent gets `ResetWakeCandidate` and
-   `wake_cancelled` first, then `follow_up_timeout`, stop, timeout cue, idle re-arm.
+7. **Timeout.** No speech by the deadline: the window ends in place, like a cancelled wake
+   candidate: `follow_up_timeout`, `SetVisualState(IDLE)`, status `idle`, and the same listen
+   goes on (no `StopListening`, no re-arm). **No cue** (project manager's decision, PR #29 review
+   S1: the window is the hub's offer, not a request; a cue would beep after almost every
+   conversation). Speech after it is an ordinary segment and needs the phrase. (First version:
+   stop, timeout cue, re-arm; changed in review.)
+8. **A segment with no request text** (noise, music, "..."): ends the window the same way
+   (the segment is closed, listening goes on): a `wake` a partial sent gets
+   `ResetWakeCandidate` and `wake_cancelled` first, then `follow_up_timeout`, `IDLE`. A partial
+   with no request text (only the wake word, noise) sends no `wake`.
 9. **The wake word alone in the window** ("Ryszardzie", a pause, the request): the ordinary
    wake-word-alone path; that request is addressed by name, so `follow_up: false`.
 10. **Disconnect in the window.** The window is dropped, no `follow_up_timeout` (the `error`
@@ -54,8 +58,9 @@ until the P2 firmware. design.md §4.1 step 7 otherwise as written. Out of scope
   and was not stopped; `_finish_playback` reports it as `listening_for_follow_up`; `_arm`
   consumes it: `LISTENING` visual, start, then a deadline and status `listening`.
   `_listen_until_accepted` waits for the next event until the deadline; `SpeechStarted`
-  clears the deadline and marks the segment `follow_up`. `_end_follow_up` is the timeout path.
-  `_recover` drops both fields. `run()` stays the only command sender; no new task.
+  clears the deadline and marks the segment `follow_up`. `_end_follow_up` ends the window in
+  place (timeout and noise): reset an open wake, `follow_up_timeout`, `IDLE`; no cue, no
+  disarm. `_recover` drops both fields. `run()` stays the only command sender; no new task.
 - `events.py`/`api.py`: `FollowUpTimeout(satellite)` → `follow_up_timeout`, data `{}`.
 - `tools/speak_test.py`: `--listen-after` adds `"listen_after": true` to every speak (reply
   and `--announce`); refused with `--stop` and `--release`.
@@ -64,11 +69,14 @@ until the P2 firmware. design.md §4.1 step 7 otherwise as written. Out of scope
 
 - Session: window opens with `LISTENING` and no cue; a follow-up without the phrase (and with
   a leading phrase dropped) → `transcript_final` `follow_up: true`; an announcement with
-  `listen_after`; timeout (`follow_up_timeout`, stop reason, timeout cue, idle, not before
-  `follow_up_seconds`); a segment with no request text, with and without a partial `wake`;
-  a follow-up ending after the deadline; the wake word alone in the window; no window after
+  `listen_after`; timeout (`follow_up_timeout`, `IDLE` at once, no cue, no stop or re-arm,
+  not before `follow_up_seconds`, later speech needs the phrase on the same listen); a segment
+  with no request text, with no partial, a noise partial (no `wake`) and a partial `wake`;
+  a follow-up ending after the deadline; the wake word alone in the window (its
+  partial sends no `wake`); no window after
   `stop` or no audio; busy in the window and while capturing the follow-up, an announcement
-  taken after; disconnect in the window and during follow-up speech; disconnect during a
+  taken after; disconnect in the window and during follow-up speech (the deadline is
+  gone after the reconnect: phrase-less speech is no request, no late `follow_up_timeout`); disconnect during a
   `listen_after` speak; a chained second window.
 - Commands/API: `listen_after` passed through, non-bool refused, `follow_up_timeout` envelope,
   `playback_finished.listening_for_follow_up: true`.
@@ -82,4 +90,5 @@ until the P2 firmware. design.md §4.1 step 7 otherwise as written. Out of scope
 - [x] tools/speak_test.py `--listen-after`
 - [x] docs: design §4.1 step 7 and §6 (incl. PR #28 re-review N2), microphone-protocol.md,
       tasks README (T-019 merged, T-020 in review), T-019 plan status (N1)
+- [x] PR #29 review: S1 silent in-place ending, S2, N1, N2
 - [ ] hardware checklist (Maciej, voice-pe-02 and voice-pe-03)

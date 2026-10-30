@@ -1860,6 +1860,7 @@ async def _test_stop(announcement: bool, when: str) -> None:
         h.session.stop()
     await h.until(lambda: len(h.driver.starts()) == 2)
     assert asyncio.get_running_loop().time() - started < 0.5
+    await h.until(lambda: h.events[-1:] == [IDLE])  # the re-arm's status (PR #29 review N2)
     await h.stop()
     first = 2 if announcement else h.driver.without_ids().index(VisualState.PROCESSING) + 1
     played = h.driver.without_ids()[first:]
@@ -2366,12 +2367,17 @@ async def _test_announcement_listen_after() -> None:
     assert h.hub(TranscriptFinal) == [follow_up_final("Tak", "Tak.")]
 
 
-def test_no_speech_in_the_window_times_out_with_the_timeout_cue_and_rearms_idle() -> None:
+def test_no_speech_in_the_window_ends_it_silently_and_keeps_listening() -> None:
+    """The window expires in place, like a cancelled wake candidate: `follow_up_timeout`, the
+    IDLE visual at once, status idle, and the same listen goes on. No cue, no stop and re-arm
+    (PR #29 review S1): afterwards speech needs the wake phrase again."""
     asyncio.run(_test_follow_up_timeout())
 
 
 async def _test_follow_up_timeout() -> None:
     h = Harness(reply_timeout=10, follow_up=0.2)
+    h.stt.say("u2", "Tak.", ("Tak",))
+    h.stt.say("u3", "Ryszardzie, światło.", ("Ryszardzie",))
     times: dict[str, float] = {}
 
     def react(event: HubEvent) -> None:
@@ -2380,50 +2386,51 @@ async def _test_follow_up_timeout() -> None:
 
     h.on_event = react
     await follow_up_window(h)
-    await h.until(lambda: len(h.driver.starts()) == 3)
     await h.until(lambda: h.events[-1:] == [IDLE])
-    await h.stop()
-    assert after_processing(h)[len(FOLLOW_UP) :] == [
-        ("stop", "follow_up_timeout"),
-        CueType.TIMEOUT,
-        VisualState.IDLE,
-        "start",
-    ]
+    assert after_processing(h)[len(FOLLOW_UP) :] == [VisualState.IDLE]  # no stop, no cue
     assert h.events[h.events.index(LISTENING, h.events.index(SPEAKING)) :] == [
         LISTENING,
         FollowUpTimeout("kitchen"),
         IDLE,
     ]
     assert times["FollowUpTimeout"] - times["SatelliteStatus"] >= 0.19  # follow_up_seconds
-    first, second, _ = h.driver.starts()
-    stops = [c for c in h.driver.commands if isinstance(c, StopListening)]
-    assert stops[-1].listen_id == second.listen_id != first.listen_id
-    assert not h.hub(Wake)[1:] and not h.hub(WakeCancelled)
+    # Still the window's listen: no phrase, no request; then an ordinary wake.
+    listen_id = h.driver.starts()[1].listen_id
+    h.driver.push(*segments("u2", "u3")(listen_id))
+    await h.until(lambda: len(h.hub(TranscriptFinal)) == 2)
+    await h.stop()
+    assert len(h.driver.starts()) == 2
+    assert h.hub(TranscriptFinal)[1] == TranscriptFinal(
+        "kitchen", "u3", "światło", "Ryszardzie, światło.", False, None, 40
+    )
+    assert h.hub(Wake)[1:] == [Wake("kitchen", "u3")]
+    assert not h.hub(WakeCancelled)
+    commands = h.driver.without_ids()
+    assert CueType.TIMEOUT not in commands and ("stop", "follow_up_timeout") not in commands
 
 
-@pytest.mark.parametrize("partial", [False, True])
-def test_a_segment_with_no_request_ends_the_window(partial: bool) -> None:
-    """Noise or music in the window (no letter or digit): the window ends as on a timeout, like
-    an empty request after the wake word alone. A `wake` a partial sent is cancelled first."""
-    asyncio.run(_test_empty_follow_up(partial))
+@pytest.mark.parametrize("partials", [(), ("♪",), ("Ta",)])
+def test_a_segment_with_no_request_ends_the_window(partials: tuple[str, ...]) -> None:
+    """Noise or music in the window (no letter or digit): the window ends as on a timeout,
+    silently and still listening. A partial with no request text sends no `wake`; a `wake` a
+    partial sent is cancelled first."""
+    asyncio.run(_test_empty_follow_up(partials))
 
 
-async def _test_empty_follow_up(partial: bool) -> None:
+async def _test_empty_follow_up(partials: tuple[str, ...]) -> None:
+    partial = partials == ("Ta",)  # the one with request text
     h = Harness(reply_timeout=10)
-    h.stt.say("u2", "♪", ("Ta",) if partial else ())
+    h.stt.say("u2", "♪", partials)
     await follow_up_window(h)
     h.driver.push(*segments("u2")(h.driver.starts()[1].listen_id))
-    await h.until(lambda: len(h.driver.starts()) == 3)
+    await h.until(lambda: bool(h.hub(FollowUpTimeout)))
     await h.until(lambda: h.events[-1:] == [IDLE])
+    await asyncio.sleep(0.01)
     await h.stop()
     reset = [("reset", "u2")] if partial else []
-    assert after_processing(h)[len(FOLLOW_UP) :] == [
-        *reset,
-        ("stop", "follow_up_timeout"),
-        CueType.TIMEOUT,
-        VisualState.IDLE,
-        "start",
-    ]
+    assert after_processing(h)[len(FOLLOW_UP) :] == [*reset, VisualState.IDLE]
+    assert len(h.driver.starts()) == 2  # no re-arm: the mic stays on
+    assert CueType.TIMEOUT not in h.driver.without_ids()
     woke = [Wake("kitchen", "u2"), TranscriptPartial("kitchen", "u2", "Ta")] if partial else []
     cancelled = [WakeCancelled("kitchen", "u2")] if partial else []
     assert h.events[h.events.index(LISTENING, h.events.index(SPEAKING)) :] == [
@@ -2462,7 +2469,7 @@ def test_the_wake_word_alone_in_the_window_is_an_ordinary_wake() -> None:
 
 async def _test_wake_word_alone_in_the_window() -> None:
     h = Harness(reply_timeout=10)
-    h.stt.say("u2", "Ryszardzie.", ())
+    h.stt.say("u2", "Ryszardzie.", ("Ryszardzie",))  # a partial with no request text: no wake
     h.stt.say("u3", "Która godzina?", ())
     await follow_up_window(h)
     h.driver.push(*segments("u2", "u3")(h.driver.starts()[1].listen_id))
@@ -2471,6 +2478,19 @@ async def _test_wake_word_alone_in_the_window() -> None:
     assert h.hub(TranscriptFinal)[1] == TranscriptFinal(
         "kitchen", "u2", "Która godzina", "Ryszardzie. Która godzina?", False, None, 80
     )
+    assert h.events[h.events.index(LISTENING, h.events.index(SPEAKING)) :] == [
+        LISTENING,
+        Wake("kitchen", "u2"),
+        PROCESSING,
+        h.hub(TranscriptFinal)[1],
+    ]
+    # The wake (and its LISTENING) came from the final, the wake word alone, not the partial.
+    assert after_processing(h)[len(FOLLOW_UP) :] == [
+        VisualState.LISTENING,
+        ("stop", "accepted"),
+        CueType.UTTERANCE_ACCEPTED,
+        VisualState.PROCESSING,
+    ]
     assert not h.hub(FollowUpTimeout) and not h.hub(WakeCancelled)
 
 
@@ -2529,7 +2549,7 @@ async def _test_busy_in_the_window() -> None:
     await h.until(lambda: h.events[-1:] == [IDLE])
     await asyncio.sleep(0.01)  # into the idle wait
     playback_id = h.session.speak("Obiad gotowy.", 0.5)  # an announcement again
-    await h.until(lambda: len(h.driver.starts()) == 4)
+    await h.until(lambda: len(h.driver.starts()) == 3)
     await h.stop()
     assert h.hub(FollowUpTimeout) == [FollowUpTimeout("kitchen")]
     assert h.hub(PlaybackFinished)[-1] == PlaybackFinished("kitchen", playback_id, False)
@@ -2542,8 +2562,9 @@ def test_a_disconnect_in_the_window_ends_it_without_follow_up_timeout(when: str)
 
 
 async def _test_disconnect_in_the_window(when: str) -> None:
-    h = Harness(reply_timeout=10)
+    h = Harness(reply_timeout=10, follow_up=0.2)
     h.stt.say("u2", "Tak, poproszę.", ("Tak",))
+    h.stt.say("u3", "Tak.", ("Tak",))
     await follow_up_window(h)
     listen_id = h.driver.starts()[1].listen_id
     if when == "follow-up-speech":
@@ -2552,7 +2573,13 @@ async def _test_disconnect_in_the_window(when: str) -> None:
     h.driver.push(MicrophoneUnavailable("connection lost"))
     await h.until(lambda: len(h.driver.starts()) == 3)
     await h.until(lambda: h.events[-1:] == [IDLE])
+    # The window's deadline went with the disconnect (PR #29 review S2): speech without the
+    # phrase is no request, and nothing expires later.
+    h.driver.push(*segments("u3")(h.driver.starts()[2].listen_id))
+    await h.until(lambda: "u3" in h.stt.sessions and h.stt.sessions["u3"][1].closed)
+    await asyncio.sleep(0.3)  # past where the window would have ended
     await h.stop()
+    assert len(h.hub(TranscriptFinal)) == 1
     woke: list[HubEvent] = []
     if when == "follow-up-speech":
         woke = [Wake("kitchen", "u2"), TranscriptPartial("kitchen", "u2", "Tak")]
@@ -2609,11 +2636,5 @@ async def _test_follow_up_chain() -> None:
     await h.until(lambda: h.events[-1:] == [IDLE])
     await h.stop()
     assert h.hub(PlaybackFinished)[-1] == PlaybackFinished("kitchen", second, True)
-    assert h.driver.without_ids()[-6:] == [
-        VisualState.LISTENING,
-        "start",
-        ("stop", "follow_up_timeout"),
-        CueType.TIMEOUT,
-        VisualState.IDLE,
-        "start",
-    ]
+    assert h.driver.without_ids()[-3:] == [VisualState.LISTENING, "start", VisualState.IDLE]
+    assert CueType.TIMEOUT not in h.driver.without_ids()
