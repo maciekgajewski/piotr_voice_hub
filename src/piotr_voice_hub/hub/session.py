@@ -746,8 +746,10 @@ class SatelliteSession:
     async def _play_url(self, request: _Play, *, announcement: bool) -> None:
         """`PlaybackUrl`, then the driver's `PlaybackFinished` (T-021). The satellite fetches
         the URL itself; one it cannot play still ends in `PlaybackFinished` (the driver logs
-        it), so the hub cannot tell it from a short sound: no timeout cue, and `listen_after`
-        opens the window as after any playback that was not stopped. `stop()` sends
+        it). The protocol has no reason, so the session treats it as played: no timeout cue (a
+        failed reply is the accepted cue, then silence), and `listen_after` opens the window as
+        after any playback that was not stopped. A give-up here closes the driver, which stops
+        the device's player (review B). `stop()` sends
         `PlaybackStop`, or, before the URL went out, nothing at all."""
         playback_id = request.playback_id
         self._status(True, SatelliteState.SPEAKING)

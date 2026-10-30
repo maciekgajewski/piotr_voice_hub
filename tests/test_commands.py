@@ -102,6 +102,17 @@ def test_play_is_acked_with_its_playback_id_and_passes_the_url_unchanged(url: st
     assert session.calls == [("play", url, False), ("play", url, True)]
 
 
+def test_play_takes_a_url_of_exactly_2048_characters_and_refuses_2049() -> None:
+    """Review N7: the limit is inclusive."""
+    commands, session = router()
+    url = "http://h/" + "a" * (2048 - len("http://h/"))
+    assert len(url) == 2048
+    assert commands.handle(command("play", data={"url": url}))["type"] == "ack"
+    reply = commands.handle(command("play", data={"url": url + "a"}))
+    assert reply["type"] == "error" and reply["data"]["code"] == "bad_request"
+    assert session.calls == [("play", url, False)]
+
+
 @pytest.mark.parametrize("kind", ["release", "stop"])
 def test_release_and_stop_are_acked_with_empty_data(kind: str) -> None:
     commands, session = router()

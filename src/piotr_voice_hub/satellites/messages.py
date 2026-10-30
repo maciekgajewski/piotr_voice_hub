@@ -4,7 +4,7 @@ Copied from piotr_the_ai_server ai_server/microphones/messages.py @ a299643, tri
 continuous (open-mic) listening mode, the only mode the hub uses.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 
@@ -76,10 +76,12 @@ class PlaybackEnd:
 @dataclass(frozen=True)
 class PlaybackUrl:
     """Play a consumer's URL on the device (T-021): the device fetches it itself. No chunks or
-    `PlaybackEnd` follow; it ends with one PlaybackFinished, `PlaybackStop` stops it."""
+    `PlaybackEnd` follow; it ends with one PlaybackFinished, `PlaybackStop` stops it. The URL
+    is left out of the repr (it may carry a token): DEBUG lines and assertion texts show only
+    the id (PR #30 review N5)."""
 
     playback_id: str
-    url: str
+    url: str = field(repr=False)
 
 
 @dataclass(frozen=True)

@@ -28,6 +28,7 @@ from piotr_voice_hub.satellites.messages import (
     PlaybackUrl,
     PlayCue,
     SetVisualState,
+    StartListening,
     VisualState,
 )
 from piotr_voice_hub.satellites.protocol import MicrophoneProtocolState
@@ -1082,7 +1083,9 @@ def test_a_url_is_sent_as_an_announcement_and_finishes_when_the_player_is_idle_a
     run(scenario)
 
 
-def test_a_url_whose_playing_update_is_merged_into_idle_finishes_after_the_floor() -> None:
+def test_a_url_whose_playing_update_is_merged_into_idle_finishes_after_the_floor(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     async def scenario() -> None:
         mic, client = await url_player()
         started = time.monotonic()
@@ -1092,7 +1095,10 @@ def test_a_url_whose_playing_update_is_merged_into_idle_finishes_after_the_floor
         elapsed = time.monotonic() - started
         assert esphome.CUE_MIN_SECONDS <= elapsed < esphome.CUE_MIN_SECONDS + 0.3
 
-    run(scenario)
+    with caplog.at_level(logging.INFO):
+        run(scenario)
+    # Also how a failed fetch may look on hardware (review S1): the seconds show it.
+    assert "playback finished playback_id=pb-1 (url) after 0.5 s" in caplog.text
 
 
 def test_a_url_the_device_never_plays_still_finishes_once_with_a_warning(
@@ -1186,7 +1192,9 @@ def test_a_url_is_sent_only_once_the_player_stops_announcing_a_cue() -> None:
     run(scenario)
 
 
-def test_a_disconnect_while_a_url_plays_is_unavailable_with_no_playback_finished() -> None:
+def test_a_disconnect_while_a_url_plays_is_unavailable_with_no_playback_finished(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     async def scenario() -> None:
         mic, client = await url_player()
         await mic.send_output_event(PlaybackUrl("pb-1", URL))
@@ -1198,7 +1206,9 @@ def test_a_disconnect_while_a_url_plays_is_unavailable_with_no_playback_finished
         queued = list(mic.driver._events._queue)  # type: ignore[attr-defined]
         assert not [event for event in queued if isinstance(event, PlaybackFinished)]
 
-    run(scenario)
+    with caplog.at_level(logging.DEBUG):
+        run(scenario)
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]  # no drain traceback
 
 
 def test_a_failed_url_command_makes_the_driver_unavailable() -> None:
@@ -1231,5 +1241,194 @@ def test_the_url_log_line_leaves_out_credentials_query_and_fragment(
     with caplog.at_level(logging.DEBUG):
         run(scenario)
     assert "consumer url=https://media.example:8443/a/b.mp3" in caplog.text
-    info = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
-    assert not any("hunter2" in line for line in info)
+    assert "command PlaybackUrl(playback_id='pb-1')" in caplog.text  # DEBUG too (review N5)
+    assert "hunter2" not in caplog.text
+    assert "hunter2" not in repr(PlaybackUrl("pb-1", secret))  # nor in assertion texts
+
+
+def test_at_the_end_bound_the_url_finishes_only_once_the_stop_has_taken_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review N7: PlaybackFinished (and so the re-arm) waits for the player to go idle after
+    the STOP, bounded."""
+    monkeypatch.setattr(esphome, "URL_MAX_SECONDS", 0.3)
+
+    async def scenario() -> None:
+        mic, client = await url_player()  # no url_states: the STOP's IDLE comes late here
+        await mic.send_output_event(PlaybackUrl("pb-1", URL))
+        await client.player(MediaPlayerState.PLAYING)
+        while STOP not in client.media_commands:  # bounded by run()
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.3)
+        assert mic.driver._events.empty()  # still busy: not finished yet
+        stopped_at = time.monotonic()
+        await client.player(MediaPlayerState.IDLE)
+        assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+        assert time.monotonic() - stopped_at < 0.2
+
+    run(scenario)
+
+
+# Review B: a URL is not ended by the driver forgetting it, unlike the hub's own stream
+
+
+def test_close_during_a_url_stops_the_player() -> None:
+    async def scenario() -> None:
+        mic, client = await url_player()
+        await mic.send_output_event(PlaybackUrl("pb-1", URL))
+        await client.player(MediaPlayerState.PLAYING)
+        await mic.close()  # the session's recovery, its give-up, or the hub's shutdown
+        assert client.media_commands == [URL_SENT, STOP]
+        assert client.disconnects == 1
+        await asyncio.sleep(0.7)
+        assert mic.driver._events.empty()  # no PlaybackFinished after close
+
+    run(scenario)
+
+
+def test_close_with_no_url_playing_sends_no_stop() -> None:
+    async def scenario() -> None:
+        mic, client = await url_player()
+        await mic.send_output_event(PlaybackUrl("pb-1", URL))
+        await client.player(MediaPlayerState.IDLE)
+        assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+        await mic.close()
+        assert client.media_commands == [URL_SENT]
+
+    run(scenario)
+
+
+def test_close_survives_a_failing_stop_and_still_disconnects(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        mic, client = await url_player()
+        await mic.send_output_event(PlaybackUrl("pb-1", URL))
+
+        def broken(key: int, **kwargs: object) -> None:
+            raise OSError("socket closed")
+
+        client.media_player_command = broken  # type: ignore[method-assign]
+        await mic.close()
+        assert client.disconnects == 1 and mic.driver._playback is None
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
+    assert "close: stopping playback pb-1 failed" in caplog.text
+
+
+def test_a_player_busy_at_connect_is_stopped_before_the_first_arm(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A play that outlived a lost connection, a driver failure or a hub restart."""
+
+    async def scenario() -> None:
+        mic, clients = make()
+
+        def busy(client: FakeClient) -> None:
+            client.initial_state = MediaPlayerState.PLAYING
+            client.url_states = True  # IDLE after the STOP
+
+        clients.setup = busy
+        await arm(mic)  # connects first
+        client = clients.last
+        assert client.media_commands == [STOP]
+        assert [name for name, _ in client.timeline] == ["PLAYING", "IDLE"]
+        assert client.calls == ["start_open_mic_listening"]
+
+    with caplog.at_level(logging.INFO):
+        run(scenario)
+    assert "the media player is PLAYING at connect" in caplog.text
+    assert "stopped the media player at connect" in caplog.text
+
+
+def test_the_arm_waits_for_the_stop_at_connect_bounded(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(esphome, "PLAYER_FREE_TIMEOUT_SECONDS", 0.3)
+
+    async def scenario() -> None:
+        mic, clients = make()
+        clients.setup = lambda client: setattr(client, "initial_state", MediaPlayerState.PLAYING)
+        started = time.monotonic()
+        arming = asyncio.create_task(arm(mic))
+        while not clients.made or clients.last.media_commands != [STOP]:  # bounded by run()
+            await asyncio.sleep(0.01)
+        assert clients.last.calls == []  # not armed while the player is still busy
+        await arming
+        assert time.monotonic() - started >= 0.3
+        assert clients.last.calls == ["start_open_mic_listening"]
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
+    assert "still busy 0.3 s after the stop at connect; going on" in caplog.text
+
+
+def test_an_idle_player_at_connect_is_left_alone() -> None:
+    async def scenario() -> None:
+        mic, clients = make()
+        await arm(mic)
+        assert clients.last.media_commands == []
+
+    run(scenario)
+
+
+def test_no_player_state_at_connect_is_a_warning_and_goes_on(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(esphome, "PLAYER_FREE_TIMEOUT_SECONDS", 0.2)
+
+    async def scenario() -> None:
+        mic, clients = make()
+        clients.setup = lambda client: setattr(client, "initial_state", None)
+        await arm(mic)
+        assert clients.last.media_commands == []
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
+    assert "no media player state within 0.2 s of connecting" in caplog.text
+
+
+def test_a_failed_stop_at_connect_makes_the_driver_unavailable() -> None:
+    async def scenario() -> None:
+        mic, clients = make()
+
+        def busy_and_broken(client: FakeClient) -> None:
+            client.initial_state = MediaPlayerState.PLAYING
+
+            def broken(key: int, **kwargs: object) -> None:
+                raise OSError("socket closed")
+
+            client.media_player_command = broken  # type: ignore[method-assign]
+
+        clients.setup = busy_and_broken
+        with pytest.raises(MicrophoneUnavailable, match="media player stop failed"):
+            await mic.driver.send_output_event(SetVisualState(VisualState.IDLE))
+        assert clients.last.disconnects == 1
+
+    run(scenario)
+
+
+def test_a_command_during_the_check_at_connect_waits_for_it() -> None:
+    """The reader and a command may both connect first: neither uses the device before the
+    stray play is stopped, and there is one connection."""
+
+    async def scenario() -> None:
+        mic, clients = make()
+
+        def busy(client: FakeClient) -> None:
+            client.initial_state = MediaPlayerState.PLAYING
+
+        clients.setup = busy
+        reader = asyncio.create_task(mic.driver.wait_for_event())
+        while not clients.made or clients.last.media_commands != [STOP]:  # bounded by run()
+            await asyncio.sleep(0.01)
+        command = asyncio.create_task(mic.send_output_event(StartListening("listen-1")))
+        await asyncio.sleep(0.2)
+        assert clients.last.calls == [] and not command.done()
+        await clients.last.player(MediaPlayerState.IDLE)
+        await command
+        assert len(clients.made) == 1 and clients.last.calls == ["start_open_mic_listening"]
+        reader.cancel()
+
+    run(scenario)

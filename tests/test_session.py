@@ -25,6 +25,7 @@ from piotr_voice_hub.hub.events import (
     WakeCancelled,
 )
 from piotr_voice_hub.hub.session import SatelliteSession
+from piotr_voice_hub.satellites import esphome
 from piotr_voice_hub.satellites.interfaces import MicrophoneUnavailable
 from piotr_voice_hub.satellites.messages import (
     AudioChunk,
@@ -2822,6 +2823,19 @@ async def _test_play_after_the_reply_timeout() -> None:
     await h.until(lambda: h.events[-1:] == [IDLE])
     await h.stop()
     assert not h.hub(PlaybackFinished)
+
+
+def test_the_session_bound_on_a_play_is_above_the_drivers_own_worst_case() -> None:
+    """Review N7: the driver ends every URL itself (free wait, start bound, floor, end bound,
+    the wait after its STOP); the session's bound only catches a stalled driver."""
+    driver_worst = (
+        esphome.PLAYER_FREE_TIMEOUT_SECONDS
+        + esphome.URL_START_TIMEOUT_SECONDS
+        + esphome.CUE_MIN_SECONDS
+        + esphome.URL_MAX_SECONDS
+        + esphome.PLAYER_FREE_TIMEOUT_SECONDS
+    )
+    assert session_module.PLAY_URL_FINISHED_SECONDS > driver_worst + 60
 
 
 def test_a_play_that_never_finishes_recovers_and_still_finishes(

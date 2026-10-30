@@ -25,10 +25,16 @@ drain has already emitted it, it does nothing.
 announcement, once the player is free (as for a stream); the device fetches it itself, so the
 hub's playback server is not involved. Its end comes from the media player's state, as for a
 cue: a change after the call, at least `CUE_MIN_SECONDS` after it, then not busy. A URL the
-device cannot fetch or play is the consumer's mistake, not the satellite's: no change within
-`URL_START_TIMEOUT_SECONDS` is a WARNING and still one `PlaybackFinished`. A playback still
-busy after `URL_MAX_SECONDS` (an endless stream) is stopped like `PlaybackStop`, then
-`PlaybackFinished`.
+device cannot fetch or play is the consumer's mistake, not the satellite's, and ends in one
+`PlaybackFinished` either way, by one of two paths: the firmware may announce, fail the fetch
+and go idle again, which looks like a very short sound (the INFO `playback finished` line, its
+seconds near `CUE_MIN_SECONDS`), or report no change within `URL_START_TIMEOUT_SECONDS` (a
+WARNING; a slow https start may land here too, and then plays after the hub has moved on). A
+playback still busy after `URL_MAX_SECONDS` (an endless stream) is stopped like `PlaybackStop`,
+then `PlaybackFinished`. Unlike the hub's stream, a URL does not end when the driver forgets it,
+so `close()` sends the player `STOP` for a URL still playing, and every connect stops a player
+that is busy before anything else uses the device (PR #30 review B: a play that outlived a lost
+connection, a driver failure or a hub restart; nothing else plays media on these satellites).
 
 Cues: a cue service that declares `supports_response` (firmware, P2: status mode with an
 explicit `api.respond`) is called with a response, so `CueFinished` means the cue has played.
@@ -147,8 +153,8 @@ STREAM_REQUEST_TIMEOUT_SECONDS = 5.0
 STREAM_DONE_EXTRA_SECONDS = 30.0
 PLAYBACK_DRAIN_GRACE_SECONDS = 0.2
 # A consumer's URL (T-021): the player must report a change within this of the call (like the
-# fetch bound above); a URL it never starts (not fetchable, a format it cannot play) still
-# ends in one PlaybackFinished, with a WARNING.
+# fetch bound above); a URL it never starts still ends in one PlaybackFinished, with a WARNING.
+# A failed fetch may instead announce and go idle at once: a ~0.5 s "playback" at INFO.
 URL_START_TIMEOUT_SECONDS = 5.0
 # ... and is stopped if still busy after this: bounds an endless stream (a radio URL).
 URL_MAX_SECONDS = 600.0
@@ -330,7 +336,8 @@ class EsphomeSatellite:
         )
         self._readers = 0  # tasks blocked in wait_for_event()
         self._connect_lock = asyncio.Lock()
-        self._client: EsphomeClient | None = None  # published only once fully connected
+        self._client: EsphomeClient | None = None  # published once connected and subscribed
+        self._ready = False  # ... and set once a stray play is stopped: callers may use it
         self._unsubscribe: Callable[[], None] | None = None
         self._services: dict[str, Any] = {}
         self._media_player_key: int | None = None
@@ -412,6 +419,16 @@ class EsphomeSatellite:
         if self._stale_stop is not None:
             self._stale_stop.cancel()
             self._stale_stop = None
+        playback, key, client = self._playback, self._media_player_key, self._client
+        if playback is not None and playback.stream is None and key is not None and client:
+            # A URL plays on without the hub (review B); a stream ends with its released GET.
+            try:
+                client.media_player_command(key, command=MediaPlayerCommand.STOP, announcement=True)
+                self._logger.info("close: stopped playback %s (url)", playback.playback_id)
+            except EXPECTED_ERRORS as error:  # best effort: the next connect checks again
+                self._logger.warning(
+                    "close: stopping playback %s failed: %r", playback.playback_id, error
+                )
         self._release_playback()
         await self._drop_client()
         self._unavailable = None
@@ -427,9 +444,9 @@ class EsphomeSatellite:
     # Connection
 
     async def _ensure_connected(self) -> None:
-        if self._unavailable is None and self._client is None:
+        if self._unavailable is None and not self._ready:
             async with self._connect_lock:  # the reader and a command may both connect first
-                if self._unavailable is None and self._client is None:
+                if self._unavailable is None and not self._ready:
                     await self._connect()
         if self._unavailable is not None:
             raise MicrophoneUnavailable(self._unavailable)
@@ -491,8 +508,47 @@ class EsphomeSatellite:
         )
         if self._media_player_key is not None:
             client.subscribe_states(partial(self._on_state, client))
-        self._client = client  # last: no caller ever sees a half-connected client
+        self._client = client  # published before the stray-play check: its states count
         self._logger.info("connected to %s", self._address())
+        if self._media_player_key is not None:
+            try:
+                await self._stop_stray_player(client, self._media_player_key)
+            except asyncio.CancelledError:
+                await self._drop_client()  # never leave a half-checked connection behind
+                raise
+        self._ready = True  # last: nothing uses the device before the check
+
+    async def _stop_stray_player(self, client: EsphomeClient, key: int) -> None:
+        """Stop the media player if it is busy at connect, before the first arm (review B): a
+        consumer's URL that outlived a lost connection, a driver failure or a hub restart
+        (nothing else plays media here). Bounded; it still going on is a WARNING."""
+        if not await self._wait_player(
+            lambda: self._player_state is not None, PLAYER_FREE_TIMEOUT_SECONDS
+        ):
+            self._logger.warning(
+                "no media player state within %g s of connecting; not checked for a stray play",
+                PLAYER_FREE_TIMEOUT_SECONDS,
+            )
+            return
+        if self._player_free():
+            return
+        state = getattr(self._player_state, "name", self._player_state)
+        self._logger.warning(
+            "the media player is %s at connect (a play that outlived a lost connection or a "
+            "hub restart?); stopping it",
+            state,
+        )
+        try:
+            client.media_player_command(key, command=MediaPlayerCommand.STOP, announcement=True)
+        except EXPECTED_ERRORS as error:
+            raise await self._lose_transport(f"media player stop failed: {error!r}") from error
+        if await self._wait_player(self._player_free, PLAYER_FREE_TIMEOUT_SECONDS):
+            self._logger.info("stopped the media player at connect")
+        else:
+            self._logger.warning(
+                "the media player is still busy %g s after the stop at connect; going on",
+                PLAYER_FREE_TIMEOUT_SECONDS,
+            )
 
     def _on_state(self, client: EsphomeClient, state: Any) -> None:
         if client is not self._client or not isinstance(state, MediaPlayerEntityState):
@@ -532,11 +588,13 @@ class EsphomeSatellite:
             return  # an old, already replaced connection
         self._client = None
         self._unsubscribe = None
+        self._ready = False
         self._fail(f"ESPHome transport stopped (expected={expected_disconnect})")
 
     async def _drop_client(self) -> None:
         client, unsubscribe = self._client, self._unsubscribe
         self._client, self._unsubscribe, self._services = None, None, {}
+        self._ready = False
         self._media_player_key = None
         self._player_state = None
         if unsubscribe is not None:
@@ -870,9 +928,7 @@ class EsphomeSatellite:
             else:
                 await self._drain_stream(playback, playback.stream)
         except asyncio.CancelledError:
-            raise
-        except MicrophoneUnavailable:
-            return  # failed meanwhile (_wait_player); the reader gets the failure
+            raise  # also how a failure ends it: _fail() releases the playback, cancelling this
         except Exception as error:  # a bug: re-raised from wait_for_event(), never lost
             self._logger.error(
                 "playback %s drain failed: %s", playback.playback_id, traceback.format_exc()
@@ -952,7 +1008,11 @@ class EsphomeSatellite:
                     return
                 # Still the current playback: a close() or PlaybackStop meanwhile cancels this.
                 await self._wait_player(self._player_free, PLAYER_FREE_TIMEOUT_SECONDS)
-        self._logger.info("playback finished playback_id=%s (url)", playback_id)
+        self._logger.info(
+            "playback finished playback_id=%s (url) after %.1f s",
+            playback_id,
+            asyncio.get_running_loop().time() - playback.called_at,
+        )
         self._release_playback()
         self._emit(PlaybackFinished(playback_id))
 
