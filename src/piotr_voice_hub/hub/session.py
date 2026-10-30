@@ -439,10 +439,12 @@ class SatelliteSession:
             await self._expect(ListeningStopped(listen_id, "accepted"))
             await self._play_cue(CueType.UTTERANCE_ACCEPTED)
             await self._command(SetVisualState(VisualState.PROCESSING))
-            self._status(True, SatelliteState.PROCESSING)
             match = await hint  # bounded by the speaker timeout; None on a service failure
         finally:
             hint.cancel()  # no-op once done; on a satellite failure the hint is dropped
+        # The status and transcript_final back to back, with no await between them or before
+        # the reply wait: `processing` means a speak or release is taken (PR #27 review S2).
+        self._status(True, SatelliteState.PROCESSING)
         self._open_wake = None
         self._emit(
             TranscriptFinal(

@@ -128,6 +128,18 @@ def test_below_the_threshold_is_no_match(server: SpeakerServer, embed: FakeEmbed
     assert answer["profile"] == absolute(server, "maciek.npz")
 
 
+def test_a_score_exactly_at_the_threshold_is_recognized(tmp_path: Path) -> None:
+    """At or above the threshold, as before (PR #27 review N3)."""
+    profiles = {"Maciek": (tmp_path / "maciek.npz", service.normalize(np.array([1.0, 0.0])))}
+    embedding = np.array([0.6, 0.8], dtype=np.float32)
+    _, answer = service.recognize(embedding, profiles, 0.0)
+    score = answer["score"]
+    name, at = service.recognize(embedding, profiles, score)
+    assert (name, at["recognized_user"], at["confidence"]) == ("Maciek", "Maciek", 0.5)
+    _, below = service.recognize(embedding, profiles, float(np.nextafter(score, 1.0)))
+    assert below["recognized_user"] is None  # the score just under a higher threshold
+
+
 @pytest.mark.parametrize(
     ("score", "confidence"),
     [(-0.3, 0.0), (0.0, 0.0), (0.225, 0.25), (0.45, 0.5), (0.725, 0.75), (1.0, 1.0)],
@@ -184,9 +196,14 @@ def test_the_audio_length_is_bounded(server: SpeakerServer, embed: FakeEmbed) ->
     assert not embed.inputs
 
 
-def test_content_length_is_required(server: SpeakerServer) -> None:
+@pytest.mark.parametrize("length", [None, "\u00b2", "-1", "1e3"])
+def test_content_length_is_required_as_ascii_digits(
+    server: SpeakerServer, length: str | None
+) -> None:
     connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
     connection.putrequest("POST", "/recognize-stream")
+    if length is not None:
+        connection.putheader("Content-Length", length)  # '²' passes str.isdigit() (B1)
     connection.endheaders()
     response = connection.getresponse()
     assert response.status == 400 and b"Content-Length is required" in response.read()

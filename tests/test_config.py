@@ -59,9 +59,7 @@ def test_example_config_matches_design() -> None:
     assert config.stt.model == "large-v3-turbo"
     assert config.stt.partial.interval_seconds == 0.75
     assert config.speaker_recognition.url == "http://127.0.0.1:2141"
-    assert config.speaker_recognition.profiles == {
-        "Maciek": "/profiles/maciek/profile/speaker_profile.npz"
-    }
+    assert config.speaker_recognition.profiles == {"Maciek": "/profiles/maciek.npz"}
     assert config.tts.voice == "pl_PL-bass-high"
 
 

@@ -1668,8 +1668,9 @@ async def _test_transcript_final_waits_for_a_slow_hint() -> None:
     h.stt.say("u1", "Ryszardzie, światło")
     h.driver.after_arm[0] = segments("u1")
     h.start()
-    await h.until(lambda: PROCESSING in h.events)
-    assert not h.hub(TranscriptFinal)  # the PROCESSING visual is up, the hint is not back
+    await h.until(lambda: VisualState.PROCESSING in h.driver.without_ids())
+    # The PROCESSING visual is up, the hint is not back: no status, no transcript_final yet.
+    assert not h.hub(TranscriptFinal) and PROCESSING not in h.events
     await h.until(lambda: bool(h.hub(TranscriptFinal)))
     await h.stop()
     final = h.hub(TranscriptFinal)[0]
@@ -1795,7 +1796,29 @@ async def _test_cancelling_the_session_while_waiting_for_the_hint() -> None:
     h.stt.say("u1", "Ryszardzie, światło")
     h.driver.after_arm[0] = segments("u1")
     h.start()
-    await h.until(lambda: PROCESSING in h.events)
+    await h.until(lambda: VisualState.PROCESSING in h.driver.without_ids())
     await h.stop()
     assert h.speaker.cancelled == 1
     assert not h.hub(TranscriptFinal)
+
+
+def test_status_processing_comes_with_transcript_final_so_a_reply_is_taken() -> None:
+    """PR #27 review S2: a consumer that answers `processing` at once is not told BUSY, also
+    when the hint is slow."""
+    asyncio.run(_test_status_processing_comes_with_transcript_final())
+
+
+async def _test_status_processing_comes_with_transcript_final() -> None:
+    h = Harness(reply_timeout=10)
+    h.speaker.delay = 0.1
+    h.stt.say("u1", "Ryszardzie, światło")
+    h.driver.after_arm[0] = segments("u1")
+    h.start()
+    await h.until(lambda: PROCESSING in h.events)
+    h.session.release()  # would raise CommandError(BUSY) in the hint's wait
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    final = h.hub(TranscriptFinal)
+    assert len(final) == 1
+    assert h.events.index(final[0]) == h.events.index(PROCESSING) + 1
+    assert CueType.TIMEOUT not in h.driver.without_ids()  # released, not timed out

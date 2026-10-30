@@ -21,7 +21,7 @@ stt: {model: large-v3-turbo, device: cuda, compute_type: float16, beam_size: 5,
 speaker_recognition:
   url: http://127.0.0.1:2141
   timeout_seconds: 1.0
-  profiles: {Maciek: /profiles/maciek/profile/speaker_profile.npz}
+  profiles: {Maciek: /profiles/maciek.npz}
 
 # Our Piper service (T-015, compose service `piper`); the old project's Piper keeps 10200.
 tts: {uri: tcp://127.0.0.1:10201, voice: pl_PL-bass-high}

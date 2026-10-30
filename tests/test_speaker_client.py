@@ -125,6 +125,19 @@ def test_no_match_is_none() -> None:
         (b"SSH-2.0-OpenSSH\r\n\r\n", "not an HTTP answer"),
         (b"", "incomplete HTTP answer (0 bytes)"),
         (http("200 OK", b" " * (client_module.MAX_RESPONSE_BYTES + 1)), "answer over"),
+        # PR #27 review B1: these escaped recognize() as exceptions and stopped the hub.
+        (http("200 OK", json.dumps(dict(OK, score=10**400)).encode()), "bad score"),  # Overflow
+        (  # over the int string limit (4300 digits): ValueError, not a JSONDecodeError
+            http(
+                "200 OK",
+                json.dumps(dict(OK, score=0))
+                .replace('"score": 0', '"score": ' + "1" * 4301)
+                .encode(),
+            ),
+            "answer is not JSON",
+        ),
+        (http("200 OK", b"[" * 60000), "answer is not JSON"),  # RecursionError
+        (b"HTTP/1.1 200 OK\r\nContent-Length: \xb2\r\n\r\n{}", "bad Content-Length"),  # '²'
     ],
 )
 def test_a_bad_answer_is_none_and_one_warning(
@@ -134,6 +147,23 @@ def test_a_bad_answer_is_none_and_one_warning(
     [record] = [r for r in caplog.records if r.name == client_module.__name__ and r.levelno >= 30]
     assert record.levelno == logging.WARNING
     assert message in record.getMessage() and record.getMessage().endswith("; hint is null")
+
+
+def test_any_other_failure_is_none_and_one_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The final catch-all (PR #27 review B1): an unforeseen error is still only a null hint."""
+
+    def broken(body: bytes) -> object:
+        raise KeyError("unforeseen")
+
+    monkeypatch.setattr(client_module, "parse_result", broken)
+    assert asyncio.run(recognize_with(FakeService())) is None
+    [record] = [r for r in caplog.records if r.name == client_module.__name__ and r.levelno >= 30]
+    assert record.levelno == logging.WARNING
+    assert record.getMessage() == (
+        "speaker utt_1: recognition failed unexpectedly: KeyError('unforeseen'); hint is null"
+    )
 
 
 def test_a_slow_service_is_none_within_the_timeout(caplog: pytest.LogCaptureFixture) -> None:

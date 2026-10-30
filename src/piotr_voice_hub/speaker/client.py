@@ -12,7 +12,9 @@ Changes from the old client:
 - The whole request (connect, send, answer) is bounded by `timeout_seconds` (design §7); the
   old session bounded only its wait for the result, by the same 1 s.
 - It never raises for a service failure: the speaker is a hint. A refused connect, a timeout,
-  an HTTP error or a malformed answer is one WARNING and None.
+  an HTTP error or a malformed answer is one WARNING and None. Anything else that goes wrong in
+  here is one WARNING and None too (PR #27 review B1: a malformed answer must not stop the
+  hub); only a cancellation passes through.
 """
 
 import asyncio
@@ -73,6 +75,11 @@ class HttpSpeakerRecognition:
         except (OSError, SpeakerRecognitionError) as error:
             _logger.warning("speaker %s: recognition failed: %s; hint is null", request_id, error)
             return None
+        except Exception as error:  # never CancelledError (a BaseException): that passes
+            _logger.warning(
+                "speaker %s: recognition failed unexpectedly: %r; hint is null", request_id, error
+            )
+            return None
         _logger.info(
             "speaker %s: %s (%s, %d ms of audio, %.0f ms)",
             request_id,
@@ -111,6 +118,11 @@ class HttpSpeakerRecognition:
         return parse_response(bytes(response))
 
 
+def is_ascii_digits(text: str) -> bool:
+    """Only 0-9: `str.isdigit()` also takes e.g. '²', which `int()` refuses (PR #27 B1)."""
+    return text.isascii() and text.isdigit()
+
+
 def parse_response(response: bytes) -> bytes:
     """The body of a complete HTTP/1.x 200 response; SpeakerRecognitionError otherwise."""
     head, separator, body = response.partition(b"\r\n\r\n")
@@ -118,7 +130,7 @@ def parse_response(response: bytes) -> bytes:
         raise SpeakerRecognitionError(f"incomplete HTTP answer ({len(response)} bytes)")
     status_line, *header_lines = head.decode("latin-1").split("\r\n")
     parts = status_line.split(" ", 2)
-    if len(parts) < 2 or not parts[0].startswith("HTTP/1.") or not parts[1].isdigit():
+    if len(parts) < 2 or not parts[0].startswith("HTTP/1.") or not is_ascii_digits(parts[1]):
         raise SpeakerRecognitionError(f"not an HTTP answer: {status_line[:80]!r}")
     headers: dict[str, str] = {}
     for line in header_lines:
@@ -127,7 +139,9 @@ def parse_response(response: bytes) -> bytes:
     if "chunked" in headers.get("transfer-encoding", "").lower():
         raise SpeakerRecognitionError("chunked answers are not supported")
     if (length := headers.get("content-length")) is not None:
-        if not length.isdigit() or len(body) < int(length):
+        if not is_ascii_digits(length):
+            raise SpeakerRecognitionError(f"bad Content-Length {length[:20]!r}")
+        if len(body) < int(length):
             raise SpeakerRecognitionError(f"truncated answer (Content-Length {length[:20]!r})")
         body = body[: int(length)]
     if parts[1] != "200":
@@ -140,8 +154,10 @@ def parse_result(body: bytes) -> tuple[SpeakerMatch | None, str]:
     """The match (None below the threshold) and a short summary for the log."""
     try:
         payload = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise SpeakerRecognitionError(f"answer is not JSON: {error}") from None
+    except (ValueError, RecursionError) as error:
+        # ValueError: JSONDecodeError, UnicodeDecodeError, and an integer over the int string
+        # limit (4300 digits). RecursionError: nesting too deep.
+        raise SpeakerRecognitionError(f"answer is not JSON: {type(error).__name__}") from None
     if not isinstance(payload, Mapping):
         raise SpeakerRecognitionError("answer is not a JSON object")
     user = payload.get("recognized_user")
@@ -151,8 +167,11 @@ def parse_result(body: bytes) -> tuple[SpeakerMatch | None, str]:
     for key in ("confidence", "score", "threshold"):
         value = payload.get(key)
         if isinstance(value, bool) or not isinstance(value, int | float):
-            raise SpeakerRecognitionError(f"bad {key} {value!r}")
-        numbers[key] = float(value)
+            raise SpeakerRecognitionError(f"bad {key} {str(value)[:20]!r}")
+        try:
+            numbers[key] = float(value)
+        except OverflowError:  # an integer too large for a float
+            raise SpeakerRecognitionError(f"bad {key}: too large") from None
     if not 0.0 <= numbers["confidence"] <= 1.0:
         raise SpeakerRecognitionError(f"confidence {numbers['confidence']} not in [0, 1]")
     details = f"score {numbers['score']:.3f}, threshold {numbers['threshold']:.3f}"

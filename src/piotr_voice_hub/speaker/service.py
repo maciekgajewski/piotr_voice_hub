@@ -170,7 +170,7 @@ class Handler(BaseHTTPRequestHandler):
         started = time.monotonic()
         server = self.server
         length = self.headers.get("Content-Length")
-        if length is None or not length.isdigit():
+        if length is None or not (length.isascii() and length.isdigit()):  # not '²' (B1)
             raise BadRequest("Content-Length is required")
         if int(length) > MAX_BODY_BYTES:
             raise BadRequest(f"over {MAX_AUDIO_SECONDS:g} s of audio")
