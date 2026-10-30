@@ -691,7 +691,8 @@ def test_a_cue_whose_announcing_update_is_merged_into_idle_still_finishes_at_onc
         clients.setup = lambda client: setattr(client, "cue_merged", True)
         started = time.monotonic()
         await mic.send_output_event(PlayCue("cue-1", CueType.UTTERANCE_ACCEPTED))
-        assert time.monotonic() - started < 0.5  # not the 1 s start bound
+        elapsed = time.monotonic() - started  # the floor, not the 1 s start bound
+        assert esphome.CUE_MIN_SECONDS <= elapsed < esphome.CUE_MIN_SECONDS + 0.3
         assert await mic.wait_for_event() == CueFinished("cue-1")
 
     with caplog.at_level(logging.WARNING):
@@ -822,7 +823,7 @@ def test_an_unrelated_update_right_after_the_cue_call_does_not_finish_the_cue() 
         assert [name for name, _ in clients.last.timeline][-3:] == ["IDLE", "PLAYING", "IDLE"]
 
     run(lambda: scenario(0.2, esphome.CUE_MIN_SECONDS))  # the floor holds
-    run(lambda: scenario(0.5, 0.5))  # then the cue's own PLAYING holds
+    run(lambda: scenario(0.8, 0.8))  # then the cue's own PLAYING holds
 
 
 def test_a_disconnect_during_the_cue_wait_is_unavailable_at_once() -> None:
@@ -834,14 +835,14 @@ def test_a_disconnect_during_the_cue_wait_is_unavailable_at_once() -> None:
         cue = asyncio.create_task(
             mic.driver.send_output_event(PlayCue("cue-1", CueType.UTTERANCE_ACCEPTED))
         )
-        await asyncio.sleep(0.1)  # PLAYING, inside the end wait
+        await asyncio.sleep(0.1)  # inside the floor, which waits on the player event
         assert not cue.done()
         assert client.on_stop is not None
         started = time.monotonic()
         await client.on_stop(False)
         with pytest.raises(MicrophoneUnavailable, match="transport stopped"):
             await asyncio.wait_for(cue, 1.0)
-        assert time.monotonic() - started < 0.2
+        assert time.monotonic() - started < 0.1  # a sleeping floor would take about 0.4 s
 
     run(scenario)
 

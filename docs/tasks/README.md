@@ -154,7 +154,7 @@ Not numbered yet: firmware trimmed to continuous mode and reflashed (including t
   Do the same for `play_conversation_timeout_cue`, and for `play_follow_up_ready_cue` when it is
   added; then reflash. The driver calls status-mode actions with `return_response=False` and
   waits at most 8 s. Until then `CueFinished` follows the media player state: the driver waits
-  for a media player update after the call, at least 0.3 s, and for the player not to be busy,
+  for a media player update after the call, at least 0.5 s, and for the player not to be busy,
   `ANNOUNCING` or `PLAYING` (about 1 s for the update, 8 s to end, then a warning and on).
   Before the T-017 fix it followed the call, and the playback URL sent right after the accepted
   cue was dropped by the device (T-014 decision Q1, superseded).
