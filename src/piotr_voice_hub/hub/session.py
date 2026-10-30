@@ -1,6 +1,6 @@
 """Per-satellite session (design.md §4.1 steps 1-6): arm, wake candidate, accept or cancel,
 then a reply (`speak` or `release`, T-017) or the reply timeout, then re-arm. Not yet: follow-up
-(T-020), idle announcements and `stop` (T-019), `play` (T-021), the speaker hint (T-018).
+(T-020), idle announcements and `stop` (T-019), `play` (T-021).
 
 One `SatelliteSession.run()` task per satellite. It is the driver's only command sender and
 reads the driver's events in order, so everything about speech segment N is emitted before
@@ -15,6 +15,12 @@ satellite fails (T-017 plan), like every `wake` ends with `transcript_final` or 
 A segment that is the wake word alone ("Ryszardzie", then a pause) keeps the wake open: the next
 segment, if it starts within `WAKE_PAUSE_SECONDS`, is the request (T-017 fix, design.md §4.1
 step 4). Otherwise the wake is cancelled and the timeout cue plays.
+
+The speaker hint (T-018, design.md §4.1 step 5): an accepted utterance's audio (its segments,
+the wake word alone included, at most the last `max_segment_seconds`) goes to speaker
+recognition while the satellite stops listening and plays the accepted cue; `transcript_final`
+waits for it, at most the speaker timeout. A failure is a null `speaker`, never a lost
+utterance.
 """
 
 import asyncio
@@ -31,6 +37,7 @@ from piotr_voice_hub.hub.events import (
     PlaybackFinished,
     SatelliteState,
     SatelliteStatus,
+    Speaker,
     TranscriptFinal,
     TranscriptPartial,
     Wake,
@@ -61,6 +68,7 @@ from piotr_voice_hub.satellites.messages import (
 )
 from piotr_voice_hub.satellites.messages import PlaybackFinished as DriverPlaybackFinished
 from piotr_voice_hub.satellites.protocol import MicrophoneProtocolState
+from piotr_voice_hub.speaker.interfaces import SpeakerHint
 from piotr_voice_hub.stt.whisper import StreamingTextEvent, TextEnd
 from piotr_voice_hub.tts.interfaces import TextToSpeech, TtsError
 
@@ -135,7 +143,7 @@ class _BareWake:
 
     utterance_id: str  # the wake's; transcript_final and partials of the request carry it
     raw_text: str  # all its segments so far
-    audio_bytes: int  # all its segments so far
+    audio: bytes  # all its segments so far (PCM), for the speaker hint
     deadline: float  # loop time: the request must start by then
 
 
@@ -144,7 +152,7 @@ class _Segment:
     utterance_id: str
     stt: SttSession
     partials: "asyncio.Task[None] | None" = None
-    audio_bytes: int = 0
+    audio: bytearray = dataclasses.field(default_factory=bytearray)  # PCM, for the hint
     candidate: bool = False  # a partial matched: `wake` sent, LISTENING visual set
     follows: _BareWake | None = None  # set if this segment may be the request after it
 
@@ -159,14 +167,18 @@ class SatelliteSession:
         sleep: Sleep = asyncio.sleep,
         *,
         tts: TextToSpeech,
+        speaker: SpeakerHint,
     ) -> None:
         self._config = config
         self._microphone = microphone
         self._stt = stt
         self._tts = tts
+        self._speaker = speaker
         self._emit = emit
         self._sleep = sleep
         self._max_audio_seconds = config.max_segment_seconds + SEGMENT_MARGIN_SECONDS
+        # The speaker hint's audio: the last this many bytes of the accepted utterance.
+        self._max_hint_bytes = int(self._max_audio_seconds * 1000) * BYTES_PER_MS
         self._protocol = MicrophoneProtocolState()
         self._commands = asyncio.Lock()
         self._listen_id: str | None = None
@@ -292,7 +304,7 @@ class SatelliteSession:
                 self._start_segment(event.utterance_id)
             elif isinstance(event, AudioChunk):
                 assert segment is not None
-                segment.audio_bytes += len(event.data)
+                segment.audio += event.data
                 await segment.stt.send_audio(event.data)
             elif isinstance(event, SpeechEnded):
                 assert segment is not None
@@ -357,7 +369,7 @@ class SatelliteSession:
             "segment utterance_id=%s reason=%s audio_ms=%d candidate=%s wake=%s%s",
             segment.utterance_id,
             reason,
-            segment.audio_bytes // BYTES_PER_MS,
+            len(segment.audio) // BYTES_PER_MS,
             segment.candidate,
             bool(text),
             "" if follows is None else f" after the wake word of {follows.utterance_id}",
@@ -373,13 +385,13 @@ class SatelliteSession:
             deadline = ended_at + WAKE_PAUSE_SECONDS
             if follows is None:
                 self._bare_wake = _BareWake(
-                    segment.utterance_id, raw_text, segment.audio_bytes, deadline
+                    segment.utterance_id, raw_text, bytes(segment.audio), deadline
                 )
             else:  # said again: one wake, its segments so far, a new window (N2)
                 self._bare_wake = _BareWake(
                     follows.utterance_id,
                     f"{follows.raw_text} {raw_text}",
-                    follows.audio_bytes + segment.audio_bytes,
+                    follows.audio + segment.audio,
                     deadline,
                 )
             self._logger.info(
@@ -414,24 +426,35 @@ class SatelliteSession:
     ) -> None:
         if not segment.candidate:
             self._wake(segment.utterance_id)
-        listen_id, self._listen_id = self._listen_id, None
-        assert listen_id is not None
-        await self._command(StopListening(listen_id, "accepted"))
-        await self._expect(ListeningStopped(listen_id, "accepted"))
-        await self._play_cue(CueType.UTTERANCE_ACCEPTED)
-        await self._command(SetVisualState(VisualState.PROCESSING))
+        utterance_id = segment.utterance_id if follows is None else follows.utterance_id
+        audio = segment.audio if follows is None else follows.audio + segment.audio
+        # The hint runs while the satellite stops listening and plays the cue (T-018).
+        hint = asyncio.create_task(
+            self._speaker.recognize(bytes(audio[-self._max_hint_bytes :]), utterance_id)
+        )
+        try:
+            listen_id, self._listen_id = self._listen_id, None
+            assert listen_id is not None
+            await self._command(StopListening(listen_id, "accepted"))
+            await self._expect(ListeningStopped(listen_id, "accepted"))
+            await self._play_cue(CueType.UTTERANCE_ACCEPTED)
+            await self._command(SetVisualState(VisualState.PROCESSING))
+            match = await hint  # bounded by the speaker timeout; None on a service failure
+        finally:
+            hint.cancel()  # no-op once done; on a satellite failure the hint is dropped
+        # The status and transcript_final back to back, with no await between them or before
+        # the reply wait: `processing` means a speak or release is taken (PR #27 review S2).
         self._status(True, SatelliteState.PROCESSING)
         self._open_wake = None
-        audio_bytes = segment.audio_bytes + (0 if follows is None else follows.audio_bytes)
         self._emit(
             TranscriptFinal(
                 self._config.id,
-                segment.utterance_id if follows is None else follows.utterance_id,
+                utterance_id,
                 text=text,
                 raw_text=raw_text,
                 follow_up=False,
-                speaker=None,
-                audio_ms=audio_bytes // BYTES_PER_MS,
+                speaker=None if match is None else Speaker(match.name, match.confidence),
+                audio_ms=len(audio) // BYTES_PER_MS,
             )
         )
 

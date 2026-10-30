@@ -1,8 +1,9 @@
-# The hub (T-012, design.md §9) and its Piper TTS service (T-015). Speaker recognition joins
-# in P1 (T-018).
-# Usage (on piotr, from the repo root; see the T-012 PR checklist):
+# The hub (T-012, design.md §9), its Piper TTS service (T-015) and its speaker recognition
+# (T-018).
+# Usage (on piotr, from the repo root; see the T-012 and T-018 PR checklists):
 #   export HUB_CONFIG=~/hub-wake.yaml HUB_USER="$(id -u):$(id -g)"
-#   mkdir -p ~/.cache/piotr_voice_hub/huggingface && docker compose up -d --build
+#   mkdir -p ~/.cache/piotr_voice_hub/huggingface ~/speaker-profiles
+#   docker compose up -d --build
 # HUB_CONFIG holds the satellites' API keys: keep it mode 600. The container runs as HUB_USER,
 # the config's owner, so it can read the file without loosening its permissions.
 # An invalid config exits 2 and `restart: unless-stopped` then restarts it in a loop: check
@@ -78,6 +79,49 @@ services:
       test: ["CMD", "python", "-m", "wyoming_piper.health_check",
              "--uri", "tcp://127.0.0.1:10201", "--timeout", "5"]
       start_period: 300s
+      start_interval: 2s
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # T-018: the hub's speaker recognition (docker/speaker.Dockerfile), SpeechBrain ECAPA on the
+  # CPU (no VRAM), on 127.0.0.1:2141 (`speaker_recognition.url`), next to the old project's on
+  # 2140. Loopback only: the hub is its only client. The profiles (.npz, `profile_embedding`)
+  # are read from SPEAKER_PROFILES, mounted at /profiles: the hub config's profile paths are
+  # under /profiles. It runs as HUB_USER, who must be able to read them. A missing directory
+  # is created empty (by Docker, owned by root; better `mkdir -p` it first) rather than failing
+  # the whole project: with no profile there, every hint is null. No depends_on: the hint is
+  # optional, the hub runs (speaker null, a WARNING per utterance) without the service.
+  speaker-recognition:
+    build:
+      context: .
+      dockerfile: docker/speaker.Dockerfile
+    image: piotr-voice-hub-speaker:latest
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    user: "${HUB_USER:?set HUB_USER=$(id -u):$(id -g), the owner of HUB_CONFIG}"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]  # it needs none: an unprivileged port, files readable by HUB_USER
+    security_opt: ["no-new-privileges:true"]
+    command: ["--host", "127.0.0.1", "--port", "2141", "--profiles-dir", "/profiles",
+              "--threshold", "0.45"]
+    volumes:
+      - type: bind
+        source: "${SPEAKER_PROFILES:-${HOME}/speaker-profiles}"
+        target: /profiles
+        read_only: true
+        bind: {create_host_path: true}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "5"}
+    healthcheck:
+      # Healthy means warm: the port opens after the model loaded and embedded once. The
+      # process exits on a startup failure; a request failure is a 4xx/5xx, logged.
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2141/health', timeout=5)"]
+      start_period: 120s
       start_interval: 2s
       interval: 30s
       timeout: 10s

@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 from test_esphome_driver import Clients, config, loud, make, silence
-from test_session import FakeSttSession
+from test_session import FakeSpeaker, FakeSttSession
 from websockets.asyncio.client import ClientConnection, connect
 
 from piotr_voice_hub.config import TtsConfig
@@ -59,7 +59,12 @@ def test_speak_through_the_api_plays_piper_audio_on_a_fake_satellite() -> None:
         await tts.start()
         # The raw driver: the session validates the protocol itself.
         session = SatelliteSession(
-            satellite, microphone.driver, AnyUtteranceStt(), api.publish, tts=tts
+            satellite,
+            microphone.driver,
+            AnyUtteranceStt(),
+            api.publish,
+            tts=tts,
+            speaker=FakeSpeaker(),
         )
         api.set_command_handler(CommandRouter({"kitchen": session}).handle)
         await playback.start()

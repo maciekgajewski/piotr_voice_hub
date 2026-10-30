@@ -58,9 +58,8 @@ def test_example_config_matches_design() -> None:
     assert config.wake_phrase == "Ryszardzie"
     assert config.stt.model == "large-v3-turbo"
     assert config.stt.partial.interval_seconds == 0.75
-    assert config.speaker_recognition.profiles == {
-        "Maciek": "/profiles/maciek/profile/speaker_profile.npz"
-    }
+    assert config.speaker_recognition.url == "http://127.0.0.1:2141"
+    assert config.speaker_recognition.profiles == {"Maciek": "/profiles/maciek.npz"}
     assert config.tts.voice == "pl_PL-bass-high"
 
 
@@ -171,6 +170,31 @@ def test_missing_file(tmp_path: Path) -> None:
             r"hub\.yaml: tts\.uri: expected tcp://host:port, without user info$",
         ),
         ("uri: tcp://127.0.0.1:10200", "uri: tcp://:10200", r"tts\.uri: .*tcp://host:port"),
+        (
+            "url: http://127.0.0.1:2140",
+            "url: tcp://127.0.0.1:2140",
+            r"speaker_recognition\.url: .*expected http://host:port$",
+        ),
+        (
+            "url: http://127.0.0.1:2140",
+            "url: http://127.0.0.1",
+            r"speaker_recognition\.url: .*expected http://host:port$",
+        ),
+        (
+            "url: http://127.0.0.1:2140",
+            "url: http://127.0.0.1:2140/recognize",
+            r"speaker_recognition\.url: .*expected http://host:port$",
+        ),
+        (
+            "url: http://127.0.0.1:2140",
+            "url: https://127.0.0.1:2140",
+            r"speaker_recognition\.url: .*expected http://host:port$",
+        ),
+        (
+            "url: http://127.0.0.1:2140",
+            "url: 'http://u:secret@h:1'",
+            r"hub\.yaml: speaker_recognition\.url: expected http://host:port, without user info$",
+        ),
         (
             "end_silence_seconds: 0.8",
             "end_silence_seconds: -1",

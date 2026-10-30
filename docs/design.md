@@ -72,7 +72,7 @@ flowchart LR
   SES --> STT[faster-whisper<br/>large-v3-turbo, GPU]
   STT --> WAKE[Wake phrase matcher<br/>'Ryszardzie', partial + final]
   WAKE --> SPK[Speaker hint client]
-  SPK <-- HTTP :2140 --> SR[speaker-recognition<br/>SpeechBrain ECAPA]
+  SPK <-- HTTP :2141 --> SR[speaker-recognition<br/>SpeechBrain ECAPA, CPU]
   SES <--> API[WebSocket API :8750]
   API <--> C[Consumer]
   API -- speak --> TTS[Wyoming Piper client] <-- :10201 --> PIPER[wyoming-piper]
@@ -103,7 +103,7 @@ flowchart LR
 5. **Accept.**
    - Stop listening and play the `accepted` cue. A cue ends (`CueFinished`) once it has played: from the service response when the firmware declares one, otherwise once the media player has reported a change after the call, at least 0.5 s after the call (an unrelated update such as the volume dial can come first), and is not busy, `ANNOUNCING` or `PLAYING`. The driver bounds this itself (about 1 s for the change, 8 s to end; past a bound it logs a warning and goes on); the session's wait for `CueFinished` starts only after the command returns. Playback sends its URL only once the media player is not busy (at most 3 s): a Voice PE drops an announcement URL that arrives during a cue (T-017 fix). Worst case, a player stuck in `PLAYING` (nothing else plays media here) makes every cue take about 9 s and delays every speak by 3 s, each with a `still busy` warning, and a URL the device then drops ends in the 5 s fetch timeout: a repeating `still busy` warning is a device problem.
    - Set the `PROCESSING` visual.
-   - Run speaker recognition on the segment audio.
+   - Run speaker recognition on the utterance audio (all its segments, the wake word alone included, at most the last `max_segment_seconds`). The request starts at the accept and runs during the stop and the cue (T-018); `transcript_final` waits for it, at most `speaker_recognition.timeout_seconds`. A failure (refused, timeout, an error answer) is one WARNING and a `null` speaker, never a lost utterance.
    - Emit `transcript_final` (text after the phrase, plus the speaker hint).
    - The satellite stays `PROCESSING` until the consumer sends `speak`/`play`/`release`, or `reply_timeout` (30 s) expires. On timeout, play the timeout cue and re-arm.
 6. **Speak/play.**
@@ -158,7 +158,7 @@ Proposed package layout in `piotr_voice_hub/`:
 | VAD | new | Write | About 80 lines: Silero ONNX wrapper with hysteresis. |
 | STT | `ai_server/speech_to_text/*` | Copy | Replace the `ai_server.config.SttConfig` import. |
 | Transcript fixes | `ai_server/speech_to_text/transcript_preprocessor.py`, `utils/polish_numbers.py`, `utils/text.py` | Copy | Only what the preprocessor uses. |
-| Speaker recognition | `ai_server/speaker_recognition/*` | Copy | Service unchanged (:2140). In the client, drop the `microphones.messages` import. |
+| Speaker recognition | `ai_server/speaker_recognition/*` | Port (T-018) | `/recognize-stream` request, answer and scoring unchanged; our service runs on :2141 (the old one keeps :2140). Stdlib HTTP on both sides instead of aiohttp; `/recognize` and `/reload` dropped; the request is bounded (size, profile paths under the profiles mount, timeout). The profile enrolment tool is not ported yet. |
 | TTS | `ai_server/microphones/tts.py` | Copy `PiperTextToSpeech.synthesize` only | Delete `_stream_to_box` (duplicate playback path). |
 | Session | `ai_server/microphones/manager.py` | Rewrite (about 400 lines) | Take the logic of `_capture_open_mic_utterance`, `_wait_for_speech_start`, `_set_visual_state`, `_play_cue`, `_recover_microphone_boundary` and the per-satellite supervision loop. No `Agent`, no conversations bridge, no processing cues. |
 | Wake matcher | `manager._text_after_wake_phrase`, `_collect_open_mic_partials` | Rewrite (small) | Normalized stem match on partial and final. |
@@ -239,9 +239,9 @@ stt: {model: large-v3-turbo, device: cuda, compute_type: float16, beam_size: 5,
       partial: {interval_seconds: 0.75, window_seconds: 4.0, beam_size: 1}}
 
 speaker_recognition:
-  url: http://127.0.0.1:2140
+  url: http://127.0.0.1:2141
   timeout_seconds: 1.0
-  profiles: {Maciek: /profiles/maciek/profile/speaker_profile.npz}
+  profiles: {Maciek: /profiles/maciek.npz}  # paths inside the service's /profiles mount
 
 tts: {uri: tcp://127.0.0.1:10201, voice: pl_PL-bass-high}
 ```
@@ -271,7 +271,7 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
 - **One compose file, three services**, all `network_mode: host` and `restart: unless-stopped`. Host networking lets satellites fetch the playback stream from the host IP. `.local` names are resolved by aioesphomeapi itself (zeroconf), so no Avahi or `libnss-mdns` is needed in the image (T-012). P0 (T-012) has the `hub` service only.
   - `hub` (CUDA 12.8 base, GPU): `docker/hub.Dockerfile` (adapted from the old `docker/ai-server.Dockerfile`), with only the hub's dependencies. It runs as the config owner's uid, so the config stays mode 600. It uses CPU `onnxruntime` (Silero, via faster-whisper) and must never also install `onnxruntime-gpu`.
   - `piper` (GPU, wyoming-piper `--use-cuda`, T-015): `docker/piper.Dockerfile`, on port 10201. The image installs only `onnxruntime-gpu` (1.26.0), not `onnxruntime` too (the old `piotr-wyoming-piper` container has both, so it runs on CPU), and the build fails otherwise. The voice is baked in, pinned by revision and SHA-256. The service creates the voice's session itself (CUDA EP, HEURISTIC cuDNN search), fails unless CUDA is its first provider (onnxruntime otherwise falls back to CPU silently), and warms up before it listens. It listens on 127.0.0.1 only (the hub is its only client), and its Describe lists only the served voice. While serving, each synthesis call is capped at 1000 characters (an `error` back to the client) and bounded at 30 s; a call over the bound or an onnxruntime run-time error exits the process, so Docker restarts it. The image contains GPL-3.0 components (piper-tts, espeak-ng): it is built locally and must not be published to a registry without GPL compliance.
-  - `speaker-recognition` (CPU): from `docker-compose.speaker-recognition.yml`, unchanged `--device cpu`.
+  - `speaker-recognition` (CPU, T-018): `docker/speaker.Dockerfile`, on port 2141, 127.0.0.1 only (the hub is its only client). SpeechBrain ECAPA (`spkrec-ecapa-voxceleb`, Apache-2.0) with CPU-only torch wheels: no VRAM, about 0.3–0.45 GB RAM. The model is baked in, pinned by revision and SHA-256, and warms up before the port opens. Torch uses 2 threads (of the 5600's 12), so it does not compete with the hub and the other services. It runs as `HUB_USER` with a read-only root filesystem, no capabilities and `no-new-privileges`, and reads the voice profiles (`.npz`, as the old enrolment tool built them) from `SPEAKER_PROFILES` (default `~/speaker-profiles`; created empty if missing, so a missing directory never stops the hub), mounted read-only at `/profiles`; a profile path outside it is refused, a relative one is under it. No `depends_on` and no startup check: the hint is optional.
 - **Ollama coexists.** It keeps running on the host for unrelated tasks and is *not* in the hub's compose file. The two share the GPU within the budget in §4.3.
 - **Ports:**
 
@@ -279,7 +279,7 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
   |---|---|
   | 8750 | API |
   | 8751 | Playback HTTP |
-  | 2140 | Speaker recognition |
+  | 2141 | Speaker recognition (ours, T-018, 127.0.0.1 only; the old project's keeps 2140) |
   | 10201 | Piper (ours, T-015, 127.0.0.1 only; the old project's Piper keeps 10200) |
   | 6053 | Outbound to satellites |
 

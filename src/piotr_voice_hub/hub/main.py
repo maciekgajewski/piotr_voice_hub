@@ -214,6 +214,7 @@ async def run_hub(config: HubConfig) -> int:
     from piotr_voice_hub.hub.session import SatelliteSession
     from piotr_voice_hub.satellites.esphome import EsphomeSatellite
     from piotr_voice_hub.satellites.vad import SileroVad, load_session
+    from piotr_voice_hub.speaker.client import HttpSpeakerRecognition
     from piotr_voice_hub.stt.whisper import FasterWhisperSpeechToText
     from piotr_voice_hub.tts.wyoming_piper import WyomingPiperTts
 
@@ -222,6 +223,8 @@ async def run_hub(config: HubConfig) -> int:
     if not await check_tts(tts):
         return EXIT_FAILED
     stt = FasterWhisperSpeechToText(config.stt)
+    # No startup check: the hint is optional, a failure is a null speaker (T-018 plan).
+    speaker = HttpSpeakerRecognition(config.speaker_recognition)
     api = ApiServer(config.api.host, config.api.port)
     # All interfaces, like the API (design §9): the satellites fetch from the host's LAN IP.
     playback = PlaybackHttpServer("0.0.0.0", config.playback_http.port)
@@ -235,6 +238,7 @@ async def run_hub(config: HubConfig) -> int:
             stt,
             api.publish,
             tts=tts,
+            speaker=speaker,
         )
         for s in config.satellites
     ]
