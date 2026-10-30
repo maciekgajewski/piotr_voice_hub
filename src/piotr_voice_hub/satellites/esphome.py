@@ -107,12 +107,14 @@ STOP_ACK_TIMEOUT_SECONDS = 2.0
 # `supports_response` without calling `api.respond` makes every cue wait out these 8 s and
 # then drop the connection (review B2), so the firmware must do both (P2 carry-forward).
 CUE_RESPONSE_TIMEOUT_SECONDS = 8.0
-# A cue called without a response: the player reports a change about 40-150 ms after the call
-# (Voice PE, T-017 fix); if it has not within this, the cue is taken as done (no sound).
+# A cue called without a response: the player reports a change about 40-200 ms after the call
+# (voice-pe-03, T-017 fix); if it has not within this, the cue is taken as done (no sound).
 CUE_START_TIMEOUT_SECONDS = 1.0
 # ... and not before this after the call: an unrelated update (the dial, a stray IDLE) can come
-# first, and the cue's own report is in by then (measured 40-150 ms; a 0.5 s gap played).
-CUE_MIN_SECONDS = 0.3
+# first, and the cue's own report is in by then (about 40-200 ms on voice-pe-03; a 0.5 s gap
+# played, so the floor is that gap). If a `did not fetch playback` WARNING ever follows an
+# accepted cue on hardware, raise this first.
+CUE_MIN_SECONDS = 0.5
 # ... and the cue has played once the player is not busy (ANNOUNCING or PLAYING). These bounds
 # are the driver's own: the call (at most SERVICE_TIMEOUT_SECONDS) + 1 s + 8 s, about 14 s at
 # worst, while the session holds its command lock; the session's 10 s wait for CueFinished

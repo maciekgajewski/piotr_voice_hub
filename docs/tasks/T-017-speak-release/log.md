@@ -298,3 +298,17 @@
     came about 0.2 s after the call, `CueFinished` at 0.30 s (the floor), the URL 0.09 s
     later, fetched within about 0.05 s, then PLAYING, IDLE and `PlaybackFinished`, with no
     WARNING. The new DEBUG line showed `volume=0.30 update=1..3`.
+- 2026-10-30: follow-up to PR #25 re-review 5581208755 (both nits, MERGE), branch
+  `t-017-cue-nits` from main e90f02f:
+  - **N1:** the `esphome.py` comments said the cue's report comes 40-150 ms after the call;
+    the hardware measured about 40-200 ms (voice-pe-03), only 0.1 s under the 0.3 s floor.
+    The comments now say so, and `CUE_MIN_SECONDS` is 0.5 s, the gap known to play (about
+    0.2 s more per cue). design.md §4.1 step 5 and the tasks README say 0.5 s. The S1 test's
+    second case moved from a 0.5 s to a 0.8 s cue, so it still tests the cue's own PLAYING
+    past the floor, and the merged-IDLE cue test now expects `CueFinished` from the floor up
+    to 0.3 s past it (was under 0.5 s), still short of the 1 s start bound.
+  - **N2:** the disconnect-during-the-cue test now asserts `MicrophoneUnavailable` in under
+    0.1 s (the disconnect is at 0.1 s, inside the floor), so a floor that sleeps instead of
+    waiting on the player event (about 0.4 s) fails clearly.
+  - `make check` passes; with the floor mutated to a sleep, the disconnect test fails. No
+    live test; the hardware check is for after deploy.
