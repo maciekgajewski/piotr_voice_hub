@@ -16,7 +16,10 @@ stream, or does not fetch all of it (the GET failed or stalled mid-stream, revie
 driver unavailable instead, with no `PlaybackFinished`. Playback, like cues, happens only while
 disarmed. The URL is IPv4 (the playback server is IPv4-only) and only the satellite's own IP may
 fetch it. Nothing bounds the time from `PlaybackBegin` to `PlaybackEnd` here: that is the
-producer's (P1 session/TTS) job.
+producer's (P1 session/TTS) job. `PlaybackStop` (T-019) sends the media player `STOP` with
+`announcement=True` (both firmware media players stop their announcement pipeline for it),
+releases the stream and emits `PlaybackFinished` once the player is not busy, bounded; if the
+drain has already emitted it, it does nothing.
 
 Cues: a cue service that declares `supports_response` (firmware, P2: status mode with an
 explicit `api.respond`) is called with a response, so `CueFinished` means the cue has played.
@@ -57,6 +60,7 @@ from typing import Any, Protocol, cast
 from aioesphomeapi.client import APIClient
 from aioesphomeapi.core import APIConnectionError
 from aioesphomeapi.model import (
+    MediaPlayerCommand,
     MediaPlayerEntityState,
     MediaPlayerInfo,
     MediaPlayerState,
@@ -81,6 +85,7 @@ from piotr_voice_hub.satellites.messages import (
     PlaybackChunk,
     PlaybackEnd,
     PlaybackFinished,
+    PlaybackStop,
     PlayCue,
     ResetWakeCandidate,
     SetVisualState,
@@ -203,6 +208,7 @@ class EsphomeClient(Protocol):
         self,
         key: int,
         *,
+        command: MediaPlayerCommand | None = None,
         media_url: str | None = None,
         announcement: bool | None = None,
         volume: float | None = None,
@@ -348,6 +354,9 @@ class EsphomeSatellite:
             return
         if isinstance(event, PlaybackEnd):
             self._end_playback(event.playback_id)
+            return
+        if isinstance(event, PlaybackStop):
+            await self._stop_playback(event.playback_id)
             return
         await self._ensure_connected()
         if isinstance(event, PlaybackBegin):
@@ -769,6 +778,30 @@ class EsphomeSatellite:
         assert playback.drain is None, "duplicate PlaybackEnd"
         playback.stream.end()
         playback.drain = asyncio.create_task(self._drain(playback), name=f"drain {playback_id}")
+
+    async def _stop_playback(self, playback_id: str) -> None:
+        if self._unavailable is not None:
+            raise MicrophoneUnavailable(self._unavailable)
+        playback = self._playback
+        if playback is None:  # the drain released it: its PlaybackFinished is already queued
+            self._logger.debug("stop playback_id=%s: it has already finished", playback_id)
+            return
+        assert playback.playback_id == playback_id, (playback_id, playback.playback_id)
+        key, client = self._media_player_key, self._client
+        assert key is not None and client is not None  # a playback needs both; a loss fails it
+        try:
+            client.media_player_command(key, command=MediaPlayerCommand.STOP, announcement=True)
+        except EXPECTED_ERRORS as error:
+            raise await self._lose_transport(f"media player stop failed: {error!r}") from error
+        self._release_playback()  # before any await: the drain must not finish it as well
+        if not await self._wait_player(self._player_free, PLAYER_FREE_TIMEOUT_SECONDS):
+            self._logger.warning(
+                "playback %s: the media player is still busy %g s after the stop",
+                playback_id,
+                PLAYER_FREE_TIMEOUT_SECONDS,
+            )
+        self._logger.info("playback stopped playback_id=%s", playback_id)
+        self._emit(PlaybackFinished(playback_id))
 
     async def _drain(self, playback: _Playback) -> None:
         """PlaybackFinished once the device has played it all (the old driver's estimate), or

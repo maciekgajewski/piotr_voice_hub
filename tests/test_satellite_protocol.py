@@ -22,6 +22,7 @@ from piotr_voice_hub.satellites.messages import (
     PlaybackChunk,
     PlaybackEnd,
     PlaybackFinished,
+    PlaybackStop,
     PlayCue,
     ResetWakeCandidate,
     SetVisualState,
@@ -256,6 +257,7 @@ COMMAND_LEGAL_STATES = {
     "PlaybackBegin": {DriverState.DISARMED},
     "PlaybackChunk": {DriverState.PLAYING_AUDIO},
     "PlaybackEnd": {DriverState.PLAYING_AUDIO},
+    "PlaybackStop": {DriverState.PLAYING_AUDIO},
     "Close": set(DriverState) - {DriverState.CLOSED},
 }
 
@@ -291,6 +293,7 @@ COMMAND_NEXT_STATE: dict[str, DriverState | None] = {
     "PlaybackBegin": DriverState.PLAYING_AUDIO,
     "PlaybackChunk": None,
     "PlaybackEnd": None,
+    "PlaybackStop": None,
     "Close": DriverState.CLOSED,
 }
 EVENT_NEXT_STATE: dict[str, DriverState | None] = {
@@ -379,6 +382,32 @@ def test_reconnect_after_failure_during_capture() -> None:
     with pytest.raises(AssertionError, match="mismatched listen_id"):
         protocol.event(SpeechEnded("listen-1", "utterance-3", "completed"))
     assert protocol.snapshot.state is DriverState.CAPTURING
+
+
+@pytest.mark.parametrize("after_end", [False, True])
+def test_playback_stop_ends_the_playback_with_one_finished(after_end: bool) -> None:
+    """T-019: PlaybackStop before or after PlaybackEnd; then only PlaybackFinished."""
+    protocol = MicrophoneProtocolState()
+    protocol.command(PlaybackBegin("playback-1", 22050, 2, 1))
+    protocol.command(PlaybackChunk("playback-1", b"audio"))
+    if after_end:
+        protocol.command(PlaybackEnd("playback-1"))
+    with pytest.raises(AssertionError, match="mismatched playback_id"):
+        protocol.command(PlaybackStop("playback-0"))
+    protocol.command(PlaybackStop("playback-1"))
+    with pytest.raises(AssertionError, match="duplicate PlaybackStop"):
+        protocol.command(PlaybackStop("playback-1"))
+    with pytest.raises(AssertionError, match="PlaybackChunk after PlaybackEnd or PlaybackStop"):
+        protocol.command(PlaybackChunk("playback-1", b"late"))
+    with pytest.raises(AssertionError, match="PlaybackEnd after PlaybackEnd or PlaybackStop"):
+        protocol.command(PlaybackEnd("playback-1"))
+    assert protocol.snapshot.state is DriverState.PLAYING_AUDIO
+    protocol.event(PlaybackFinished("playback-1"))
+    assert protocol.snapshot == ProtocolSnapshot(DriverState.DISARMED, None, None, None, None)
+    with pytest.raises(AssertionError, match="PlaybackStop invalid in disarmed"):
+        protocol.command(PlaybackStop("playback-1"))
+    protocol.command(PlaybackBegin("playback-2", 22050, 2, 1))  # a new playback may be stopped
+    protocol.command(PlaybackStop("playback-2"))
 
 
 def test_reconnect_after_failure_during_playback() -> None:
@@ -470,6 +499,7 @@ def _command_for_state(command_name: str) -> MicrophoneCommand:
         "PlaybackBegin": PlaybackBegin("new-playback", 22050, 2, 1),
         "PlaybackChunk": PlaybackChunk("playback-1", b"audio"),
         "PlaybackEnd": PlaybackEnd("playback-1"),
+        "PlaybackStop": PlaybackStop("playback-1"),
         "Close": Close(),
     }[command_name]
 

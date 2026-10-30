@@ -1,4 +1,5 @@
-"""T-017: parsing, validating and routing the API commands `speak` and `release`."""
+"""T-017, T-019: parsing, validating and routing the API commands `speak`, `release` and
+`stop`."""
 
 import json
 import logging
@@ -23,6 +24,11 @@ class FakeSession:
         if self.refuse is not None:
             raise self.refuse
         self.calls.append(("release",))
+
+    def stop(self) -> None:
+        if self.refuse is not None:
+            raise self.refuse
+        self.calls.append(("stop",))
 
 
 def router() -> tuple[CommandRouter, FakeSession]:
@@ -58,16 +64,17 @@ def test_speak_takes_a_volume_from_0_to_1(volume: float) -> None:
     assert session.calls == [("speak", "Jest piąta.", float(volume))]
 
 
-def test_release_is_acked_with_empty_data() -> None:
+@pytest.mark.parametrize("kind", ["release", "stop"])
+def test_release_and_stop_are_acked_with_empty_data(kind: str) -> None:
     commands, session = router()
-    assert commands.handle(command("release")) == {
+    assert commands.handle(command(kind)) == {
         "type": "ack",
         "reply_to": "c7",
         "satellite": "voice-pe-02",
         "data": {},
     }
-    assert commands.handle(command("release", data={}))["type"] == "ack"
-    assert session.calls == [("release",), ("release",)]
+    assert commands.handle(command(kind, data={}))["type"] == "ack"
+    assert session.calls == [(kind,), (kind,)]
 
 
 def error(reply: dict[str, object]) -> tuple[object, object, str]:
@@ -86,8 +93,8 @@ BAD = [
     pytest.param(command(data=[]), id="data-not-an-object"),
     pytest.param(command("hello"), id="unknown-type"),
     pytest.param(command("play", data={"media_url": "x"}), id="play-not-yet"),
-    pytest.param(command("stop"), id="stop-not-yet"),
     pytest.param(command("release", data={"x": 1}), id="release-with-data"),
+    pytest.param(command("stop", data={"playback_id": "x"}), id="stop-with-data"),
     pytest.param(command(data={}), id="speak-no-text"),
     pytest.param(command(data={"text": 5}), id="speak-text-not-a-string"),
     pytest.param(command(data={"text": "   "}), id="speak-empty-text"),
@@ -143,17 +150,18 @@ def test_the_session_refusing_is_the_reply(code: ErrorCode) -> None:
     session.refuse = CommandError(code, "voice-pe-02 is listening, not processing")
     assert error(commands.handle(command(data={"text": "x"}))) == ("c7", "voice-pe-02", code.value)
     assert error(commands.handle(command("release")))[2] == code.value
+    assert error(commands.handle(command("stop")))[2] == code.value
 
 
 def test_one_info_line_per_command_without_the_text(caplog: pytest.LogCaptureFixture) -> None:
     commands, _ = router()
     caplog.set_level(logging.INFO, "piotr_voice_hub.hub.commands")
     commands.handle(command(data={"text": "Tajny tekst"}))
-    commands.handle(command("stop"))
+    commands.handle(command("play"))
     lines = [r.getMessage() for r in caplog.records]
     assert lines == [
         "API command speak c7 for voice-pe-02: ack {'playback_id': 'playback-1'} (11 characters)",
-        "API command stop c7 for voice-pe-02: error bad_request ('stop' is not supported yet "
-        "(T-019))",
+        "API command play c7 for voice-pe-02: error bad_request ('play' is not supported yet "
+        "(T-021))",
     ]
     assert not any("Tajny" in line for line in lines)

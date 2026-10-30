@@ -74,6 +74,13 @@ class PlaybackEnd:
 
 
 @dataclass(frozen=True)
+class PlaybackStop:
+    """Stop the current playback now (T-019); it still ends with one PlaybackFinished."""
+
+    playback_id: str
+
+
+@dataclass(frozen=True)
 class Close:
     pass
 
@@ -153,6 +160,7 @@ type MicrophoneCommand = (
     | PlaybackBegin
     | PlaybackChunk
     | PlaybackEnd
+    | PlaybackStop
     | Close
 )
 type MicrophoneEvent = (

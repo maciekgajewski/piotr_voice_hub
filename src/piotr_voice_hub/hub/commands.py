@@ -1,10 +1,10 @@
-"""API commands `speak` and `release` (design.md §6; T-017).
+"""API commands `speak`, `release` (design.md §6; T-017) and `stop` (T-019).
 
 A client message is `{"type", "id", "satellite", "data"}`. `CommandRouter.handle` validates it,
 calls the satellite's session and returns the reply for that client: `ack` (with the command's
 result) or `error` (`{"code", "message"}`), both with `reply_to` and no `ts` (design.md's
-example). It never raises for a client's mistake. `play`, `stop` and `listen_after` are later
-tasks (T-019, T-020, T-021) and are refused as not supported yet.
+example). It never raises for a client's mistake. `play` and `listen_after` are later tasks
+(T-021, T-020) and are refused as not supported yet.
 """
 
 import json
@@ -19,7 +19,8 @@ from piotr_voice_hub.tts.wyoming_piper import check_text
 COMMAND_KEYS = {"type", "id", "satellite", "data"}
 SPEAK_KEYS = {"text", "listen_after", "volume"}
 MAX_ID_CHARS = 128
-NOT_YET = {"play": "T-021", "stop": "T-019"}
+NOT_YET = {"play": "T-021"}
+NO_DATA = ("release", "stop")
 
 _logger = logging.getLogger(__name__)
 
@@ -41,12 +42,14 @@ class CommandError(Exception):
 
 
 class Speaker(Protocol):
-    """What a command needs from a satellite's session. Both raise CommandError (busy,
+    """What a command needs from a satellite's session. Each raises CommandError (busy,
     satellite_offline) when the session cannot take the command now."""
 
     def speak(self, text: str, volume: float | None) -> str: ...  # the playback_id
 
     def release(self) -> None: ...
+
+    def stop(self) -> None: ...
 
 
 def ack(reply_to: str, satellite: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -109,17 +112,20 @@ class CommandRouter:
             raise CommandError(
                 ErrorCode.BAD_REQUEST, f"{kind!r} is not supported yet ({NOT_YET[kind]})"
             )
-        if kind not in ("speak", "release"):
+        if kind not in ("speak", *NO_DATA):
             raise CommandError(ErrorCode.BAD_REQUEST, f"unknown command type {kind!r}")
         session = self._sessions.get(command["satellite"])
         if session is None:
             raise CommandError(
                 ErrorCode.UNKNOWN_SATELLITE, f"no satellite {command['satellite']!r}"
             )
-        if kind == "release":
+        if kind in NO_DATA:
             if data:
-                raise CommandError(ErrorCode.BAD_REQUEST, "release takes no data")
-            session.release()
+                raise CommandError(ErrorCode.BAD_REQUEST, f"{kind} takes no data")
+            if kind == "release":
+                session.release()
+            else:
+                session.stop()
             return {}
         text, volume = self._speak_args(data)
         return {"playback_id": session.speak(text, volume)}

@@ -115,7 +115,7 @@ flowchart LR
    - The **next VAD segment within `follow_up_seconds` (default 8 s) after re-arming is accepted without the wake phrase.**
    - If no speech starts before the deadline, the hub stops listening, plays the `timeout` cue, sets `IDLE` and re-arms.
    - That is the whole mechanism. The hub keeps no conversation state beyond this one flag.
-8. **Announcements.** `speak` to an idle satellite (listening, no speech segment open) stops listening, plays, then re-arms. Otherwise the busy policy (§6) applies.
+8. **Announcements.** `speak` to an idle satellite (status `idle`: armed, no wake candidate and no speech segment open) stops listening, plays, then re-arms (T-019). It plays no cue before the audio and keeps the `IDLE` visual; status is `speaking` until `playback_finished`. If TTS gives no audio, nothing plays (no timeout cue: nobody asked) and `playback_finished` follows. If speech starts just as the announcement is taken, that segment is dropped (the stop ends it). Otherwise the busy policy (§6) applies.
 
 ### 4.2 STT model choice: `large-v3-turbo`, float16
 The hub shares the GPU with Ollama (§4.3), but the measured footprint of `large-v3-turbo` is small enough to afford it.
@@ -198,14 +198,14 @@ Proposed package layout in `piotr_voice_hub/`:
 |---|---|---|
 | `speak` | `text`, `listen_after?` (default false), `volume?` | Synthesize and play; `ack` carries `playback_id`. |
 | `play` | `url`, `listen_after?` | Play a WAV/FLAC/MP3 URL the satellite can fetch. |
-| `stop` | none | Stop current playback; re-arm. |
+| `stop` | none | Stop the current `speak` (reply or announcement) from its `ack` to its `playback_finished`; re-arm. The `ack` is the reply; the `speak` still ends with its one `playback_finished`. Otherwise `busy`. (T-019) |
 | `release` | none | End `PROCESSING` without speaking (e.g. nothing to say); re-arm. |
 
-Errors are `busy`, `unknown_satellite`, `satellite_offline` and `bad_request`. An error reply is `{"type":"error","reply_to":"c7","satellite":"voice-pe-02","data":{"code":"busy","message":"…"}}` (`reply_to` and `satellite` are `null` when the command did not carry valid ones). Every `ack`ed `speak` ends with one `playback_finished` while the hub runs (shutdown emits none), also when the playback failed (T-017). If TTS fails before any audio, the timeout cue plays first, so the person does not hear only silence after the accepted cue.
+Errors are `busy`, `unknown_satellite`, `satellite_offline` and `bad_request`. An error reply is `{"type":"error","reply_to":"c7","satellite":"voice-pe-02","data":{"code":"busy","message":"…"}}` (`reply_to` and `satellite` are `null` when the command did not carry valid ones). Every `ack`ed `speak` ends with one `playback_finished` while the hub runs (shutdown emits none), also when the playback failed (T-017). If TTS fails before any audio for a reply, the timeout cue plays first, so the person does not hear only silence after the accepted cue.
 
 **Satellite states.** `idle`: armed, no wake candidate. `listening`: a wake candidate is open (after `wake`). `processing`: accepted, awaiting a reply. `speaking`: playing audio (P1). `error`: offline, also before the first connect.
 
-**Busy policy (decision).** `speak`/`play` is accepted when the satellite is listening with no open speech segment, or is waiting for a reply (`PROCESSING`). While a speech segment is being captured or audio is playing, it gets an immediate `busy` error. There is no queue; consumers send their next item after `playback_finished`. *Rationale:* no queue means no buffered audio and no stale state, so there is nothing to drain after a disconnect or restart.
+**Busy policy (decision).** `speak`/`play` is accepted when the satellite is `idle` with no open speech segment (an announcement, §4.1 step 8), or is waiting for a reply (`processing`). While a speech segment is being captured, a wake candidate is open (`listening`, also in the pause after a bare wake phrase) or audio is playing (`speaking`, also a second announcement), it gets an immediate `busy` error. `release` is accepted only in `processing`; `stop` only while a `speak` runs (once: a second `stop` is `busy`). A command already sent to the satellite is never cancelled: `stop` takes effect at the next TTS read or wait, at most about the time one command takes. A `stop` before any audio plays nothing (no cue); after audio has started the driver stops the media player (`PlaybackStop`, ESPHome `media_player_command(STOP, announcement=True)`). There is no queue; `playback_finished` comes before the re-arm, so consumers send their next item once the satellite status is `idle` again (before that it is `busy`). *Rationale:* no queue means no buffered audio and no stale state, so there is nothing to drain after a disconnect or restart.
 
 ```json
 {"type":"transcript_final","satellite":"voice-pe-bedroom","ts":"2026-10-18T16:40:12.120Z",

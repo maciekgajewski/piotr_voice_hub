@@ -24,6 +24,7 @@ from piotr_voice_hub.satellites.messages import (
     PlaybackChunk,
     PlaybackEnd,
     PlaybackFinished,
+    PlaybackStop,
     PlayCue,
     ResetWakeCandidate,
     SetVisualState,
@@ -70,6 +71,7 @@ class MicrophoneProtocolState:
         self._cue_id: str | None = None
         self._playback_id: str | None = None
         self._playback_ended = False
+        self._playback_stopped = False
         self._used_ids: set[str] = set()
         self._recent_ids: deque[str] = deque()
 
@@ -120,18 +122,26 @@ class MicrophoneProtocolState:
             self._claim_new_id(command.playback_id)
             self._playback_id = command.playback_id
             self._playback_ended = False
+            self._playback_stopped = False
             self._state = DriverState.PLAYING_AUDIO
             return
         if isinstance(command, PlaybackChunk):
             self._require_state(command, DriverState.PLAYING_AUDIO)
             self._require_equal("playback_id", command.playback_id, self._playback_id)
-            assert not self._playback_ended, "PlaybackChunk after PlaybackEnd"
+            assert not self._playback_ended, "PlaybackChunk after PlaybackEnd or PlaybackStop"
             return
         if isinstance(command, PlaybackEnd):
             self._require_state(command, DriverState.PLAYING_AUDIO)
             self._require_equal("playback_id", command.playback_id, self._playback_id)
-            assert not self._playback_ended, "duplicate PlaybackEnd"
+            assert not self._playback_ended, "PlaybackEnd after PlaybackEnd or PlaybackStop"
             self._playback_ended = True
+            return
+        if isinstance(command, PlaybackStop):
+            # Before or after PlaybackEnd; nothing more may be sent for this playback.
+            self._require_state(command, DriverState.PLAYING_AUDIO)
+            self._require_equal("playback_id", command.playback_id, self._playback_id)
+            assert not self._playback_stopped, "duplicate PlaybackStop"
+            self._playback_ended = self._playback_stopped = True
             return
         raise AssertionError(f"unsupported microphone command: {type(command).__name__}")
 
@@ -235,3 +245,4 @@ class MicrophoneProtocolState:
         self._cue_id = None
         self._playback_id = None
         self._playback_ended = False
+        self._playback_stopped = False

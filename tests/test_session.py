@@ -1,4 +1,4 @@
-"""T-010, T-017: the satellite session state machine, with a fake driver, STT and TTS."""
+"""T-010, T-017, T-019: the satellite session state machine, with a fake driver, STT and TTS."""
 
 import asyncio
 import logging
@@ -35,6 +35,7 @@ from piotr_voice_hub.satellites.messages import (
     PlaybackBegin,
     PlaybackChunk,
     PlaybackEnd,
+    PlaybackStop,
     PlayCue,
     ResetWakeCandidate,
     SetVisualState,
@@ -223,11 +224,14 @@ class FakeDriver:
         self.closes = 0
         self.in_flight = False
         self.overlapped = False
+        self.finished: set[str] = set()  # playbacks whose PlaybackFinished was queued
         # Like the real ESPHome driver: a queued event is returned without yielding first.
         self.eager = False
 
     def push(self, *items: Item) -> None:
         for item in items:
+            if isinstance(item, DriverPlaybackFinished):
+                self.finished.add(item.playback_id)
             self.events.put_nowait(item)
 
     async def wait_for_event(self) -> MicrophoneEvent:
@@ -263,6 +267,8 @@ class FakeDriver:
                 self.push(CueFinished(event.cue_id))
             elif isinstance(event, PlaybackEnd):
                 self.push(DriverPlaybackFinished(event.playback_id))
+            elif isinstance(event, PlaybackStop) and event.playback_id not in self.finished:
+                self.push(DriverPlaybackFinished(event.playback_id))  # else already queued
         finally:
             self.in_flight = False
 
@@ -297,6 +303,8 @@ class FakeDriver:
                 return ("chunk", len(c.data))
             if isinstance(c, PlaybackEnd):
                 return "end"
+            if isinstance(c, PlaybackStop):
+                return "stop-playback"
             assert isinstance(c, SetVisualState)
             return c.state
 
@@ -322,17 +330,22 @@ class Harness:
         self.tts = FakeTts()
         self.speaker = FakeSpeaker()
         self.events: list[HubEvent] = []
+        self.on_event: Callable[[HubEvent], None] = lambda _event: None  # a consumer's reaction
         self.sleeps: list[float] = []
         self.session = SatelliteSession(
             config(reply_timeout),
             self.driver,
             self.stt,
-            self.events.append,
+            self.emit,
             self.sleep,
             tts=self.tts,
             speaker=self.speaker,
         )
         self.task: asyncio.Task[None] | None = None
+
+    def emit(self, event: HubEvent) -> None:
+        self.events.append(event)
+        self.on_event(event)
 
     async def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
@@ -1369,6 +1382,7 @@ def test_commands_outside_the_reply_wait_are_busy_or_offline() -> None:
 async def _test_commands_outside_the_reply_wait_are_busy_or_offline() -> None:
     h = Harness(reply_timeout=10)
     assert busy(lambda: h.session.speak("x", 1.0)) == ErrorCode.SATELLITE_OFFLINE  # not started
+    assert busy(h.session.stop) == ErrorCode.SATELLITE_OFFLINE
     h.tts.chunk_delay = 0.05
     await accepted(h)
     playback_id = h.session.speak("Jest piąta.", 0.7)
@@ -1378,11 +1392,13 @@ async def _test_commands_outside_the_reply_wait_are_busy_or_offline() -> None:
     await h.until(lambda: h.events[-1:] == [SPEAKING])
     assert busy(h.session.release) == ErrorCode.BUSY  # speaking
     await h.until(lambda: h.events[-1:] == [IDLE])
-    assert busy(lambda: h.session.speak("x", 1.0)) == ErrorCode.BUSY  # idle: T-019
+    assert busy(h.session.release) == ErrorCode.BUSY  # idle
+    assert busy(h.session.stop) == ErrorCode.BUSY  # nothing is playing
     h.driver.fail_starts = 10**9  # stays offline
     h.driver.push(MicrophoneUnavailable("connection lost"))
     await h.until(lambda: h.events[-1:] == [OFFLINE])
     assert busy(lambda: h.session.speak("x", 1.0)) == ErrorCode.SATELLITE_OFFLINE
+    assert busy(h.session.stop) == ErrorCode.SATELLITE_OFFLINE
     await h.stop()
     assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
 
@@ -1622,6 +1638,425 @@ async def _test_shutdown_mid_speak() -> None:
     await h.until(lambda: h.tts.open == 1)
     await h.stop()
     assert h.tts.open == 0 and not h.hub(PlaybackFinished)
+
+
+# Announcements, the busy policy and stop (T-019)
+
+ANNOUNCED = [("begin", 22050, 2, 1, 0.5)] + [("chunk", CHUNK_BYTES)] * 3 + ["end"]
+
+
+async def idle(h: Harness) -> None:
+    """Start the session and wait until it is armed and idle."""
+    h.start()
+    await h.until(lambda: h.events[-1:] == [IDLE])
+
+
+def test_a_speak_to_an_idle_satellite_is_an_announcement() -> None:
+    asyncio.run(_test_announcement())
+
+
+async def _test_announcement() -> None:
+    h = Harness()
+    await idle(h)
+    playback_id = h.session.speak("Obiad gotowy.", 0.5)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.stop()
+    # Stop listening, play, re-arm: no cue, and the visual is not touched until the re-arm.
+    assert h.driver.without_ids() == [
+        VisualState.IDLE,
+        "start",
+        ("stop", "announcement"),
+        *ANNOUNCED,
+        VisualState.IDLE,
+        "start",
+    ]
+    finished = PlaybackFinished("kitchen", playback_id, False)
+    assert h.events == [OFFLINE, IDLE, SPEAKING, finished, IDLE]
+    assert h.tts.texts == ["Obiad gotowy."] and h.tts.open == 0
+
+
+def test_an_announcement_with_no_audio_plays_no_cue(caplog: pytest.LogCaptureFixture) -> None:
+    asyncio.run(_test_announcement_no_audio(caplog))
+
+
+async def _test_announcement_no_audio(caplog: pytest.LogCaptureFixture) -> None:
+    h = Harness()
+    h.tts.fail_at_start = True
+    await idle(h)
+    playback_id = h.session.speak("Obiad gotowy.", None)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.stop()
+    assert h.driver.without_ids()[2:] == [("stop", "announcement"), VisualState.IDLE, "start"]
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors == [
+        f"speak playback_id={playback_id}: TTS failed: could not connect to the TTS service: "
+        "refused; no audio"
+    ]
+
+
+def test_speak_while_a_segment_is_open_is_busy_then_idle_again_announces() -> None:
+    asyncio.run(_test_speak_while_capturing())
+
+
+async def _test_speak_while_capturing() -> None:
+    h = Harness()
+    h.stt.say("u1", "Jutro będzie padać.")  # not for the hub (TV, people talking)
+    h.driver.after_arm[0] = lambda listen_id: [
+        SpeechStarted(listen_id, "u1", 16000, 2, 1),
+        AudioChunk(listen_id, "u1", CHUNK),
+    ]
+    await idle(h)
+    await h.until(lambda: "u1" in h.stt.sessions)
+    with pytest.raises(CommandError, match=r"kitchen is busy \(idle, capturing speech\)") as busy_:
+        h.session.speak("Obiad gotowy.", 0.5)
+    assert busy_.value.code == ErrorCode.BUSY
+    assert busy(h.session.stop) == ErrorCode.BUSY
+    listen_id = h.driver.starts()[0].listen_id
+    h.driver.push(SpeechEnded(listen_id, "u1", "completed"))
+    await h.until(lambda: h.stt.sessions["u1"][1].closed)
+    await asyncio.sleep(0.01)  # back in the idle wait
+    playback_id = h.session.speak("Obiad gotowy.", 0.5)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.stop()
+    assert h.driver.without_ids()[2:] == [("stop", "announcement"), *ANNOUNCED] + [
+        VisualState.IDLE,
+        "start",
+    ]
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
+    assert not h.hub(Wake)
+
+
+def test_speak_while_a_wake_is_open_is_busy() -> None:
+    asyncio.run(_test_speak_while_a_wake_is_open())
+
+
+async def _test_speak_while_a_wake_is_open() -> None:
+    """`listening`: a wake candidate open, also the wake word alone and its pause."""
+    h = Harness()
+    h.stt.say("u1", "Ryszardzie", ("Ryszardzie",))
+    h.driver.after_arm[0] = lambda listen_id: [
+        SpeechStarted(listen_id, "u1", 16000, 2, 1),
+        AudioChunk(listen_id, "u1", CHUNK),
+    ]
+    h.start()
+    await h.until(lambda: h.events[-1:] == [LISTENING])  # a segment open, a wake open
+    with pytest.raises(CommandError, match=r"is busy \(listening, capturing speech\)"):
+        h.session.speak("Obiad gotowy.", 0.5)
+    h.driver.push(SpeechEnded(h.driver.starts()[0].listen_id, "u1", "completed"))
+    await h.until(lambda: h.stt.sessions["u1"][1].closed)
+    await asyncio.sleep(0.01)  # the wake word alone: waiting for the request, no segment open
+    with pytest.raises(CommandError, match=r"kitchen is busy \(listening\): not waiting"):
+        h.session.speak("Obiad gotowy.", 0.5)
+    assert busy(h.session.release) == ErrorCode.BUSY
+    await h.stop()
+    assert not h.hub(PlaybackFinished) and h.tts.texts == []
+
+
+def test_a_second_speak_before_the_announcement_starts_is_busy() -> None:
+    asyncio.run(_test_a_second_announcement())
+
+
+async def _test_a_second_announcement() -> None:
+    h = Harness()
+    h.tts.chunk_delay = 0.05
+    await idle(h)
+    playback_id = h.session.speak("Obiad gotowy.", 0.5)
+    with pytest.raises(CommandError, match="already has an announcement"):
+        h.session.speak("Drugi raz.", 0.5)
+    await h.until(lambda: h.events[-1:] == [SPEAKING])
+    with pytest.raises(CommandError, match=r"is busy \(speaking\)"):
+        h.session.speak("Drugi raz.", 0.5)
+    assert busy(h.session.release) == ErrorCode.BUSY
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.stop()
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
+    assert h.tts.texts == ["Obiad gotowy."]
+
+
+def test_speech_read_in_the_same_step_as_the_announcement_is_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    asyncio.run(_test_announcement_race(caplog))
+
+
+async def _test_announcement_race(caplog: pytest.LogCaptureFixture) -> None:
+    """The ack was given on the state the API saw: the announcement plays and the stop drops
+    the segment (MP-STOP-002)."""
+    h = Harness()
+    await idle(h)
+    await asyncio.sleep(0.01)  # the reader waits in the driver
+    listen_id = h.driver.starts()[0].listen_id
+    h.driver.push(*segments("u1")(listen_id))
+    playback_id = h.session.speak("Obiad gotowy.", 0.5)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.stop()
+    assert h.driver.without_ids()[2:] == [("stop", "announcement"), *ANNOUNCED] + [
+        VisualState.IDLE,
+        "start",
+    ]
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
+    assert h.stt.sessions == {}
+    assert "speech u1 started as the announcement was taken; dropped" in caplog.text
+
+
+def test_a_disconnect_during_an_announcement_still_finishes() -> None:
+    asyncio.run(_test_a_disconnect_during_an_announcement())
+
+
+async def _test_a_disconnect_during_an_announcement() -> None:
+    h = Harness()
+    h.driver.fail_on.add(PlaybackChunk)
+    await idle(h)
+    playback_id = h.session.speak("Obiad gotowy.", 0.5)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.events[h.events.index(SPEAKING) :] == [
+        SPEAKING,
+        PlaybackFinished("kitchen", playback_id, False),
+        OFFLINE,
+        IDLE,
+    ]
+    assert h.tts.open == 0
+
+
+@pytest.mark.parametrize("announcement", [False, True])
+@pytest.mark.parametrize("when", ["at-the-ack", "before-audio", "mid-stream", "draining"])
+def test_stop_ends_the_speak_with_one_playback_finished_then_rearms(
+    announcement: bool, when: str
+) -> None:
+    asyncio.run(_test_stop(announcement, when))
+
+
+async def _test_stop(announcement: bool, when: str) -> None:
+    h = Harness(reply_timeout=10)
+    if when == "before-audio":
+        h.tts.chunk_delay = 5.0  # the first chunk never comes in time
+    elif when == "mid-stream":
+        h.tts.chunks = h.tts.chunks * 20
+        h.tts.chunk_delay = 0.05
+    elif when == "draining":
+        h.driver.silent.add(PlaybackEnd)  # the device is still playing
+    if announcement:
+        await idle(h)
+    else:
+        await accepted(h)
+    playback_id = h.session.speak("Jest piąta.", 0.5)
+    if when == "before-audio":
+        await h.until(lambda: h.tts.open == 1)
+    elif when == "mid-stream":
+        await h.until(lambda: ("chunk", CHUNK_BYTES) in h.driver.without_ids())
+    elif when == "draining":
+        await h.until(lambda: "end" in h.driver.without_ids())
+    started = asyncio.get_running_loop().time()
+    h.session.stop()
+    with pytest.raises(CommandError, match=f"already stopping {playback_id}"):
+        h.session.stop()
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    assert asyncio.get_running_loop().time() - started < 0.5
+    await h.stop()
+    first = 2 if announcement else h.driver.without_ids().index(VisualState.PROCESSING) + 1
+    played = h.driver.without_ids()[first:]
+    if announcement:
+        assert played[0] == ("stop", "announcement")
+        played = played[1:]
+    if when in ("at-the-ack", "before-audio"):  # nothing played, and no cue
+        assert played == [VisualState.IDLE, "start"]
+    else:
+        assert played[0] == ("begin", 22050, 2, 1, 0.5)
+        last = "end" if when == "draining" else ("chunk", CHUNK_BYTES)
+        assert played[-4:] == [last, "stop-playback", VisualState.IDLE, "start"]
+        assert ("end" in played) == (when == "draining")
+        if when == "mid-stream":  # cut short
+            assert played.count(("chunk", CHUNK_BYTES)) < len(h.tts.chunks)
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
+    assert h.events[-3:] == [SPEAKING, PlaybackFinished("kitchen", playback_id, False), IDLE]
+    assert h.tts.texts == ([] if when == "at-the-ack" else ["Jest piąta."])
+    assert h.tts.open == 0
+    assert CueType.TIMEOUT not in h.driver.without_ids()
+
+
+@pytest.mark.parametrize("stop_first", [False, True])
+def test_a_stop_as_the_playback_finishes_gives_one_playback_finished(stop_first: bool) -> None:
+    asyncio.run(_test_stop_as_it_finishes(stop_first))
+
+
+async def _test_stop_as_it_finishes(stop_first: bool) -> None:
+    """The stop and the device's PlaybackFinished in the same loop step, in either order: one
+    `playback_finished`; a PlaybackStop for a playback that has finished is a no-op."""
+    h = Harness(reply_timeout=10)
+    h.driver.silent.add(PlaybackEnd)
+    await accepted(h)
+    playback_id = h.session.speak("Jest piąta.", 0.5)
+    await h.until(lambda: "end" in h.driver.without_ids())
+    await asyncio.sleep(0.01)  # waiting for PlaybackFinished
+    if stop_first:
+        h.session.stop()
+        h.driver.push(DriverPlaybackFinished(playback_id))
+    else:
+        h.driver.push(DriverPlaybackFinished(playback_id))
+        h.session.stop()
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.stop()
+    assert ("stop-playback" in h.driver.without_ids()) == stop_first
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
+    assert h.driver.events.empty()
+
+
+def test_stop_without_a_speak_is_busy() -> None:
+    asyncio.run(_test_stop_without_a_speak())
+
+
+async def _test_stop_without_a_speak() -> None:
+    h = Harness(reply_timeout=10)
+    await idle(h)
+    with pytest.raises(CommandError, match=r"kitchen is busy \(idle\): nothing is playing"):
+        h.session.stop()
+    await h.stop()
+    h = Harness(reply_timeout=10)
+    await accepted(h)
+    with pytest.raises(CommandError, match=r"kitchen is busy \(processing\): nothing is playing"):
+        h.session.stop()
+    h.session.release()  # the reply wait is not disturbed
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.stop()
+    assert "stop-playback" not in h.driver.without_ids()
+
+
+@pytest.mark.parametrize("announcement", [False, True])
+def test_the_next_speak_waits_for_idle_after_playback_finished(announcement: bool) -> None:
+    """design.md §6: `playback_finished` goes out before the re-arm, so a client's next item
+    is `busy` until the satellite's `idle` status (PR #28 review S1)."""
+    asyncio.run(_test_next_speak_waits_for_idle(announcement))
+
+
+async def _test_next_speak_waits_for_idle(announcement: bool) -> None:
+    h = Harness(reply_timeout=10)
+    answers: list[str] = []
+
+    def next_speak() -> None:  # sent as a consumer would: after the event, not inside it
+        try:
+            answers.append(h.session.speak("Następne.", 0.5))
+        except CommandError as error:
+            answers.append(error.code.value)
+
+    def react(event: HubEvent) -> None:
+        if isinstance(event, PlaybackFinished) or (
+            event == IDLE and h.hub(PlaybackFinished) and len(answers) == 1
+        ):
+            asyncio.get_running_loop().call_soon(next_speak)
+
+    if announcement:
+        await idle(h)
+    else:
+        await accepted(h)
+    h.on_event = react
+    h.session.speak("Jest piąta.", 0.5)
+    await h.until(lambda: len(h.driver.starts()) == 3)  # the second speak played and re-armed
+    await h.stop()
+    assert answers[0] == ErrorCode.BUSY.value
+    assert answers[1].startswith("playback-")
+    assert len(h.hub(PlaybackFinished)) == 2
+    assert h.tts.texts == ["Jest piąta.", "Następne."]
+
+
+@pytest.mark.parametrize("announcement", [False, True])
+@pytest.mark.parametrize("when", ["mid-stream", "draining"])
+def test_a_stop_whose_playback_stop_fails_still_finishes_once(
+    announcement: bool, when: str
+) -> None:
+    """PR #28 review S2: the satellite disconnects as `PlaybackStop` is sent."""
+    asyncio.run(_test_stop_fails(announcement, when))
+
+
+async def _test_stop_fails(announcement: bool, when: str) -> None:
+    h = Harness(reply_timeout=10)
+    h.driver.fail_on.add(PlaybackStop)
+    if when == "mid-stream":
+        h.tts.chunks = h.tts.chunks * 20
+        h.tts.chunk_delay = 0.05
+    else:
+        h.driver.silent.add(PlaybackEnd)  # the device is still playing
+    if announcement:
+        await idle(h)
+    else:
+        await accepted(h)
+    playback_id = h.session.speak("Jest piąta.", 0.5)
+    await h.until(lambda: _played(h, when))
+    h.session.stop()
+    await h.until(lambda: h.driver.closes == 1)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.events[h.events.index(SPEAKING) :] == [
+        SPEAKING,
+        PlaybackFinished("kitchen", playback_id, False),
+        OFFLINE,
+        IDLE,
+    ]
+    assert "stop-playback" not in h.driver.without_ids()  # it failed
+    assert h.tts.open == 0
+    assert CueType.TIMEOUT not in h.driver.without_ids()
+
+
+def _played(h: Harness, when: str) -> bool:
+    commands = h.driver.without_ids()
+    return ("end" in commands) if when == "draining" else (("chunk", CHUNK_BYTES) in commands)
+
+
+def test_an_announcement_acked_as_the_satellite_disconnects_still_finishes() -> None:
+    """PR #28 review S2: the ack and a disconnect read in the same loop step."""
+    asyncio.run(_test_announcement_and_disconnect())
+
+
+async def _test_announcement_and_disconnect() -> None:
+    h = Harness()
+    await idle(h)
+    await asyncio.sleep(0.01)  # the reader waits in the driver
+    h.driver.push(MicrophoneUnavailable("connection lost"))
+    playback_id = h.session.speak("Obiad gotowy.", 0.5)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.events == [
+        OFFLINE,
+        IDLE,
+        PlaybackFinished("kitchen", playback_id, False),
+        OFFLINE,
+        IDLE,
+    ]
+    assert ("stop", "announcement") not in h.driver.without_ids()
+    assert h.tts.texts == [] and h.tts.open == 0
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_commands_while_accepting_are_busy(partial: bool) -> None:
+    """The T-019 plan's busy table: accepting (stop listening, the accepted cue, the speaker
+    hint) is busy for speak, release and stop. Without a partial the status is still `idle`,
+    and a speak is still no announcement."""
+    asyncio.run(_test_commands_while_accepting(partial))
+
+
+async def _test_commands_while_accepting(partial: bool) -> None:
+    h = Harness(reply_timeout=10)
+    h.speaker.delay = 0.2
+    h.stt.say("u1", "Ryszardzie, światło", ("Ryszardzie",) if partial else ())
+    h.driver.after_arm[0] = segments("u1")
+    h.start()
+    await h.until(lambda: VisualState.PROCESSING in h.driver.without_ids())  # the hint's wait
+    state = "listening" if partial else "idle"
+    with pytest.raises(CommandError, match=rf"kitchen is busy \({state}\): not waiting"):
+        h.session.speak("Obiad gotowy.", 0.5)
+    assert busy(h.session.release) == ErrorCode.BUSY
+    assert busy(h.session.stop) == ErrorCode.BUSY
+    await h.until(lambda: PROCESSING in h.events)
+    h.session.release()  # the accept was not disturbed
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.stop()
+    assert len(h.hub(TranscriptFinal)) == 1
+    assert not h.hub(PlaybackFinished) and h.tts.texts == []
 
 
 # The speaker hint (T-018)
