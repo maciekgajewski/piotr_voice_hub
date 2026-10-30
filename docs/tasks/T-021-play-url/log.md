@@ -44,3 +44,8 @@
     drain before any `_wait_player` in it can raise. Removed it; the no-ERROR test pins the
     behaviour. Each mutation (N7, B, S1, N5) was applied and reverted from a /tmp backup, and
     each one failed a test.
+- Checklist step 11b (manager's follow-up on PR #30): a `docker kill` + `docker start` while
+  the radio plays, so `close()` never runs and the connect check alone must stop the radio
+  (WARNING "the media player is PLAYING at connect …", INFO "stopped the media player at
+  connect"). Records the path, the seconds from `docker start` to silence and the two lines'
+  timestamps (`docker logs -t`). Docs only; step 11 unchanged.

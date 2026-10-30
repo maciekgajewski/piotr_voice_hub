@@ -105,5 +105,8 @@ voice-pe-02 (living_room) and voice-pe-03 (study). Main source a LAN http server
 laptop (`python3 -m http.server`, no change to piotr's firewall) with files fetched from pinned
 raw.githubusercontent.com URLs and a generated 0.3 s beep; one https step. Cases: reply,
 announcement, `stop` mid-play, `listen_after`, busy, a LAN 404, a refused port, a clip under
-0.5 s, an endless internet radio stopped with `--stop-after`, and a hub restart while the radio
-plays (review B). Each failure case records which log line appeared (review S1).
+0.5 s, an endless internet radio stopped with `--stop-after`, a hub restart while the radio
+plays (review B), and (step 11b) a `docker kill` + `docker start` while the radio plays: SIGKILL
+skips `close()`, so only the connect check can stop the radio; record its two log lines with
+their timestamps and the seconds from `docker start` to silence. Each failure case records
+which log line appeared (review S1).
