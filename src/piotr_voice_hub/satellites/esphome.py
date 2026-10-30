@@ -20,7 +20,16 @@ producer's (P1 session/TTS) job.
 
 Cues: a cue service that declares `supports_response` (firmware, P2: status mode with an
 explicit `api.respond`) is called with a response, so `CueFinished` means the cue has played.
-Otherwise the call is fire-and-forget, as before.
+Otherwise the driver follows the media player's state (`subscribe_states`): `CueFinished` comes
+once the player has reported a change after the call, at least `CUE_MIN_SECONDS` after the
+call, and is not busy (`ANNOUNCING`, or `PLAYING`, which is how the API reported an
+announcement on hardware), bounded (T-017 fix). It may report only the final `IDLE`: on
+hardware a short cue's announcement and `IDLE` reached the API as one update, so the update
+alone cannot tell the cue from a volume change; the floor lets the cue's own state arrive
+before the busy check. A Voice PE silently drops an announcement URL sent while a cue is still
+announcing (seen on hardware: no fetch at all), so playback also sends its URL only once the
+player is not busy, bounded. These bounds log a WARNING and go on: a cue is not worth a
+reconnect, and a dropped URL still ends in the 5 s fetch timeout below.
 
 Every await on the device has a timeout. Failures raise `MicrophoneUnavailable` from
 `wait_for_event()`/`send_output_event()`; the session then calls `close()` and starts again,
@@ -47,7 +56,13 @@ from typing import Any, Protocol, cast
 
 from aioesphomeapi.client import APIClient
 from aioesphomeapi.core import APIConnectionError
-from aioesphomeapi.model import MediaPlayerInfo, SupportsResponseType, VoiceAssistantEventType
+from aioesphomeapi.model import (
+    MediaPlayerEntityState,
+    MediaPlayerInfo,
+    MediaPlayerState,
+    SupportsResponseType,
+    VoiceAssistantEventType,
+)
 
 from piotr_voice_hub.config import SatelliteConfig
 from piotr_voice_hub.hub.playback_http import PlaybackHttpServer, PlaybackStream, StreamFull
@@ -92,6 +107,21 @@ STOP_ACK_TIMEOUT_SECONDS = 2.0
 # `supports_response` without calling `api.respond` makes every cue wait out these 8 s and
 # then drop the connection (review B2), so the firmware must do both (P2 carry-forward).
 CUE_RESPONSE_TIMEOUT_SECONDS = 8.0
+# A cue called without a response: the player reports a change about 40-150 ms after the call
+# (Voice PE, T-017 fix); if it has not within this, the cue is taken as done (no sound).
+CUE_START_TIMEOUT_SECONDS = 1.0
+# ... and not before this after the call: an unrelated update (the dial, a stray IDLE) can come
+# first, and the cue's own report is in by then (measured 40-150 ms; a 0.5 s gap played).
+CUE_MIN_SECONDS = 0.3
+# ... and the cue has played once the player is not busy (ANNOUNCING or PLAYING). These bounds
+# are the driver's own: the call (at most SERVICE_TIMEOUT_SECONDS) + 1 s + 8 s, about 14 s at
+# worst, while the session holds its command lock; the session's 10 s wait for CueFinished
+# starts only after the command returns, so it does not bound this.
+CUE_END_TIMEOUT_SECONDS = 8.0
+# Before a playback URL: wait for the player not to be busy (a cue still playing). A player
+# stuck in PLAYING (nothing else plays media here) delays every speak by these 3 s with a
+# WARNING; if the device then drops the URL, the 5 s fetch timeout below makes it unavailable.
+PLAYER_FREE_TIMEOUT_SECONDS = 3.0
 # Playback drain, from the old driver: the device must fetch the stream within 5 s of
 # PlaybackEnd; sending it may then take the audio length plus 30 s; the rest of the audio
 # plays out after the last byte, plus a grace.
@@ -186,6 +216,8 @@ class EsphomeClient(Protocol):
 
     def send_voice_assistant_event(self, event_type: Any, data: dict[str, str] | None) -> None: ...
 
+    def subscribe_states(self, on_state: Callable[[Any], None]) -> None: ...
+
 
 type ClientFactory = Callable[[PlaybackTarget], EsphomeClient]
 type LocalIpFor = Callable[[str], str]
@@ -268,6 +300,12 @@ class EsphomeSatellite:
         self._unsubscribe: Callable[[], None] | None = None
         self._services: dict[str, Any] = {}
         self._media_player_key: int | None = None
+        # The media player's state (subscribe_states; None until the initial one after
+        # connecting), a count of later updates, and an event set on every update: cues and
+        # playback wait on it (T-017 fix).
+        self._player_state: MediaPlayerState | None = None
+        self._player_updates = 0
+        self._player_changed = asyncio.Event()
         self._device_ip: str | None = None  # IPv4 of the API connection, None if not IPv4
         self._playback: _Playback | None = None
         self._unavailable: str | None = None  # set on failure; cleared by close()
@@ -385,7 +423,8 @@ class EsphomeSatellite:
             if name in names and self._supports_response(name) is None
         ]:
             self._logger.info(
-                "cue services without supports_response (CueFinished follows the call): %s",
+                "cue services without supports_response (CueFinished follows the media "
+                "player's announcement): %s",
                 no_response,
             )
         players = [entity for entity in entities if isinstance(entity, MediaPlayerInfo)]
@@ -410,8 +449,43 @@ class EsphomeSatellite:
             handle_stop=self._handle_stop,
             handle_audio=self._handle_audio,
         )
+        if self._media_player_key is not None:
+            client.subscribe_states(partial(self._on_state, client))
         self._client = client  # last: no caller ever sees a half-connected client
         self._logger.info("connected to %s", self._address())
+
+    def _on_state(self, client: EsphomeClient, state: Any) -> None:
+        if client is not self._client or not isinstance(state, MediaPlayerEntityState):
+            return
+        if state.key != self._media_player_key:
+            return
+        if self._player_state is not None:  # not the initial state sent on subscribe
+            self._player_updates += 1
+        self._logger.debug(
+            "media player %s volume=%.2f update=%d",
+            getattr(state.state, "name", state.state),
+            state.volume,
+            self._player_updates,
+        )
+        self._player_state = state.state
+        self._player_changed.set()
+
+    def _player_free(self) -> bool:
+        # The API reported the device's ANNOUNCING as PLAYING on hardware (T-017 fix).
+        return self._player_state not in (MediaPlayerState.ANNOUNCING, MediaPlayerState.PLAYING)
+
+    async def _wait_player(self, done: Callable[[], bool], timeout: float) -> bool:
+        """Wait until `done()` holds after a media player update; False after `timeout`."""
+        try:
+            async with asyncio.timeout(timeout):
+                while not done():
+                    if self._unavailable is not None:
+                        raise MicrophoneUnavailable(self._unavailable)
+                    self._player_changed.clear()
+                    await self._player_changed.wait()
+        except TimeoutError:
+            return done()
+        return True
 
     async def _on_transport_stop(self, client: EsphomeClient, expected_disconnect: bool) -> None:
         if client is not self._client:
@@ -424,6 +498,7 @@ class EsphomeSatellite:
         client, unsubscribe = self._client, self._unsubscribe
         self._client, self._unsubscribe, self._services = None, None, {}
         self._media_player_key = None
+        self._player_state = None
         if unsubscribe is not None:
             unsubscribe()
         if client is not None:
@@ -454,6 +529,7 @@ class EsphomeSatellite:
         # Wake a pending start or stop-ack wait now; it re-checks _unavailable.
         self._stream_started.set()
         self._stream_stopped.set()
+        self._player_changed.set()
 
     async def _lose_transport(self, reason: str) -> MicrophoneUnavailable:
         self._fail(reason)
@@ -495,7 +571,10 @@ class EsphomeSatellite:
             return False
         return_response = self._supports_response(name)
         if return_response is None:
-            await self._call(name)  # fire-and-forget: the cue may still be playing
+            updates = self._player_updates
+            called_at = asyncio.get_running_loop().time()
+            await self._call(name)
+            await self._wait_cue_played(name, updates, called_at)
             return True
         client = self._client
         if client is None:
@@ -514,6 +593,34 @@ class EsphomeSatellite:
             self._logger.warning("cue service %s failed: %s", name, response.error_message)
         self._logger.debug("executed service %s with a response", name)
         return True
+
+    async def _wait_cue_played(self, name: str, updates: int, called_at: float) -> None:
+        """A cue without a response has played once the media player has reported a change
+        after the call (ESPHome may merge `ANNOUNCING` and `IDLE` into one update), at least
+        `CUE_MIN_SECONDS` after the call, and is not busy (ANNOUNCING or PLAYING). Bounded; a
+        timeout is a WARNING, not a failure."""
+        if self._media_player_key is None:
+            return  # nothing to follow (no playback either)
+        if not await self._wait_player(
+            lambda: self._player_updates > updates, CUE_START_TIMEOUT_SECONDS
+        ):
+            self._logger.warning(
+                "cue %s: the media player reported no change within %g s; going on",
+                name,
+                CUE_START_TIMEOUT_SECONDS,
+            )
+            return
+        # The floor (review S1): the update may not be the cue's; by now its own report is in.
+        # Waiting on the player, not sleeping, still notices a disconnect at once.
+        floor = called_at + CUE_MIN_SECONDS - asyncio.get_running_loop().time()
+        if floor > 0:
+            await self._wait_player(lambda: False, floor)
+        if not await self._wait_player(self._player_free, CUE_END_TIMEOUT_SECONDS):
+            self._logger.warning(
+                "cue %s: the media player is still busy after %g s; going on",
+                name,
+                CUE_END_TIMEOUT_SECONDS,
+            )
 
     # Listening
 
@@ -611,6 +718,13 @@ class EsphomeSatellite:
         if device_ip is None:  # reconnecting may pick an IPv4 address
             raise await self._lose_transport("the API connection is not IPv4: no playback URL")
         await self._await_stale_stop()
+        # A Voice PE drops an announcement URL that arrives while it is still announcing a cue.
+        if not await self._wait_player(self._player_free, PLAYER_FREE_TIMEOUT_SECONDS):
+            self._logger.warning(
+                "playback %s: the media player is still busy after %g s; sending anyway",
+                event.playback_id,
+                PLAYER_FREE_TIMEOUT_SECONDS,
+            )
         try:
             host = self._local_ip(device_ip)
         except OSError as error:
