@@ -23,3 +23,12 @@
   connect's initial IDLE update arrived; it waits for that first.
 - Docs: design §4.1 step 8 and §6 (`stop`, busy policy), microphone-protocol.md (`PlaybackStop`
   row, transition, sequencing), tasks README (T-018 merged, T-019 in review, carry-forward).
+
+- Review round 1 (before the PR): `tools/speak_test.py` gets T-019 modes, still websockets plus
+  the standard library: `--announce SATELLITE` (one speak now, no wake; exit 0 after its
+  `playback_finished`, 1 on an error reply), `--stop SATELLITE` (one stop; exit 0 on any answer,
+  `busy` expected when nothing plays), `--stop-after SECONDS` (stop that long after each speak
+  ack, in reply or announce mode) and `--long` (a Polish text of 348 characters, about 20–25 s;
+  estimated, Piper not run here). Existing options and the reply behaviour are unchanged; option
+  clashes are argparse errors. 12 new tool tests against a fake hub. Checklist: production has
+  only voice-pe-02 (living_room) and voice-pe-03 (study); box3-office dropped.
