@@ -53,7 +53,7 @@ class TranscriptFinal:
     text: str  # after the wake phrase
     raw_text: str
     follow_up: bool
-    speaker: Speaker | None  # speaker recognition is P1: always None in P0
+    speaker: Speaker | None  # a hint (T-018): None if not recognized or the service failed
     audio_ms: int
 
 

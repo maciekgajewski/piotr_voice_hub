@@ -16,8 +16,10 @@ wake_phrase: Ryszardzie
 stt: {model: large-v3-turbo, device: cuda, compute_type: float16, beam_size: 5,
       partial: {interval_seconds: 0.75, window_seconds: 4.0, beam_size: 1}}
 
+# Our speaker recognition (T-018, compose service `speaker-recognition`, loopback only); the
+# old project's keeps 2140. Profile paths are inside that service's /profiles mount.
 speaker_recognition:
-  url: http://127.0.0.1:2140
+  url: http://127.0.0.1:2141
   timeout_seconds: 1.0
   profiles: {Maciek: /profiles/maciek/profile/speaker_profile.npz}
 

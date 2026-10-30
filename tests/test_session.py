@@ -16,6 +16,7 @@ from piotr_voice_hub.hub.events import (
     PlaybackFinished,
     SatelliteState,
     SatelliteStatus,
+    Speaker,
     TranscriptFinal,
     TranscriptPartial,
     Wake,
@@ -45,6 +46,7 @@ from piotr_voice_hub.satellites.messages import (
 )
 from piotr_voice_hub.satellites.messages import PlaybackFinished as DriverPlaybackFinished
 from piotr_voice_hub.satellites.types import MicrophoneContext, PlaybackTarget
+from piotr_voice_hub.speaker.interfaces import SpeakerMatch
 from piotr_voice_hub.stt.whisper import StreamingTextEvent, TextEnd, TextPartial
 from piotr_voice_hub.tts.interfaces import AudioFormat, TtsError
 
@@ -174,6 +176,31 @@ class FakeTts:
             self.open -= 1
 
 
+class FakeSpeaker:
+    """Answers `match` after `delay`; records each request. `block` never answers (only the
+    session's cancellation ends the request)."""
+
+    def __init__(self) -> None:
+        self.match: SpeakerMatch | None = None
+        self.delay = 0.0
+        self.block = False
+        self.requests: list[tuple[bytes, str]] = []
+        self.cancelled = 0
+        self.on_request: Callable[[], None] = lambda: None
+
+    async def recognize(self, pcm: bytes, request_id: str) -> SpeakerMatch | None:
+        self.requests.append((pcm, request_id))
+        self.on_request()
+        try:
+            await asyncio.sleep(self.delay)
+            if self.block:
+                await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        return self.match
+
+
 type Item = MicrophoneEvent | Exception
 type Script = Callable[[str], list[Item]]  # listen id -> items queued after that arm
 
@@ -293,6 +320,7 @@ class Harness:
         self.driver = FakeDriver()
         self.stt = FakeStt()
         self.tts = FakeTts()
+        self.speaker = FakeSpeaker()
         self.events: list[HubEvent] = []
         self.sleeps: list[float] = []
         self.session = SatelliteSession(
@@ -302,6 +330,7 @@ class Harness:
             self.events.append,
             self.sleep,
             tts=self.tts,
+            speaker=self.speaker,
         )
         self.task: asyncio.Task[None] | None = None
 
@@ -1593,3 +1622,180 @@ async def _test_shutdown_mid_speak() -> None:
     await h.until(lambda: h.tts.open == 1)
     await h.stop()
     assert h.tts.open == 0 and not h.hub(PlaybackFinished)
+
+
+# The speaker hint (T-018)
+
+
+def test_the_speaker_hint_is_on_transcript_final() -> None:
+    asyncio.run(_test_the_speaker_hint_is_on_transcript_final())
+
+
+async def _test_the_speaker_hint_is_on_transcript_final() -> None:
+    h = Harness(reply_timeout=10)
+    h.speaker.match = SpeakerMatch("Maciek", 0.734)
+    commands_at_request: list[object] = []
+    h.speaker.on_request = lambda: commands_at_request.extend(h.driver.without_ids())
+    h.stt.say("u1", "Ryszardzie, która godzina?", ("Ryszardzie",))
+    h.driver.after_arm[0] = segments("u1")
+    h.start()
+    await h.until(lambda: bool(h.hub(TranscriptFinal)))
+    await h.stop()
+    assert h.hub(TranscriptFinal) == [
+        TranscriptFinal(
+            "kitchen",
+            "u1",
+            "która godzina",
+            "Ryszardzie, która godzina?",
+            False,
+            Speaker("Maciek", 0.734),
+            40,
+        )
+    ]
+    assert h.speaker.requests == [(CHUNK * 2, "u1")]
+    # Sent at the accept, before the stop and the cue: they overlap the recognition.
+    assert commands_at_request == [VisualState.IDLE, "start", VisualState.LISTENING]
+
+
+def test_transcript_final_waits_for_a_slow_hint() -> None:
+    asyncio.run(_test_transcript_final_waits_for_a_slow_hint())
+
+
+async def _test_transcript_final_waits_for_a_slow_hint() -> None:
+    h = Harness(reply_timeout=10)
+    h.speaker.match = SpeakerMatch("Ola", 0.5)
+    h.speaker.delay = 0.1
+    h.stt.say("u1", "Ryszardzie, światło")
+    h.driver.after_arm[0] = segments("u1")
+    h.start()
+    await h.until(lambda: PROCESSING in h.events)
+    assert not h.hub(TranscriptFinal)  # the PROCESSING visual is up, the hint is not back
+    await h.until(lambda: bool(h.hub(TranscriptFinal)))
+    await h.stop()
+    final = h.hub(TranscriptFinal)[0]
+    assert isinstance(final, TranscriptFinal) and final.speaker == Speaker("Ola", 0.5)
+    assert h.events.index(PROCESSING) < h.events.index(final)
+
+
+def test_no_match_is_a_null_speaker() -> None:
+    asyncio.run(_test_no_match_is_a_null_speaker())
+
+
+async def _test_no_match_is_a_null_speaker() -> None:
+    h = Harness(reply_timeout=10)
+    h.stt.say("u1", "Ryszardzie, światło")
+    h.driver.after_arm[0] = segments("u1")
+    h.start()
+    await h.until(lambda: bool(h.hub(TranscriptFinal)))
+    await h.stop()
+    final = h.hub(TranscriptFinal)[0]
+    assert isinstance(final, TranscriptFinal) and final.speaker is None
+    assert len(h.speaker.requests) == 1
+
+
+def test_the_hint_hears_the_wake_word_alone_and_the_request() -> None:
+    asyncio.run(_test_the_hint_hears_the_wake_word_alone_and_the_request())
+
+
+async def _test_the_hint_hears_the_wake_word_alone_and_the_request() -> None:
+    h = Harness(reply_timeout=10)
+    h.speaker.match = SpeakerMatch("Maciek", 0.9)
+    h.stt.say("u1", "Ryszardzie.", ("Ryszardzie",))
+    h.stt.say("u2", "Która godzina?")
+    wake_chunk, request_chunk = b"\x01\x00" * 320, b"\x02\x00" * 320
+
+    def script(listen_id: str) -> list[Item]:
+        return [
+            SpeechStarted(listen_id, "u1", 16000, 2, 1),
+            AudioChunk(listen_id, "u1", wake_chunk),
+            SpeechEnded(listen_id, "u1", "completed"),
+            SpeechStarted(listen_id, "u2", 16000, 2, 1),
+            AudioChunk(listen_id, "u2", request_chunk),
+            AudioChunk(listen_id, "u2", request_chunk),
+            SpeechEnded(listen_id, "u2", "completed"),
+        ]
+
+    h.driver.after_arm[0] = script
+    h.start()
+    await h.until(lambda: bool(h.hub(TranscriptFinal)))
+    await h.stop()
+    assert h.speaker.requests == [(wake_chunk + request_chunk * 2, "u1")]
+    final = h.hub(TranscriptFinal)[0]
+    assert isinstance(final, TranscriptFinal)
+    assert (final.utterance_id, final.speaker, final.audio_ms) == (
+        "u1",
+        Speaker("Maciek", 0.9),
+        60,
+    )
+
+
+def test_the_hint_gets_at_most_the_last_max_segment_seconds() -> None:
+    asyncio.run(_test_the_hint_gets_at_most_the_last_max_segment_seconds())
+
+
+async def _test_the_hint_gets_at_most_the_last_max_segment_seconds() -> None:
+    h = Harness(reply_timeout=10)
+    h.stt.say("u1", "Ryszardzie.", ("Ryszardzie",))
+    h.stt.say("u2", "Która godzina?")
+    wake_chunk, request_chunk = b"\x01\x00" * 320, b"\x02\x00" * 320
+    chunks = 400  # 8 s each, 16 s together: over the 15 s segment limit (+ 0.1 s margin)
+
+    def script(listen_id: str) -> list[Item]:
+        items: list[Item] = [SpeechStarted(listen_id, "u1", 16000, 2, 1)]
+        items += [AudioChunk(listen_id, "u1", wake_chunk)] * chunks
+        items += [SpeechEnded(listen_id, "u1", "completed")]
+        items += [SpeechStarted(listen_id, "u2", 16000, 2, 1)]
+        items += [AudioChunk(listen_id, "u2", request_chunk)] * chunks
+        items += [SpeechEnded(listen_id, "u2", "completed")]
+        return items
+
+    h.driver.after_arm[0] = script
+    h.start()
+    await h.until(lambda: bool(h.hub(TranscriptFinal)))
+    await h.stop()
+    [(pcm, _)] = h.speaker.requests
+    whole = wake_chunk * chunks + request_chunk * chunks
+    assert pcm == whole[-15_100 * 32 :]  # the last 15.1 s: the end of the wake word, the request
+    final = h.hub(TranscriptFinal)[0]
+    assert isinstance(final, TranscriptFinal) and final.audio_ms == 16_000
+
+
+def test_a_disconnect_during_the_accept_cancels_the_hint_and_the_wake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_module, "EVENT_TIMEOUT_SECONDS", 0.02)
+    asyncio.run(_test_a_disconnect_during_the_accept_cancels_the_hint())
+
+
+async def _test_a_disconnect_during_the_accept_cancels_the_hint() -> None:
+    h = Harness()
+    h.speaker.block = True
+    h.stt.say("u1", "Ryszardzie, światło")
+    h.driver.after_arm[0] = segments("u1")
+    h.driver.silent.add(PlayCue)  # the accepted cue never finishes
+    h.start()
+    await h.until(lambda: h.driver.closes == 1)
+    h.driver.silent.clear()
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.speaker.cancelled == 1
+    assert h.hub(Wake, WakeCancelled, TranscriptFinal) == [
+        Wake("kitchen", "u1"),
+        WakeCancelled("kitchen", "u1"),
+    ]
+
+
+def test_cancelling_the_session_while_waiting_for_the_hint_cancels_it() -> None:
+    asyncio.run(_test_cancelling_the_session_while_waiting_for_the_hint())
+
+
+async def _test_cancelling_the_session_while_waiting_for_the_hint() -> None:
+    h = Harness()
+    h.speaker.block = True
+    h.stt.say("u1", "Ryszardzie, światło")
+    h.driver.after_arm[0] = segments("u1")
+    h.start()
+    await h.until(lambda: PROCESSING in h.events)
+    await h.stop()
+    assert h.speaker.cancelled == 1
+    assert not h.hub(TranscriptFinal)

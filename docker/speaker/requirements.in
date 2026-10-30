@@ -1,0 +1,11 @@
+# T-018: the speaker-recognition image (docker/speaker.Dockerfile). Compile with
+#   uv pip compile docker/speaker/requirements.in --generate-hashes --python-version 3.12 \
+#     --python-platform x86_64-manylinux_2_28 --index-url https://download.pytorch.org/whl/cpu \
+#     --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match \
+#     --emit-index-url -o docker/speaker/requirements.txt
+# CPU-only torch (design.md §4.3: ECAPA on the CPU, no VRAM): the +cpu wheels carry no CUDA
+# libraries. speechbrain needs torchaudio.
+speechbrain==1.1.2
+torch==2.9.1+cpu
+torchaudio==2.9.1+cpu
+numpy==2.5.4

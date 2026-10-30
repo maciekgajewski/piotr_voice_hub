@@ -1,9 +1,10 @@
 # Only pyproject.toml, uv.lock, README.md and src/ go into the hub image; the Piper image
-# (T-015) also takes docker/piper/.
+# (T-015) also takes docker/piper/, the speaker image (T-018) docker/speaker/.
 *
 !pyproject.toml
 !uv.lock
 !README.md
 !src/
 !docker/piper/
+!docker/speaker/
 **/__pycache__

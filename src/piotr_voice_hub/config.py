@@ -258,8 +258,13 @@ def _parse_stt(raw: dict[str, Any]) -> SttConfig:
 def _parse_speaker(raw: dict[str, Any]) -> SpeakerRecognitionConfig:
     _keys(raw, "speaker_recognition", {"url", "timeout_seconds", "profiles"})
     profiles = _section(raw, "profiles", "speaker_recognition")
+    url = _str(raw, "url", "speaker_recognition")
+    try:
+        parse_http_url(url)
+    except ValueError as error:
+        raise ConfigError(f"speaker_recognition.url: {error}") from None
     return SpeakerRecognitionConfig(
-        url=_str(raw, "url", "speaker_recognition"),
+        url=url,
         timeout_seconds=_positive(raw, "timeout_seconds", "speaker_recognition"),
         profiles={name: _str(profiles, name, "speaker_recognition.profiles") for name in profiles},
     )
@@ -296,6 +301,29 @@ def parse_tcp_uri(uri: str) -> tuple[str, int]:
         or uri.endswith(("?", "#"))
     ):
         raise ValueError(f"{uri!r}: expected tcp://host:port")
+    return parts.hostname, port
+
+
+def parse_http_url(url: str) -> tuple[str, int]:
+    """`http://host:port` → (host, port); anything else is a ValueError (T-018). User info is
+    rejected without echoing the URL."""
+    parts = urlsplit(url)
+    if "@" in parts.netloc:
+        raise ValueError("expected http://host:port, without user info")
+    try:
+        port = parts.port
+    except ValueError as error:
+        raise ValueError(f"{url!r}: {error}") from None
+    if (
+        parts.scheme != "http"
+        or not parts.hostname
+        or port is None
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
+        or url.endswith(("?", "#"))
+    ):
+        raise ValueError(f"{url!r}: expected http://host:port")
     return parts.hostname, port
 
 
