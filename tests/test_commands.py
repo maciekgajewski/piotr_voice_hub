@@ -1,5 +1,5 @@
-"""T-017, T-019: parsing, validating and routing the API commands `speak`, `release` and
-`stop`."""
+"""T-017, T-019, T-020: parsing, validating and routing the API commands `speak` (with
+`listen_after`), `release` and `stop`."""
 
 import json
 import logging
@@ -11,13 +11,13 @@ from piotr_voice_hub.hub.commands import CommandError, CommandRouter, ErrorCode
 
 class FakeSession:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, ...] | tuple[str, str, float | None]] = []
+        self.calls: list[tuple[str, ...] | tuple[str, str, float | None, bool]] = []
         self.refuse: CommandError | None = None
 
-    def speak(self, text: str, volume: float | None) -> str:
+    def speak(self, text: str, volume: float | None, listen_after: bool) -> str:
         if self.refuse is not None:
             raise self.refuse
-        self.calls.append(("speak", text, volume))
+        self.calls.append(("speak", text, volume, listen_after))
         return "playback-1"
 
     def release(self) -> None:
@@ -53,7 +53,8 @@ def test_speak_is_acked_with_its_playback_id_and_no_volume_unless_given() -> Non
         "satellite": "voice-pe-02",
         "data": {"playback_id": "playback-1"},
     }
-    assert session.calls == [("speak", "Jest piąta.", None)]  # the satellite's volume stays
+    # The satellite's volume stays; no follow-up window unless asked.
+    assert session.calls == [("speak", "Jest piąta.", None, False)]
 
 
 @pytest.mark.parametrize("volume", [0, 0.25, 1])
@@ -61,7 +62,14 @@ def test_speak_takes_a_volume_from_0_to_1(volume: float) -> None:
     commands, session = router()
     data = {"text": "Jest piąta.", "volume": volume, "listen_after": False}
     assert commands.handle(command(data=data))["type"] == "ack"
-    assert session.calls == [("speak", "Jest piąta.", float(volume))]
+    assert session.calls == [("speak", "Jest piąta.", float(volume), False)]
+
+
+def test_speak_with_listen_after_asks_for_the_follow_up_window() -> None:
+    commands, session = router()
+    reply = commands.handle(command(data={"text": "Wziąć parasol?", "listen_after": True}))
+    assert reply["type"] == "ack" and reply["data"] == {"playback_id": "playback-1"}
+    assert session.calls == [("speak", "Wziąć parasol?", None, True)]
 
 
 @pytest.mark.parametrize("kind", ["release", "stop"])
@@ -100,8 +108,9 @@ BAD = [
     pytest.param(command(data={"text": "   "}), id="speak-empty-text"),
     pytest.param(command(data={"text": "a" * 1001}), id="speak-text-over-the-cap"),
     pytest.param(command(data={"text": "x", "voice": "y"}), id="speak-unknown-key"),
-    pytest.param(command(data={"text": "x", "listen_after": True}), id="listen-after-not-yet"),
     pytest.param(command(data={"text": "x", "listen_after": 1}), id="listen-after-not-a-bool"),
+    pytest.param(command(data={"text": "x", "listen_after": "true"}), id="listen-after-a-string"),
+    pytest.param(command(data={"text": "x", "listen_after": None}), id="listen-after-null"),
     pytest.param(command(data={"text": "x", "volume": 1.5}), id="volume-over-1"),
     pytest.param(command(data={"text": "x", "volume": -0.1}), id="volume-under-0"),
     pytest.param(command(data={"text": "x", "volume": True}), id="volume-bool"),

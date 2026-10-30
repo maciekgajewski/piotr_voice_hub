@@ -37,8 +37,8 @@ thing Maciej can hear on hardware (after T-017).
 | T-016 tts-client | `tts/`: Wyoming Piper client (old `PiperTextToSpeech.synthesize`), streamed PCM chunks, a timeout on every wait, a text-length cap per call; warm-up at hub startup before arming | T-004, T-015 | merged (PR #19) |
 | T-017 speak-release | API commands `speak` and `release` (`ack`/`error`) for a satellite in `PROCESSING`; session plays TTS through T-014 (`speaking` state, `playback_finished`, re-arm) with a bound on `PlaybackBegin` → `PlaybackEnd`; anything else is `busy` | T-014, T-016 | merged (PR #21) |
 | T-018 speaker-hint | Speaker-recognition service in the compose file (port 2141) and the HTTP client (`speaker/`); `transcript_final` carries `speaker` | T-012; can run in parallel with T-015–T-017 | merged (PR #27) |
-| T-019 announce-busy-stop | `speak` to an idle satellite (announcement: stop listening, play, re-arm), the full busy policy (design §6), and `stop` | T-017 | in review |
-| T-020 follow-up | `listen_after`: `FOLLOW_UP_READY` cue, `follow_up_seconds` window without the phrase, `follow_up_timeout`, `follow_up` and `listening_for_follow_up` flags | T-019 | planned |
+| T-019 announce-busy-stop | `speak` to an idle satellite (announcement: stop listening, play, re-arm), the full busy policy (design §6), and `stop` | T-017 | merged (PR #28) |
+| T-020 follow-up | `listen_after`: `FOLLOW_UP_READY` cue, `follow_up_seconds` window without the phrase, `follow_up_timeout`, `follow_up` and `listening_for_follow_up` flags (no ready cue until the P2 firmware: `LISTENING` visual only) | T-019 | in review |
 | T-021 play-url | `play` with a consumer URL: its own driver command, its end from the media player state (bounded), `listen_after` and `stop` as for `speak` | T-020 | planned |
 | T-022 p1-acceptance | Deploy the three-service compose on piotr and run the P1 exit criteria on all four satellites, including a real-device playback check: the satellite fetches the URL and audio is heard right after the accepted cue, with a fast Piper reply (PR checklist only, no code unless a fix is needed) | T-015 … T-021 | planned |
 
@@ -177,11 +177,14 @@ Not numbered yet: firmware trimmed to continuous mode and reflashed (including t
   lands, ahead of the rest of the P2 firmware work. Until then the driver logs it as missing at
   connect and skips the cue with a warning. **Decided:** the firmware import stays in P2;
   until then T-020 plays no sound and shows only the `LISTENING` visual (T-020 note above).
+  **T-020:** done that way; the hub never sends `FOLLOW_UP_READY` (the driver still logs the
+  service as missing at connect). The cue goes in with the P2 firmware.
 - **P1 → T-017, T-019, T-020, T-021 (from T-010, T-011):** busy handling (T-019), follow-up
   (T-020) and the commands `speak`/`release` (T-017), `stop` (T-019) and `play` (T-021) were
   left out of P0. **T-017:** `speak` and `release` done; `play`, `stop` and `listen_after: true`
   are refused as `bad_request` "not supported yet" until their tasks. **T-019:** `stop` done
   (`speak` only; T-021 makes it stop `play` too); `play` and `listen_after: true` remain.
+  **T-020:** `listen_after` done for `speak`; only `play` (T-021) remains.
 - **P1 → T-017 (playback close at low rates):** the graceful close of a finished stream
   (`CLOSE_TIMEOUT_SECONDS`, 5 s, `hub/playback_http.py`) is tight at 8 kHz mono (16 KB/s):
   flushing a full 64 KiB asyncio write buffer takes about 4 s. If it fires, `abort()` drops the

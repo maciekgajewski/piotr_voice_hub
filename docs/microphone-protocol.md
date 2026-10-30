@@ -69,7 +69,7 @@ There is one listening mode, continuous open-mic: the driver detects zero or mor
 |---|---|
 | `UTTERANCE_ACCEPTED` | Full utterance was accepted and will be processed |
 | `FOLLOW_UP_READY` | Device is ready for follow-up speech |
-| `TIMEOUT` | The reply timeout or the follow-up window expired |
+| `TIMEOUT` | The reply timeout expired, or no request followed the wake word alone. Not the follow-up window: it ends silently (T-020) |
 
 ## Manager-to-driver events
 
@@ -211,8 +211,9 @@ After `StopListening`, the driver MUST drop any capture events (`SpeechStarted`,
 | Waiting for the consumer's reply (`speak`/`play`/`release`) | `PROCESSING` |
 | Assistant audio is playing | `PROCESSING` |
 | Playback finishes and no follow-up is requested | `IDLE` |
-| Playback finishes and follow-up is requested, including while its ready cue plays | `LISTENING` |
-| Follow-up window or reply timeout expires | `IDLE` after the timeout cue completes |
+| Playback finishes and follow-up is requested, including while its ready cue plays (until the P2 firmware: no ready cue, the visual alone) | `LISTENING` |
+| Reply timeout expires | `IDLE` after the timeout cue completes |
+| Follow-up window expires, or ends on a segment with no request | `IDLE` at once, no cue, still listening |
 | Server connection is lost | Firmware-owned `ERROR` |
 
 `PROCESSING` MUST remain active throughout assistant playback. (`MP-VISUAL-007`)
@@ -273,7 +274,7 @@ After `SpeechEnded`, the final transcript determines acceptance.
 | Timeout | Starts | Successful completion | Failure meaning | Owner |
 |---|---|---|---|---|
 | Arm acknowledgement | `StartListening` | `ListeningStarted` | Device did not enter requested mode | Manager |
-| Follow-up speech start | follow-up ready cue finished and listening re-armed | `SpeechStarted` within `follow_up_seconds` | User did not begin follow-up | Manager |
+| Follow-up speech start | follow-up ready cue finished (none until the P2 firmware) and listening re-armed | `SpeechStarted` within `follow_up_seconds` | User did not begin follow-up | Manager |
 | Reply | `transcript_final` emitted | consumer `speak`/`play`/`release` within `reply_timeout_seconds` | Consumer did not answer | Manager |
 | Segment liveness | `SpeechStarted` or last segment event | next `AudioChunk`, `AudioProgress`, or `SpeechEnded` | Active capture stalled | Manager |
 | Cue completion | `PlayCue` | `CueFinished` | Cue operation stalled | Manager |

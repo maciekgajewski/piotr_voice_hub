@@ -1,6 +1,7 @@
 """Per-satellite session (design.md §4.1 steps 1-6, 8): arm, wake candidate, accept or cancel,
 then a reply (`speak` or `release`, T-017) or the reply timeout, then re-arm; an announcement
-(`speak` while idle) and `stop` (T-019). Not yet: follow-up (T-020), `play` (T-021).
+(`speak` while idle) and `stop` (T-019); the follow-up window (`listen_after`, design.md §4.1
+step 7, T-020). Not yet: `play` (T-021).
 
 One `SatelliteSession.run()` task per satellite. It is the driver's only command sender and
 reads the driver's events in order, so everything about speech segment N is emitted before
@@ -28,6 +29,15 @@ the wake word alone included, at most the last `max_segment_seconds`) goes to sp
 recognition while the satellite stops listening and plays the accepted cue; `transcript_final`
 waits for it, at most the speaker timeout. A failure is a null `speaker`, never a lost
 utterance.
+
+Follow-up (T-020): a `speak` with `listen_after` whose audio played and was not stopped re-arms
+with the `LISTENING` visual (no cue until the P2 firmware) and status `listening`. The next
+segment that starts within `follow_up_seconds` of `ListeningStarted` is the request, without the
+wake phrase (its whole text less a leading wake word, `follow_up: true`). No segment in time, or
+one with no request text, ends the window in place, like a cancelled wake candidate: an open
+`wake` is cancelled, `follow_up_timeout`, the `IDLE` visual and status `idle`, and listening goes
+on (no cue: the window is the hub's offer, not a request; PR #29 review S1). The window is busy
+for every command, like an open wake.
 """
 
 import asyncio
@@ -40,6 +50,7 @@ from typing import Protocol
 from piotr_voice_hub.config import SatelliteConfig
 from piotr_voice_hub.hub.commands import CommandError, ErrorCode
 from piotr_voice_hub.hub.events import (
+    FollowUpTimeout,
     HubEvent,
     PlaybackFinished,
     SatelliteState,
@@ -130,6 +141,7 @@ class _Speak:
     playback_id: str
     text: str
     volume: float | None  # None: the satellite's volume is not touched
+    listen_after: bool  # open the follow-up window after it (T-020)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -155,6 +167,7 @@ class _Segment:
     audio: bytearray = dataclasses.field(default_factory=bytearray)  # PCM, for the hint
     candidate: bool = False  # a partial matched: `wake` sent, LISTENING visual set
     follows: _BareWake | None = None  # set if this segment may be the request after it
+    follow_up: bool = False  # started in the follow-up window: the request, no phrase needed
 
 
 class SatelliteSession:
@@ -190,6 +203,8 @@ class SatelliteSession:
         self._open_playback: str | None = None  # `speak` acked, no playback_finished yet
         self._stopping = False  # `stop` acked for the open playback
         self._stop_scope: asyncio.Timeout | None = None  # the speak's wait `stop` interrupts
+        self._follow_up_next = False  # the next arm opens the follow-up window (T-020)
+        self._follow_up_deadline: float | None = None  # loop time; set while the window is open
         self._last_status: SatelliteStatus | None = None
         self._running = False  # run() is running; shutdown() needs it stopped
         self._logger = logging.getLogger(f"{__name__}[{config.id}]")
@@ -242,11 +257,12 @@ class SatelliteSession:
 
     # Commands (T-017), called from the API task
 
-    def speak(self, text: str, volume: float | None) -> str:
+    def speak(self, text: str, volume: float | None, listen_after: bool = False) -> str:
         """Accept a reply (processing) or an announcement (idle, no segment open); the
-        playback_id. CommandError if it cannot be taken now."""
+        playback_id. `listen_after`: open the follow-up window once it has played (T-020).
+        CommandError if it cannot be taken now (also while a follow-up window is open)."""
         self._require_online()
-        request = _Speak(new_id("playback"), text, volume)
+        request = _Speak(new_id("playback"), text, volume, listen_after)
         if self._reply is not None:
             self._take_reply(request)
         elif self._announcement is not None:
@@ -301,20 +317,39 @@ class SatelliteSession:
     # Steps
 
     async def _arm(self) -> None:
+        """Arm idle, or, after a `listen_after` speak, open the follow-up window: `LISTENING`
+        and no cue (T-020: no follow-up sound until the P2 firmware)."""
+        follow_up, self._follow_up_next = self._follow_up_next, False
         listen_id = new_id("listen")
-        await self._command(SetVisualState(VisualState.IDLE))
+        visual = VisualState.LISTENING if follow_up else VisualState.IDLE
+        await self._command(SetVisualState(visual))
         await self._command(StartListening(listen_id))
         self._listen_id = listen_id
         await self._expect(ListeningStarted(listen_id))
-        self._logger.info("listening listen_id=%s", listen_id)
-        self._status(True, SatelliteState.IDLE)
+        if follow_up:
+            seconds = self._config.follow_up_seconds
+            self._follow_up_deadline = asyncio.get_running_loop().time() + seconds
+            self._logger.info("listening for a follow-up for %g s listen_id=%s", seconds, listen_id)
+            self._status(True, SatelliteState.LISTENING)
+        else:
+            self._logger.info("listening listen_id=%s", listen_id)
+            self._status(True, SatelliteState.IDLE)
 
     async def _listen_until_accepted(self) -> bool:
         """True once an utterance is accepted; False if the wake word came alone and no request
-        followed (disarmed, the timeout cue played) or an announcement was played (disarmed).
-        Either way the caller re-arms."""
+        followed (disarmed, the timeout cue played), or an announcement was played (disarmed).
+        Either way the caller re-arms. The follow-up window ends in here, still listening."""
         while True:
-            if self._bare_wake is not None and self._segment is None:
+            if self._follow_up_deadline is not None:
+                assert self._segment is None and self._bare_wake is None
+                try:
+                    async with asyncio.timeout_at(self._follow_up_deadline):
+                        event = await self._event()  # wait_for_event is cancel-safe
+                except TimeoutError:
+                    self._logger.info("no follow-up within %g s", self._config.follow_up_seconds)
+                    await self._end_follow_up()
+                    continue  # on to the idle wait, same listen
+            elif self._bare_wake is not None and self._segment is None:
                 deadline = self._bare_wake.deadline
                 try:
                     # Already passed (a slow final): a queued SpeechStarted is still read if
@@ -395,8 +430,11 @@ class SatelliteSession:
     def _start_segment(self, utterance_id: str) -> None:
         assert self._segment is None, f"segment {self._segment.utterance_id} is still open"
         stt = self._stt.create_streaming_session(utterance_id, self._max_audio_seconds)
-        segment = _Segment(utterance_id, stt, follows=self._bare_wake)
+        follow_up, self._follow_up_deadline = self._follow_up_deadline is not None, None
+        segment = _Segment(utterance_id, stt, follows=self._bare_wake, follow_up=follow_up)
         segment.candidate = segment.follows is not None  # `wake` sent, LISTENING shown
+        if follow_up:
+            self._logger.info("follow-up speech utterance_id=%s", utterance_id)
         segment.partials = asyncio.create_task(self._read_partials(segment))
         self._segment = segment
 
@@ -405,6 +443,11 @@ class SatelliteSession:
             match = match_wake_phrase(event.text)
             if segment.follows is not None:  # the request after the wake word alone
                 text, utterance_id = request_text(event.text), segment.follows.utterance_id
+            elif segment.follow_up:  # no phrase needed; LISTENING is already shown
+                text, utterance_id = request_text(event.text), segment.utterance_id
+                if text and not segment.candidate:
+                    segment.candidate = True
+                    self._wake(utterance_id)
             elif match is None:
                 continue
             else:
@@ -436,20 +479,21 @@ class SatelliteSession:
         self._segment = None
         match = match_wake_phrase(raw_text)
         follows, self._bare_wake = segment.follows, None
-        if follows is not None:  # the request: the whole text, less a leading wake word
+        if follows is not None or segment.follow_up:  # the whole text, less a wake word
             text = request_text(raw_text)
         elif match is not None:
             text = match.remainder
         else:
             text = ""
         self._logger.info(
-            "segment utterance_id=%s reason=%s audio_ms=%d candidate=%s wake=%s%s",
+            "segment utterance_id=%s reason=%s audio_ms=%d candidate=%s wake=%s%s%s",
             segment.utterance_id,
             reason,
             len(segment.audio) // BYTES_PER_MS,
             segment.candidate,
             bool(text),
             "" if follows is None else f" after the wake word of {follows.utterance_id}",
+            " (follow-up)" if segment.follow_up else "",
         )
         if text:
             if follows is not None:
@@ -478,6 +522,9 @@ class SatelliteSession:
         if follows is not None:  # no request after the wake word alone (silence, noise)
             await self._no_request()
             return False
+        if segment.follow_up:  # no request in the follow-up window (noise, music): it ends
+            await self._end_follow_up()
+            return None
         if segment.candidate:
             assert self._listen_id is not None
             self._cancel_wake()
@@ -497,6 +544,20 @@ class SatelliteSession:
         await self._command(StopListening(listen_id, "no_request"))
         await self._expect(ListeningStopped(listen_id, "no_request"))
         await self._play_cue(CueType.TIMEOUT)
+
+    async def _end_follow_up(self) -> None:
+        """The follow-up window passed with no request (no speech in time, or a segment with no
+        request text). It ends in place, like a cancelled wake candidate: a `wake` a partial
+        sent is reset and cancelled, then `follow_up_timeout`, the `IDLE` visual and status
+        `idle`. No cue and no disarm: listening goes on (design.md §4.1 step 7, PR #29 S1)."""
+        self._follow_up_deadline = None
+        assert self._listen_id is not None
+        if self._open_wake is not None:
+            await self._command(ResetWakeCandidate(self._listen_id, self._open_wake))
+            self._cancel_wake()
+        self._emit(FollowUpTimeout(self._config.id))
+        await self._command(SetVisualState(VisualState.IDLE))
+        self._status(True, SatelliteState.IDLE)
 
     async def _accept(
         self, segment: _Segment, text: str, raw_text: str, follows: _BareWake | None
@@ -529,7 +590,7 @@ class SatelliteSession:
                 utterance_id,
                 text=text,
                 raw_text=raw_text,
-                follow_up=False,
+                follow_up=segment.follow_up,
                 speaker=None if match is None else Speaker(match.name, match.confidence),
                 audio_ms=len(audio) // BYTES_PER_MS,
             )
@@ -640,6 +701,8 @@ class SatelliteSession:
                 finished = DriverPlaybackFinished(playback_id)
                 assert event == finished, f"expected {finished}, got {event}"
                 self._logger.info("played playback_id=%s (%.1f s)", playback_id, audio_seconds)
+        # The follow-up window opens only after audio that played to its end (T-020).
+        self._follow_up_next = request.listen_after and began and not stopped
         if stopped:
             if began:  # also after PlaybackEnd: the device may still be playing
                 await self._command(PlaybackStop(playback_id))
@@ -699,6 +762,8 @@ class SatelliteSession:
     async def _recover(self) -> None:
         self._listen_id = None
         self._bare_wake = None
+        self._follow_up_next = False  # a disconnect ends the follow-up window, with no event
+        self._follow_up_deadline = None
         await self._abandon_segment()
         self._cancel_wake()  # every `wake` ends with transcript_final or wake_cancelled
         self._finish_playback()  # every acked `speak` ends with playback_finished
@@ -738,8 +803,10 @@ class SatelliteSession:
             self._open_wake = None
 
     def _finish_playback(self) -> None:
+        """`playback_finished`; `listening_for_follow_up` if the next arm opens the window."""
         if self._open_playback is not None:
-            self._emit(PlaybackFinished(self._config.id, self._open_playback, False))
+            follow_up = self._follow_up_next
+            self._emit(PlaybackFinished(self._config.id, self._open_playback, follow_up))
             self._open_playback, self._stopping = None, False
 
     def _status(self, connected: bool, state: SatelliteState) -> None:

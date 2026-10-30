@@ -1,6 +1,6 @@
 # T-019: announcements, the busy policy and stop: plan
 
-**Status:** in progress (2026-10-30). Branch `t-019-announce-busy-stop`, from `origin/main`
+**Status:** done (merged as PR #28, 2026-10-30). Branch `t-019-announce-busy-stop`, from `origin/main`
 (ac36f1f, T-018 merged).
 
 ## Scope (docs/tasks/README.md, design.md §4.1 step 8, §6)

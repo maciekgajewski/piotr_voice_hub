@@ -18,6 +18,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 from piotr_voice_hub.hub import api as api_module
 from piotr_voice_hub.hub.api import ApiServer, event_message, format_ts
 from piotr_voice_hub.hub.events import (
+    FollowUpTimeout,
     HubEvent,
     PlaybackFinished,
     SatelliteState,
@@ -172,6 +173,16 @@ def test_envelope_of_every_event_type() -> None:
         "satellite": sat,
         "ts": TS0,
         "data": {"playback_id": "pb1", "listening_for_follow_up": False},
+    }
+    assert event_message(PlaybackFinished(sat, "pb2", True), TS0)["data"] == {
+        "playback_id": "pb2",
+        "listening_for_follow_up": True,
+    }
+    assert event_message(FollowUpTimeout(sat), TS0) == {
+        "type": "follow_up_timeout",
+        "satellite": sat,
+        "ts": TS0,
+        "data": {},
     }
 
 

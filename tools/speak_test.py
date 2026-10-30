@@ -1,4 +1,4 @@
-"""T-017/T-019 test client: answer every `transcript_final` with a `speak` to that satellite.
+"""T-017/T-019/T-020 test client: answer every `transcript_final` with a `speak` to that satellite.
 
 Uses only the `websockets` package, which the hub image has. tools/ is not in the image, so pass
 the file as `-c` (a TTY, so Ctrl-C reaches it and it quits cleanly):
@@ -9,6 +9,7 @@ the file as `-c` (a TTY, so Ctrl-C reaches it and it quits cleanly):
     docker compose exec hub python -c "$(cat tools/speak_test.py)" --long --stop-after 4
     docker compose exec hub python -c "$(cat tools/speak_test.py)" --announce voice-pe-02
     docker compose exec hub python -c "$(cat tools/speak_test.py)" --stop voice-pe-02
+    docker compose exec hub python -c "$(cat tools/speak_test.py)" --listen-after
 
 From a checkout with uv: `uv run --locked python tools/speak_test.py [--url ...] [--text ...]`.
 
@@ -16,7 +17,9 @@ It prints every message from the hub, and each command it sends prefixed with `>
 line. By default it replies `Usłyszałem: <text>`; `--text` sends a fixed sentence instead,
 `--long` a Polish text of about 20 s, and `--release` sends `release` (no reply). It never sets
 a volume. `--stop-after N` (N > 0) sends `stop` to the satellite N seconds after each `speak`
-ack.
+ack. `--listen-after` (T-020) adds `"listen_after": true` to every `speak`: after it has
+played, the satellite listens for a follow-up (no wake phrase) for `follow_up_seconds`; a
+follow-up's `transcript_final` (`"follow_up": true`) is answered the same way.
 
 One-shot modes (T-019), which need no wake phrase: `--announce SATELLITE` sends one `speak`
 (an announcement to an idle satellite; `--text`/`--long`/`--stop-after` apply) and exits 0
@@ -52,7 +55,11 @@ LONG_TEXT = (  # about 20 s with Piper
 
 
 def command_for(
-    message: dict[str, Any], text: str | None, release: bool, number: int
+    message: dict[str, Any],
+    text: str | None,
+    release: bool,
+    number: int,
+    listen_after: bool = False,
 ) -> dict[str, Any] | None:
     """The command answering `message`, or None if it is not a transcript_final."""
     if message.get("type") != "transcript_final":
@@ -65,7 +72,10 @@ def command_for(
     }
     if not release:
         reply = text if text is not None else f"Usłyszałem: {message['data']['text']}"
-        command["data"] = {"text": reply}
+        data: dict[str, Any] = {"text": reply}
+        if listen_after:
+            data["listen_after"] = True
+        command["data"] = data
     return command
 
 
@@ -77,6 +87,7 @@ async def run(
     announce: str | None = None,
     stop: str | None = None,
     stop_after: float | None = None,
+    listen_after: bool = False,
 ) -> int | None:
     """Exit code of a one-shot mode, or None when the hub closed the connection."""
     numbers = itertools.count(1)
@@ -103,7 +114,10 @@ async def run(
         print(f"connected to {url}", flush=True)
         first = None
         if announce is not None:
-            first = new("speak", announce, {"text": text if text is not None else ANNOUNCEMENT})
+            data: dict[str, Any] = {"text": text if text is not None else ANNOUNCEMENT}
+            if listen_after:
+                data["listen_after"] = True
+            first = new("speak", announce, data)
         elif stop is not None:
             first = new("stop", stop, {})
         if first is not None:
@@ -126,7 +140,9 @@ async def run(
                         timers.add(asyncio.create_task(stop_later(websocket, satellite)))
                     if first is None:
                         if kind == "transcript_final":
-                            command = command_for(message, text, release, next(numbers))
+                            command = command_for(
+                                message, text, release, next(numbers), listen_after
+                            )
                             assert command is not None
                             await send(websocket, command)
                     elif message.get("reply_to") == first["id"]:
@@ -161,13 +177,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--stop-after", type=float, metavar="SECONDS", help="send stop this long after a speak ack"
     )
+    parser.add_argument(
+        "--listen-after",
+        action="store_true",
+        help="ask for the follow-up window after each speak (T-020)",
+    )
     args = parser.parse_args(argv)
     if args.stop is not None and (
-        args.text or args.long or args.release or args.stop_after is not None
+        args.text or args.long or args.release or args.stop_after is not None or args.listen_after
     ):
         parser.error("--stop takes no other option than --url")
-    if args.release and (args.announce is not None or args.stop_after is not None):
-        parser.error("--release does not speak: no --announce or --stop-after")
+    if args.release and (
+        args.announce is not None or args.stop_after is not None or args.listen_after
+    ):
+        parser.error("--release does not speak: no --announce, --stop-after or --listen-after")
     if args.stop_after is not None and not args.stop_after > 0:
         parser.error("--stop-after must be more than 0")
     text = LONG_TEXT if args.long else args.text
@@ -180,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
                 announce=args.announce,
                 stop=args.stop,
                 stop_after=args.stop_after,
+                listen_after=args.listen_after,
             )
         )
     except KeyboardInterrupt:
