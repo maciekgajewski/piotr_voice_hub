@@ -1,4 +1,5 @@
-"""T-017/T-019/T-020 test client: answer every `transcript_final` with a `speak` to that satellite.
+"""T-017/T-019/T-020/T-021 test client: answer every `transcript_final` with a `speak` (or a `play`)
+to that satellite.
 
 Uses only the `websockets` package, which the hub image has. tools/ is not in the image, so pass
 the file as `-c` (a TTY, so Ctrl-C reaches it and it quits cleanly):
@@ -10,6 +11,9 @@ the file as `-c` (a TTY, so Ctrl-C reaches it and it quits cleanly):
     docker compose exec hub python -c "$(cat tools/speak_test.py)" --announce voice-pe-02
     docker compose exec hub python -c "$(cat tools/speak_test.py)" --stop voice-pe-02
     docker compose exec hub python -c "$(cat tools/speak_test.py)" --listen-after
+    docker compose exec hub python -c "$(cat tools/speak_test.py)" --play http://host/a.mp3
+    docker compose exec hub python -c "$(cat tools/speak_test.py)" --announce voice-pe-02 \
+        --play http://host/a.mp3
 
 From a checkout with uv: `uv run --locked python tools/speak_test.py [--url ...] [--text ...]`.
 
@@ -19,10 +23,14 @@ line. By default it replies `Usłyszałem: <text>`; `--text` sends a fixed sente
 a volume. `--stop-after N` (N > 0) sends `stop` to the satellite N seconds after each `speak`
 ack. `--listen-after` (T-020) adds `"listen_after": true` to every `speak`: after it has
 played, the satellite listens for a follow-up (no wake phrase) for `follow_up_seconds`; a
-follow-up's `transcript_final` (`"follow_up": true`) is answered the same way.
+follow-up's `transcript_final` (`"follow_up": true`) is answered the same way. `--play URL`
+(T-021) answers with `play` for that URL instead of `speak` (`--stop-after` and
+`--listen-after` apply). The satellite fetches the URL itself, so it must be reachable from the
+satellite, not from the hub.
 
 One-shot modes (T-019), which need no wake phrase: `--announce SATELLITE` sends one `speak`
-(an announcement to an idle satellite; `--text`/`--long`/`--stop-after` apply) and exits 0
+(an announcement to an idle satellite; `--text`/`--long`/`--play`/`--stop-after` apply: with
+`--play` it is one `play`) and exits 0
 after its `playback_finished`, 1 on an error reply or if it has not finished within 120 s.
 `--stop SATELLITE` sends one `stop`: exit 0 on its `ack`, 1 on an error reply (`busy` when
 nothing plays).
@@ -60,23 +68,30 @@ def command_for(
     release: bool,
     number: int,
     listen_after: bool = False,
+    play: str | None = None,
 ) -> dict[str, Any] | None:
     """The command answering `message`, or None if it is not a transcript_final."""
     if message.get("type") != "transcript_final":
         return None
+    kind = "release" if release else "speak" if play is None else "play"
     command: dict[str, Any] = {
-        "type": "release" if release else "speak",
+        "type": kind,
         "id": f"speak-test-{number}",
         "satellite": message["satellite"],
         "data": {},
     }
     if not release:
         reply = text if text is not None else f"Usłyszałem: {message['data']['text']}"
-        data: dict[str, Any] = {"text": reply}
-        if listen_after:
-            data["listen_after"] = True
-        command["data"] = data
+        command["data"] = output_data(reply, play, listen_after)
     return command
+
+
+def output_data(text: str, play: str | None, listen_after: bool) -> dict[str, Any]:
+    """A `speak`'s data, or a `play`'s when `play` is a URL."""
+    data: dict[str, Any] = {"text": text} if play is None else {"url": play}
+    if listen_after:
+        data["listen_after"] = True
+    return data
 
 
 async def run(
@@ -88,14 +103,15 @@ async def run(
     stop: str | None = None,
     stop_after: float | None = None,
     listen_after: bool = False,
+    play: str | None = None,
 ) -> int | None:
     """Exit code of a one-shot mode, or None when the hub closed the connection."""
     numbers = itertools.count(1)
-    speaks: dict[str, str] = {}  # id of each speak sent -> satellite
+    speaks: dict[str, str] = {}  # id of each speak or play sent -> satellite
     timers: set[asyncio.Task[None]] = set()
 
     async def send(websocket: ClientConnection, command: dict[str, Any]) -> None:
-        if command["type"] == "speak":
+        if command["type"] in ("speak", "play"):
             speaks[command["id"]] = command["satellite"]
         line = json.dumps(command, ensure_ascii=False)
         print(f">>> {line}", flush=True)
@@ -114,10 +130,8 @@ async def run(
         print(f"connected to {url}", flush=True)
         first = None
         if announce is not None:
-            data: dict[str, Any] = {"text": text if text is not None else ANNOUNCEMENT}
-            if listen_after:
-                data["listen_after"] = True
-            first = new("speak", announce, data)
+            data = output_data(text if text is not None else ANNOUNCEMENT, play, listen_after)
+            first = new("speak" if play is None else "play", announce, data)
         elif stop is not None:
             first = new("stop", stop, {})
         if first is not None:
@@ -141,7 +155,7 @@ async def run(
                     if first is None:
                         if kind == "transcript_final":
                             command = command_for(
-                                message, text, release, next(numbers), listen_after
+                                message, text, release, next(numbers), listen_after, play
                             )
                             assert command is not None
                             await send(websocket, command)
@@ -171,20 +185,31 @@ def main(argv: list[str] | None = None) -> int:
     reply.add_argument("--text", help="speak this sentence instead of echoing the transcript")
     reply.add_argument("--long", action="store_true", help="speak a Polish text of about 20 s")
     reply.add_argument("--release", action="store_true", help="send release instead of speak")
+    reply.add_argument(
+        "--play", metavar="URL", help="send play for this URL (the satellite fetches it)"
+    )
     once = parser.add_mutually_exclusive_group()
     once.add_argument("--announce", metavar="SATELLITE", help="speak once now, no wake needed")
     once.add_argument("--stop", metavar="SATELLITE", help="send stop once now")
     parser.add_argument(
-        "--stop-after", type=float, metavar="SECONDS", help="send stop this long after a speak ack"
+        "--stop-after",
+        type=float,
+        metavar="SECONDS",
+        help="send stop this long after a speak or play ack",
     )
     parser.add_argument(
         "--listen-after",
         action="store_true",
-        help="ask for the follow-up window after each speak (T-020)",
+        help="ask for the follow-up window after each speak or play (T-020)",
     )
     args = parser.parse_args(argv)
     if args.stop is not None and (
-        args.text or args.long or args.release or args.stop_after is not None or args.listen_after
+        args.text
+        or args.long
+        or args.release
+        or args.play is not None
+        or args.stop_after is not None
+        or args.listen_after
     ):
         parser.error("--stop takes no other option than --url")
     if args.release and (
@@ -193,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--release does not speak: no --announce, --stop-after or --listen-after")
     if args.stop_after is not None and not args.stop_after > 0:
         parser.error("--stop-after must be more than 0")
+    if args.play is not None and not args.play.startswith(("http://", "https://")):
+        parser.error("--play needs an http:// or https:// URL")
     text = LONG_TEXT if args.long else args.text
     try:
         code = asyncio.run(
@@ -204,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
                 stop=args.stop,
                 stop_after=args.stop_after,
                 listen_after=args.listen_after,
+                play=args.play,
             )
         )
     except KeyboardInterrupt:

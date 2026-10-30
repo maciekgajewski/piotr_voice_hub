@@ -1,4 +1,5 @@
-"""T-014: the shared playback HTTP server and ESPHome playback and cue responses (no device:
+"""T-014, T-021: the shared playback HTTP server and ESPHome playback (a stream, or a consumer's
+URL) and cue responses (no device:
 a fake client whose media player fetches the announced URL over loopback)."""
 
 import asyncio
@@ -24,6 +25,7 @@ from piotr_voice_hub.satellites.messages import (
     PlaybackEnd,
     PlaybackFinished,
     PlaybackStop,
+    PlaybackUrl,
     PlayCue,
     SetVisualState,
     VisualState,
@@ -1043,3 +1045,191 @@ def test_a_cue_response_that_never_comes_is_unavailable(monkeypatch: pytest.Monk
         assert clients.last.disconnects == 1
 
     run(scenario)
+
+
+# A consumer's URL (T-021): the device fetches it itself; its end comes from the player's state
+
+URL = "http://10.0.0.2:8000/dzwonek.mp3"
+URL_SENT = {"media_url": URL, "announcement": True}
+
+
+async def url_player() -> tuple[Checked, FakeClient]:
+    """A connected driver with no playback server (a URL needs none); its media player does
+    not fetch: each test reports the player's states itself."""
+    mic, clients = make()
+    await mic.send_output_event(SetVisualState(VisualState.IDLE))  # connect
+    clients.last.fetch = False
+    await asyncio.sleep(0.05)  # the initial IDLE state has arrived
+    return mic, clients.last
+
+
+def test_a_url_is_sent_as_an_announcement_and_finishes_when_the_player_is_idle_again() -> None:
+    async def scenario() -> None:
+        mic, client = await url_player()
+        started = time.monotonic()
+        await mic.send_output_event(PlaybackUrl("pb-1", URL))
+        assert client.media_commands == [URL_SENT]  # no volume, nothing else
+        await client.player(MediaPlayerState.PLAYING)
+        await asyncio.sleep(0.8)  # past the floor: still playing
+        assert mic.driver._events.empty()
+        await client.player(MediaPlayerState.IDLE, volume=0.5)
+        assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+        assert time.monotonic() - started >= 0.8
+        await asyncio.sleep(0.1)
+        assert mic.driver._events.empty() and mic.driver._playback is None
+        await mic.send_output_event(SetVisualState(VisualState.IDLE))  # still available
+
+    run(scenario)
+
+
+def test_a_url_whose_playing_update_is_merged_into_idle_finishes_after_the_floor() -> None:
+    async def scenario() -> None:
+        mic, client = await url_player()
+        started = time.monotonic()
+        await mic.send_output_event(PlaybackUrl("pb-1", URL))
+        await client.player(MediaPlayerState.IDLE)  # a short sound: one update
+        assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+        elapsed = time.monotonic() - started
+        assert esphome.CUE_MIN_SECONDS <= elapsed < esphome.CUE_MIN_SECONDS + 0.3
+
+    run(scenario)
+
+
+def test_a_url_the_device_never_plays_still_finishes_once_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Not fetchable, or a format the device cannot play: the consumer's mistake, so one
+    PlaybackFinished and no reconnect."""
+    monkeypatch.setattr(esphome, "URL_START_TIMEOUT_SECONDS", 0.2)
+
+    async def scenario() -> None:
+        mic, client = await url_player()
+        started = time.monotonic()
+        await mic.send_output_event(PlaybackUrl("pb-1", URL))
+        assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+        assert time.monotonic() - started >= 0.2
+        await mic.send_output_event(SetVisualState(VisualState.IDLE))  # still available
+        assert client.disconnects == 0 and STOP not in client.media_commands
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
+    assert "playback pb-1: the media player reported no change within 0.2 s" in caplog.text
+
+
+def test_a_url_still_playing_at_the_end_bound_is_stopped_then_finishes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(esphome, "URL_MAX_SECONDS", 0.3)
+
+    async def scenario() -> None:
+        mic, client = await url_player()
+        client.url_states = True  # IDLE after the STOP
+        await mic.send_output_event(PlaybackUrl("pb-1", URL))
+        await client.player(MediaPlayerState.PLAYING)  # an endless stream
+        assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+        assert client.media_commands == [URL_SENT, STOP]
+        await asyncio.sleep(0.2)
+        assert mic.driver._events.empty()
+
+    with caplog.at_level(logging.WARNING):
+        run(scenario)
+    assert "playback pb-1: still playing after 0.3 s; stopping it" in caplog.text
+
+
+@pytest.mark.parametrize("playing", [False, True])
+def test_playback_stop_stops_a_url_with_one_playback_finished(playing: bool) -> None:
+    async def scenario() -> None:
+        mic, client = await url_player()
+        client.url_states = True
+        await mic.send_output_event(PlaybackUrl("pb-1", URL))
+        if playing:
+            await client.player(MediaPlayerState.PLAYING)
+        await mic.send_output_event(PlaybackStop("pb-1"))
+        assert client.media_commands == [URL_SENT, STOP]
+        assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+        await asyncio.sleep(0.7)  # past the floor: the follower was cancelled
+        assert mic.driver._events.empty()
+
+    run(scenario)
+
+
+def test_playback_stop_after_a_url_finished_does_nothing() -> None:
+    async def scenario() -> None:
+        mic, client = await url_player()
+        await mic.send_output_event(PlaybackUrl("pb-1", URL))
+        await client.player(MediaPlayerState.IDLE)
+        while mic.driver._playback is not None:  # bounded by run()
+            await asyncio.sleep(0.01)
+        await mic.send_output_event(PlaybackStop("pb-1"))
+        assert STOP not in client.media_commands
+        assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+
+    run(scenario)
+
+
+def test_a_url_is_sent_only_once_the_player_stops_announcing_a_cue() -> None:
+    async def scenario() -> None:
+        mic, client = await url_player()
+        await client.player(MediaPlayerState.ANNOUNCING)
+        sent = asyncio.create_task(mic.send_output_event(PlaybackUrl("pb-1", URL)))
+        await asyncio.sleep(0.2)
+        assert not sent.done() and client.media_commands == []
+        await client.player(MediaPlayerState.IDLE)  # the cue ended: not this URL's update
+        await sent
+        assert client.media_commands == [URL_SENT]
+        await asyncio.sleep(0.7)
+        assert mic.driver._events.empty()  # still waiting for the URL's own change
+        await client.player(MediaPlayerState.PLAYING)
+        await client.player(MediaPlayerState.IDLE)
+        assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+
+    run(scenario)
+
+
+def test_a_disconnect_while_a_url_plays_is_unavailable_with_no_playback_finished() -> None:
+    async def scenario() -> None:
+        mic, client = await url_player()
+        await mic.send_output_event(PlaybackUrl("pb-1", URL))
+        await client.player(MediaPlayerState.PLAYING)
+        assert client.on_stop is not None
+        await client.on_stop(False)
+        await unavailable(mic, "transport stopped")
+        await asyncio.sleep(0.7)
+        queued = list(mic.driver._events._queue)  # type: ignore[attr-defined]
+        assert not [event for event in queued if isinstance(event, PlaybackFinished)]
+
+    run(scenario)
+
+
+def test_a_failed_url_command_makes_the_driver_unavailable() -> None:
+    async def scenario() -> None:
+        mic, client = await url_player()
+
+        def broken(key: int, **kwargs: object) -> None:
+            raise OSError("socket closed")
+
+        client.media_player_command = broken  # type: ignore[method-assign]
+        with pytest.raises(MicrophoneUnavailable, match="media player command failed"):
+            await mic.driver.send_output_event(PlaybackUrl("pb-1", URL))
+        assert mic.driver._playback is None
+
+    run(scenario)
+
+
+def test_the_url_log_line_leaves_out_credentials_query_and_fragment(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "https://user:hunter2@media.example:8443/a/b.mp3?token=hunter2#hunter2"
+
+    async def scenario() -> None:
+        mic, client = await url_player()
+        await mic.send_output_event(PlaybackUrl("pb-1", secret))
+        assert client.media_commands == [{"media_url": secret, "announcement": True}]
+        await client.player(MediaPlayerState.IDLE)
+        assert await mic.wait_for_event() == PlaybackFinished("pb-1")
+
+    with caplog.at_level(logging.DEBUG):
+        run(scenario)
+    assert "consumer url=https://media.example:8443/a/b.mp3" in caplog.text
+    info = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+    assert not any("hunter2" in line for line in info)

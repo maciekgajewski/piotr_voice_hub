@@ -38,8 +38,8 @@ thing Maciej can hear on hardware (after T-017).
 | T-017 speak-release | API commands `speak` and `release` (`ack`/`error`) for a satellite in `PROCESSING`; session plays TTS through T-014 (`speaking` state, `playback_finished`, re-arm) with a bound on `PlaybackBegin` → `PlaybackEnd`; anything else is `busy` | T-014, T-016 | merged (PR #21) |
 | T-018 speaker-hint | Speaker-recognition service in the compose file (port 2141) and the HTTP client (`speaker/`); `transcript_final` carries `speaker` | T-012; can run in parallel with T-015–T-017 | merged (PR #27) |
 | T-019 announce-busy-stop | `speak` to an idle satellite (announcement: stop listening, play, re-arm), the full busy policy (design §6), and `stop` | T-017 | merged (PR #28) |
-| T-020 follow-up | `listen_after`: `FOLLOW_UP_READY` cue, `follow_up_seconds` window without the phrase, `follow_up_timeout`, `follow_up` and `listening_for_follow_up` flags (no ready cue until the P2 firmware: `LISTENING` visual only) | T-019 | in review |
-| T-021 play-url | `play` with a consumer URL: its own driver command, its end from the media player state (bounded), `listen_after` and `stop` as for `speak` | T-020 | planned |
+| T-020 follow-up | `listen_after`: `FOLLOW_UP_READY` cue, `follow_up_seconds` window without the phrase, `follow_up_timeout`, `follow_up` and `listening_for_follow_up` flags (no ready cue until the P2 firmware: `LISTENING` visual only) | T-019 | merged (PR #29) |
+| T-021 play-url | `play` with a consumer URL: its own driver command, its end from the media player state (bounded), `listen_after` and `stop` as for `speak` | T-020 | in review |
 | T-022 p1-acceptance | Deploy the three-service compose on piotr and run the P1 exit criteria on all four satellites, including a real-device playback check: the satellite fetches the URL and audio is heard right after the accepted cue, with a fast Piper reply (PR checklist only, no code unless a fix is needed) | T-015 … T-021 | planned |
 
 Task notes (they go into each task's plan.md):
@@ -171,7 +171,8 @@ Not numbered yet: firmware trimmed to continuous mode and reflashed (including t
   decision Q2).
 - **P1 → T-021 (API commands):** `play` with a consumer URL (design §4.1 step 6) needs its own
   driver command and its end from the media player state; T-014 only streams PCM, which `speak`
-  needs (T-014 decision Q3).
+  needs (T-014 decision Q3). **T-021:** done: driver command `PlaybackUrl`, the end from the
+  player state (a change within 5 s, a 0.5 s floor, then not busy; stopped past 10 min).
 - **P1 → T-020 (follow-up):** the `play_follow_up_ready_cue` firmware service (BOX-3 already has
   `play_follow_up_listening_cue`, Voice PE `follow_up_listening_sound`) is needed when follow-up
   lands, ahead of the rest of the P2 firmware work. Until then the driver logs it as missing at
@@ -184,7 +185,8 @@ Not numbered yet: firmware trimmed to continuous mode and reflashed (including t
   left out of P0. **T-017:** `speak` and `release` done; `play`, `stop` and `listen_after: true`
   are refused as `bad_request` "not supported yet" until their tasks. **T-019:** `stop` done
   (`speak` only; T-021 makes it stop `play` too); `play` and `listen_after: true` remain.
-  **T-020:** `listen_after` done for `speak`; only `play` (T-021) remains.
+  **T-020:** `listen_after` done for `speak`; only `play` (T-021) remains. **T-021:** `play`
+  done, with `listen_after` and `stop`; nothing is refused as "not supported yet" any more.
 - **P1 → T-017 (playback close at low rates):** the graceful close of a finished stream
   (`CLOSE_TIMEOUT_SECONDS`, 5 s, `hub/playback_http.py`) is tight at 8 kHz mono (16 KB/s):
   flushing a full 64 KiB asyncio write buffer takes about 4 s. If it fires, `abort()` drops the

@@ -25,6 +25,7 @@ from piotr_voice_hub.satellites.messages import (
     PlaybackEnd,
     PlaybackFinished,
     PlaybackStop,
+    PlaybackUrl,
     PlayCue,
     ResetWakeCandidate,
     SetVisualState,
@@ -122,6 +123,15 @@ class MicrophoneProtocolState:
             self._claim_new_id(command.playback_id)
             self._playback_id = command.playback_id
             self._playback_ended = False
+            self._playback_stopped = False
+            self._state = DriverState.PLAYING_AUDIO
+            return
+        if isinstance(command, PlaybackUrl):
+            # T-021: a whole playback in one command; as if PlaybackEnd had been sent.
+            self._require_state(command, DriverState.DISARMED)
+            self._claim_new_id(command.playback_id)
+            self._playback_id = command.playback_id
+            self._playback_ended = True
             self._playback_stopped = False
             self._state = DriverState.PLAYING_AUDIO
             return

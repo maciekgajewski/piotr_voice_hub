@@ -1,24 +1,26 @@
 """Per-satellite session (design.md §4.1 steps 1-6, 8): arm, wake candidate, accept or cancel,
 then a reply (`speak` or `release`, T-017) or the reply timeout, then re-arm; an announcement
 (`speak` while idle) and `stop` (T-019); the follow-up window (`listen_after`, design.md §4.1
-step 7, T-020). Not yet: `play` (T-021).
+step 7, T-020); `play` (T-021): a consumer's URL, played by the satellite itself.
 
 One `SatelliteSession.run()` task per satellite. It is the driver's only command sender and
 reads the driver's events in order, so everything about speech segment N is emitted before
 anything about segment N+1. `MicrophoneUnavailable` re-arms after a backoff; any other
 exception, including a protocol invariant failure, propagates (fail loudly, design.md §9).
 
-`speak`, `release` and `stop` are called by the API task (T-017, T-019). They only check the
-state and hand the request to `run()` through a one-shot future (or a flag, for `stop`), so
-`run()` stays the only command sender. Every `ack`ed `speak` ends with exactly one
-`playback_finished` while the hub runs, also when TTS or the satellite fails or it is stopped
-(T-017 plan), like every `wake` ends with `transcript_final` or `wake_cancelled`.
+`speak`, `play`, `release` and `stop` are called by the API task (T-017, T-019, T-021). They
+only check the state and hand the request to `run()` through a one-shot future (or a flag, for
+`stop`), so `run()` stays the only command sender. Every `ack`ed `speak` or `play` ends with
+exactly one `playback_finished` while the hub runs, also when TTS or the satellite fails, the
+device cannot fetch the URL, or it is stopped (T-017 plan), like every `wake` ends with
+`transcript_final` or `wake_cancelled`.
 
-The busy policy (design.md §6, T-019 plan): `speak` is taken while processing (the reply) or
-while idle with no speech segment open (an announcement: stop listening, play, re-arm, with no
-cue and no visual change); `release` only while processing; `stop` from a speak's `ack` until its
-`playback_finished`. Anything else is `busy`. `stop` interrupts only the session's own waits
-(TTS reads, the wait for the device to finish), never a driver command in flight.
+The busy policy (design.md §6, T-019 plan): `speak` and `play` are taken while processing (the
+reply) or while idle with no speech segment open (an announcement: stop listening, play, re-arm,
+with no cue and no visual change); `release` only while processing; `stop` from a speak's or
+play's `ack` until its `playback_finished`. Anything else is `busy`. `stop` interrupts only the
+session's own waits (TTS reads, the wait for the device to finish), never a driver command in
+flight.
 
 A segment that is the wake word alone ("Ryszardzie", then a pause) keeps the wake open: the next
 segment, if it starts within `WAKE_PAUSE_SECONDS`, is the request (T-017 fix, design.md §4.1
@@ -76,6 +78,7 @@ from piotr_voice_hub.satellites.messages import (
     PlaybackChunk,
     PlaybackEnd,
     PlaybackStop,
+    PlaybackUrl,
     PlayCue,
     ResetWakeCandidate,
     SetVisualState,
@@ -110,6 +113,9 @@ PLAYBACK_PRODUCE_TIMEOUT_SECONDS = 30.0
 # PlaybackEnd -> PlaybackFinished: above the driver's own drain bounds (T-014: about
 # 2 x the audio + 35 s); past this the driver is treated as unavailable.
 PLAYBACK_FINISHED_MARGIN_SECONDS = 60.0
+# PlaybackUrl -> PlaybackFinished (T-021): above the driver's own bounds for a URL (the ESPHome
+# driver: 3 s for a free player, 5 s to start, 10 min of audio, 3 s after its stop).
+PLAY_URL_FINISHED_SECONDS = 720.0
 
 _logger = logging.getLogger(__name__)
 
@@ -142,6 +148,16 @@ class _Speak:
     text: str
     volume: float | None  # None: the satellite's volume is not touched
     listen_after: bool  # open the follow-up window after it (T-020)
+
+
+@dataclasses.dataclass(frozen=True)
+class _Play:
+    playback_id: str
+    url: str  # the satellite fetches it itself (T-021)
+    listen_after: bool
+
+
+type _Output = _Speak | _Play
 
 
 @dataclasses.dataclass(frozen=True)
@@ -198,9 +214,9 @@ class SatelliteSession:
         self._segment: _Segment | None = None  # owned until finished or abandoned
         self._open_wake: str | None = None  # `wake` sent, no transcript_final/wake_cancelled yet
         self._bare_wake: _BareWake | None = None  # the wake word alone; waiting for the request
-        self._reply: asyncio.Future[_Speak | _Release] | None = None  # set while one is awaited
-        self._announcement: asyncio.Future[_Speak] | None = None  # set while idle, no segment
-        self._open_playback: str | None = None  # `speak` acked, no playback_finished yet
+        self._reply: asyncio.Future[_Output | _Release] | None = None  # set while one is awaited
+        self._announcement: asyncio.Future[_Output] | None = None  # set while idle, no segment
+        self._open_playback: str | None = None  # speak/play acked, no playback_finished yet
         self._stopping = False  # `stop` acked for the open playback
         self._stop_scope: asyncio.Timeout | None = None  # the speak's wait `stop` interrupts
         self._follow_up_next = False  # the next arm opens the follow-up window (T-020)
@@ -261,8 +277,14 @@ class SatelliteSession:
         """Accept a reply (processing) or an announcement (idle, no segment open); the
         playback_id. `listen_after`: open the follow-up window once it has played (T-020).
         CommandError if it cannot be taken now (also while a follow-up window is open)."""
+        return self._take_output(_Speak(new_id("playback"), text, volume, listen_after))
+
+    def play(self, url: str, listen_after: bool = False) -> str:
+        """Like `speak`, for a URL the satellite fetches itself (T-021); the playback_id."""
+        return self._take_output(_Play(new_id("playback"), url, listen_after))
+
+    def _take_output(self, request: _Output) -> str:
         self._require_online()
-        request = _Speak(new_id("playback"), text, volume, listen_after)
         if self._reply is not None:
             self._take_reply(request)
         elif self._announcement is not None:
@@ -283,8 +305,9 @@ class SatelliteSession:
         self._take_reply(_Release())
 
     def stop(self) -> None:
-        """Stop the acked speak now (T-019); it still ends with its `playback_finished`, then
-        re-arms. CommandError if no speak is open or it is already stopping."""
+        """Stop the acked speak or play now (T-019, T-021); it still ends with its
+        `playback_finished`, then re-arms. CommandError if no speak or play is open or it is
+        already stopping."""
         self._require_online()
         if self._open_playback is None:
             raise self._busy("nothing is playing")
@@ -300,7 +323,7 @@ class SatelliteSession:
         if self._last_status is None or not self._last_status.connected:
             raise CommandError(ErrorCode.SATELLITE_OFFLINE, f"{self._config.id} is offline")
 
-    def _take_reply(self, reply: _Speak | _Release) -> None:
+    def _take_reply(self, reply: _Output | _Release) -> None:
         assert self._reply is not None
         if self._reply.done():
             # Taken by an earlier command that run() has not picked up yet (PR #21 review N1).
@@ -394,7 +417,7 @@ class SatelliteSession:
             else:
                 raise AssertionError(f"unexpected event while listening: {event}")
 
-    async def _event_or_announcement(self) -> tuple[_Speak | None, MicrophoneEvent | None]:
+    async def _event_or_announcement(self) -> tuple[_Output | None, MicrophoneEvent | None]:
         """Idle, no segment open: the next driver event, or a `speak` taken as an announcement
         (with the event read in the same loop step, if any). No timeout: like any idle wait."""
         assert self._last_status is not None
@@ -412,7 +435,7 @@ class SatelliteSession:
         event = None if reader.cancelled() else reader.result()
         return (None if announcement.cancelled() else announcement.result()), event
 
-    async def _announce(self, request: _Speak, event: MicrophoneEvent | None) -> None:
+    async def _announce(self, request: _Output, event: MicrophoneEvent | None) -> None:
         """design.md §4.1 step 8: stop listening, play, (the caller) re-arm. No cue, and the
         visual stays idle; only the API state says `speaking`."""
         self._status(True, SatelliteState.SPEAKING)
@@ -425,7 +448,7 @@ class SatelliteSession:
         assert listen_id is not None
         await self._command(StopListening(listen_id, "announcement"))
         await self._expect(ListeningStopped(listen_id, "announcement"))
-        await self._speak(request, announcement=True)
+        await self._output(request, announcement=True)
 
     def _start_segment(self, utterance_id: str) -> None:
         assert self._segment is None, f"segment {self._segment.utterance_id} is still open"
@@ -624,7 +647,13 @@ class SatelliteSession:
         if isinstance(request, _Release):
             self._logger.info("released")
             return
-        await self._speak(request)
+        await self._output(request)
+
+    async def _output(self, request: _Output, *, announcement: bool = False) -> None:
+        if isinstance(request, _Play):
+            await self._play_url(request, announcement=announcement)
+        else:
+            await self._speak(request, announcement=announcement)
 
     async def _speak(self, request: _Speak, *, announcement: bool = False) -> None:
         """`PlaybackBegin` goes out with the first chunk, so a synthesis that fails before any
@@ -714,6 +743,43 @@ class SatelliteSession:
             await self._play_cue(CueType.TIMEOUT)
         self._finish_playback()
 
+    async def _play_url(self, request: _Play, *, announcement: bool) -> None:
+        """`PlaybackUrl`, then the driver's `PlaybackFinished` (T-021). The satellite fetches
+        the URL itself; one it cannot play still ends in `PlaybackFinished` (the driver logs
+        it), so the hub cannot tell it from a short sound: no timeout cue, and `listen_after`
+        opens the window as after any playback that was not stopped. `stop()` sends
+        `PlaybackStop`, or, before the URL went out, nothing at all."""
+        playback_id = request.playback_id
+        self._status(True, SatelliteState.SPEAKING)
+        self._logger.info(
+            "%s playback_id=%s (a URL)", "announcing" if announcement else "playing", playback_id
+        )
+        loop = asyncio.get_running_loop()
+        sent = stopped = False
+        try:
+            if self._stopping:
+                raise _Stopped
+            await self._command(PlaybackUrl(playback_id, request.url))
+            sent = True
+            event = await self._until_stop(loop.time() + PLAY_URL_FINISHED_SECONDS, self._event)
+        except _Deadline:
+            raise MicrophoneUnavailable(
+                f"no PlaybackFinished within {PLAY_URL_FINISHED_SECONDS:g} s"
+            ) from None
+        except _Stopped:
+            stopped = True
+        else:
+            finished = DriverPlaybackFinished(playback_id)
+            assert event == finished, f"expected {finished}, got {event}"
+            self._logger.info("played playback_id=%s (a URL)", playback_id)
+        self._follow_up_next = request.listen_after and not stopped
+        if stopped:
+            if sent:
+                await self._command(PlaybackStop(playback_id))
+                await self._expect(DriverPlaybackFinished(playback_id))
+            self._logger.info("stopped playback_id=%s (a URL)", playback_id)
+        self._finish_playback()
+
     async def _until_stop[T](self, deadline: float, read: Callable[[], Awaitable[T]]) -> T:
         """`read()` against `deadline` (then `_Deadline`); `_Stopped` once `stop()` was called,
         also during the read: `stop()` expires this timeout at once. Only the read is cancelled."""
@@ -766,7 +832,7 @@ class SatelliteSession:
         self._follow_up_deadline = None
         await self._abandon_segment()
         self._cancel_wake()  # every `wake` ends with transcript_final or wake_cancelled
-        self._finish_playback()  # every acked `speak` ends with playback_finished
+        self._finish_playback()  # every acked speak/play ends with playback_finished
         self._status(False, SatelliteState.ERROR)
         await self._microphone.close()
         self._protocol = MicrophoneProtocolState()  # the driver forgot everything too

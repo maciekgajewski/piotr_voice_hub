@@ -83,6 +83,7 @@ There is one listening mode, continuous open-mic: the driver detects zero or mor
 | `PlaybackBegin` | `playback_id`, `rate`, `width`, `channels`, optional `volume` | Begin one assistant playback stream while disarmed |
 | `PlaybackChunk` | `playback_id`, `data` | Append bytes to the matching playback stream |
 | `PlaybackEnd` | `playback_id` | Declare that no more bytes will be sent |
+| `PlaybackUrl` | `playback_id`, `url` | Begin one whole playback the device fetches from `url` itself while disarmed; no chunks or `PlaybackEnd` follow (T-021) |
 | `PlaybackStop` | `playback_id` | Stop the playback now, before or after `PlaybackEnd`; it still ends with one `PlaybackFinished` (T-019) |
 | `Close` | none | Permanently release the driver |
 
@@ -150,6 +151,7 @@ The table covers audio-state events. `SetVisualState` is independently valid in 
 | `DISARMED` | `StartListening` | Begin requested generation | `ARMING` |
 | `DISARMED` | `PlayCue` | Begin semantic cue | `PLAYING_CUE` |
 | `DISARMED` | `PlaybackBegin` | Open playback stream | `PLAYING_AUDIO` |
+| `DISARMED` | `PlaybackUrl` | Start the device on the URL; input is already complete | `PLAYING_AUDIO` |
 | `DISARMED` | `Close` | Release resources | `CLOSED` |
 | `ARMING` | matching `ListeningStarted` | Record active generation | `LISTENING` |
 | `ARMING` | matching `MicrophoneUnavailable` | Report failure | `DISARMED` |
@@ -168,7 +170,7 @@ The table covers audio-state events. `SetVisualState` is independently valid in 
 | `PLAYING_AUDIO` | matching `PlaybackChunk` | Append audio | `PLAYING_AUDIO` |
 | `PLAYING_AUDIO` | matching `PlaybackEnd` | Finish input and drain device | `PLAYING_AUDIO` |
 | `PLAYING_AUDIO` | matching `PlaybackStop` | Stop device playback, release the stream | `PLAYING_AUDIO` |
-| `PLAYING_AUDIO` | matching `PlaybackFinished` after `PlaybackEnd` or `PlaybackStop` | Complete playback | `DISARMED` |
+| `PLAYING_AUDIO` | matching `PlaybackFinished` after `PlaybackEnd`, `PlaybackUrl` or `PlaybackStop` | Complete playback | `DISARMED` |
 | `PLAYING_AUDIO` | matching `MicrophoneUnavailable` | Abort playback | `DISARMED` |
 | any non-closed state | `Close` | Abort operation and release resources | `CLOSED` |
 | any non-closed state | `DriverClosed` | Discard the active operation; the driver is permanently unavailable | `CLOSED` |
@@ -261,9 +263,10 @@ After `SpeechEnded`, the final transcript determines acceptance.
 
 ## Cue and playback sequencing
 
-- A half-duplex driver MUST be `DISARMED` before `PlayCue` or `PlaybackBegin`. (`MP-AUDIO-001`)
+- A half-duplex driver MUST be `DISARMED` before `PlayCue`, `PlaybackBegin` or `PlaybackUrl`. (`MP-AUDIO-001`)
 - The manager MUST await `CueFinished` before starting a conflicting listening or playback operation.
 - `PlaybackEnd` means no more bytes will be sent; `PlaybackFinished` means the device has drained the audio and playback is complete.
+- `PlaybackUrl` is a whole playback: the device fetches the URL, and `PlaybackFinished` means its media player has played it and is no longer busy. The ESPHome driver sends it as an announcement once the player is not busy (as for a stream), takes the end from the player state (a change within 5 s, at least 0.5 s after the call, then not busy), and stops it past 10 minutes. A URL the device never starts is a WARNING and still one `PlaybackFinished` (no reason field); a failed command is `MicrophoneUnavailable` with no `PlaybackFinished`. (T-021)
 - The manager MUST NOT re-arm listening before `PlaybackFinished`.
 - After `PlaybackStop` the manager sends no more `PlaybackChunk`, `PlaybackEnd` or `PlaybackStop` for that playback. If the drain had already finished, `PlaybackStop` does nothing and the queued `PlaybackFinished` is the one. Exactly one `PlaybackFinished` ends each playback either way.
 - Visual `PROCESSING` remains active while playback for a reply drains.
@@ -279,6 +282,9 @@ After `SpeechEnded`, the final transcript determines acceptance.
 | Segment liveness | `SpeechStarted` or last segment event | next `AudioChunk`, `AudioProgress`, or `SpeechEnded` | Active capture stalled | Manager |
 | Cue completion | `PlayCue` | `CueFinished` | Cue operation stalled | Manager |
 | Playback completion | `PlaybackBegin` or last playback activity | `PlaybackFinished` | Playback stalled | Manager |
+| URL playback start | `PlaybackUrl` sent to the device | a media player change within 5 s | Device did not start the URL: WARNING, `PlaybackFinished` | Driver |
+| URL playback end | `PlaybackUrl` sent to the device | player not busy within 10 min | Endless or stuck: WARNING, stop, `PlaybackFinished` | Driver |
+| URL playback (session) | `PlaybackUrl` | `PlaybackFinished` within 720 s | Driver stalled: treated as a satellite failure | Manager |
 | Connection watchdog | last valid server connectivity evidence | server connectivity restored | Server unavailable | Firmware |
 
 - Idle open-mic `LISTENING` has no speech-segment liveness timeout. (`MP-TIMEOUT-001`)

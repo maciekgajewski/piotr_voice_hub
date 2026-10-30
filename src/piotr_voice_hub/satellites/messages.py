@@ -74,6 +74,15 @@ class PlaybackEnd:
 
 
 @dataclass(frozen=True)
+class PlaybackUrl:
+    """Play a consumer's URL on the device (T-021): the device fetches it itself. No chunks or
+    `PlaybackEnd` follow; it ends with one PlaybackFinished, `PlaybackStop` stops it."""
+
+    playback_id: str
+    url: str
+
+
+@dataclass(frozen=True)
 class PlaybackStop:
     """Stop the current playback now (T-019); it still ends with one PlaybackFinished."""
 
@@ -160,6 +169,7 @@ type MicrophoneCommand = (
     | PlaybackBegin
     | PlaybackChunk
     | PlaybackEnd
+    | PlaybackUrl
     | PlaybackStop
     | Close
 )
