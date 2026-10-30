@@ -1,14 +1,16 @@
-"""API commands `speak`, `release` (design.md §6; T-017) and `stop` (T-019).
+"""API commands `speak`, `release` (design.md §6; T-017), `stop` (T-019) and `play` (T-021).
 
 A client message is `{"type", "id", "satellite", "data"}`. `CommandRouter.handle` validates it,
 calls the satellite's session and returns the reply for that client: `ack` (with the command's
 result) or `error` (`{"code", "message"}`), both with `reply_to` and no `ts` (design.md's
-example). It never raises for a client's mistake. `play` is a later task (T-021) and is refused
-as not supported yet. `speak` takes `listen_after` (T-020).
+example). It never raises for a client's mistake. `speak` takes `listen_after` (T-020). `play`
+takes a `url` (`http` or `https`, with a host; the satellite fetches it itself, so the hub
+never does) and `listen_after`; no volume (design.md §6 gives it none).
 """
 
 import json
 import logging
+import urllib.parse
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any, Protocol
@@ -18,8 +20,10 @@ from piotr_voice_hub.tts.wyoming_piper import check_text
 
 COMMAND_KEYS = {"type", "id", "satellite", "data"}
 SPEAK_KEYS = {"text", "listen_after", "volume"}
+PLAY_KEYS = {"url", "listen_after"}
+URL_SCHEMES = ("http", "https")
+MAX_URL_CHARS = 2048
 MAX_ID_CHARS = 128
-NOT_YET = {"play": "T-021"}
 NO_DATA = ("release", "stop")
 
 _logger = logging.getLogger(__name__)
@@ -46,6 +50,8 @@ class Speaker(Protocol):
     satellite_offline) when the session cannot take the command now."""
 
     def speak(self, text: str, volume: float | None, listen_after: bool) -> str: ...  # its id
+
+    def play(self, url: str, listen_after: bool) -> str: ...  # its id
 
     def release(self) -> None: ...
 
@@ -108,11 +114,7 @@ class CommandRouter:
 
     def _run(self, command: dict[str, Any]) -> dict[str, Any]:
         kind, data = command["type"], command["data"]
-        if kind in NOT_YET:
-            raise CommandError(
-                ErrorCode.BAD_REQUEST, f"{kind!r} is not supported yet ({NOT_YET[kind]})"
-            )
-        if kind not in ("speak", *NO_DATA):
+        if kind not in ("speak", "play", *NO_DATA):
             raise CommandError(ErrorCode.BAD_REQUEST, f"unknown command type {kind!r}")
         session = self._sessions.get(command["satellite"])
         if session is None:
@@ -127,6 +129,9 @@ class CommandRouter:
             else:
                 session.stop()
             return {}
+        if kind == "play":
+            url, listen_after = _play_args(data)
+            return {"playback_id": session.play(url, listen_after)}
         text, volume, listen_after = self._speak_args(data)
         return {"playback_id": session.speak(text, volume, listen_after)}
 
@@ -142,9 +147,7 @@ class CommandRouter:
             text = check_text(text)
         except TtsTextError as failure:
             raise CommandError(ErrorCode.BAD_REQUEST, str(failure)) from None
-        listen_after = data.get("listen_after", False)
-        if not isinstance(listen_after, bool):
-            raise CommandError(ErrorCode.BAD_REQUEST, "'listen_after' must be a boolean")
+        listen_after = _listen_after(data)
         if "volume" not in data:
             return text, None, listen_after
         volume = data["volume"]
@@ -152,6 +155,35 @@ class CommandRouter:
         if isinstance(volume, bool) or not isinstance(volume, int | float) or not 0 <= volume <= 1:
             raise CommandError(ErrorCode.BAD_REQUEST, "'volume' must be a number from 0 to 1")
         return text, float(volume), listen_after
+
+
+def _play_args(data: dict[str, Any]) -> tuple[str, bool]:
+    """The URL (checked, never fetched) and `listen_after` (default false)."""
+    if unknown := set(data) - PLAY_KEYS:
+        raise CommandError(ErrorCode.BAD_REQUEST, f"unknown play keys {sorted(unknown)}")
+    url = data.get("url")
+    if not isinstance(url, str) or not 0 < len(url) <= MAX_URL_CHARS:
+        raise CommandError(
+            ErrorCode.BAD_REQUEST, f"play needs a string 'url' of 1 to {MAX_URL_CHARS} characters"
+        )
+    if not url.isprintable() or " " in url:
+        raise CommandError(ErrorCode.BAD_REQUEST, "'url' must not contain spaces or controls")
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        _ = parts.port  # ValueError for a bad port
+    except ValueError as failure:
+        raise CommandError(ErrorCode.BAD_REQUEST, f"'url' is not a URL: {failure}") from None
+    if parts.scheme not in URL_SCHEMES or not host:
+        raise CommandError(ErrorCode.BAD_REQUEST, "'url' must be an http or https URL with a host")
+    return url, _listen_after(data)
+
+
+def _listen_after(data: dict[str, Any]) -> bool:
+    listen_after = data.get("listen_after", False)
+    if not isinstance(listen_after, bool):
+        raise CommandError(ErrorCode.BAD_REQUEST, "'listen_after' must be a boolean")
+    return listen_after
 
 
 def _valid_str(value: object) -> str | None:

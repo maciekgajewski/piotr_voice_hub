@@ -293,6 +293,12 @@ def test_replies_with_stop_after(capsys: pytest.CaptureFixture[str]) -> None:
         ("--stop", "voice-pe-02", "--stop-after", "0"),
         ("--stop", "voice-pe-02", "--listen-after"),
         ("--release", "--listen-after"),
+        ("--play", "http://h/a.mp3", "--text", "x"),
+        ("--play", "http://h/a.mp3", "--long"),
+        ("--play", "http://h/a.mp3", "--release"),
+        ("--stop", "voice-pe-02", "--play", "http://h/a.mp3"),
+        ("--play", "file:///tmp/a.mp3"),
+        ("--play", "h/a.mp3"),
     ],
 )
 def test_bad_option_combinations(options: tuple[str, ...]) -> None:
@@ -339,3 +345,61 @@ def test_announce_with_listen_after(capsys: pytest.CaptureFixture[str]) -> None:
     )
     assert code == 0
     assert received[0]["data"] == {"text": load_tool().ANNOUNCEMENT, "listen_after": True}
+
+
+# play (T-021)
+
+PLAY_URL = "http://10.0.0.2:8000/dzwonek.mp3"
+
+
+def test_play_answers_every_transcript_with_the_url(capsys: pytest.CaptureFixture[str]) -> None:
+    received, code = asyncio.run(fake_hub("--play", PLAY_URL, "--listen-after"))
+    assert code == 1  # the fake hub closed the connection
+    assert [(c["type"], c["id"], c["satellite"], c["data"]) for c in received] == [
+        ("play", "speak-test-1", "voice-pe-02", {"url": PLAY_URL, "listen_after": True}),
+        ("play", "speak-test-2", "voice-pe-03", {"url": PLAY_URL, "listen_after": True}),
+    ]
+
+
+def test_announce_play_sends_one_play_and_exits_after_its_finish(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    received, code = asyncio.run(
+        scripted_hub(acked_speak, "--announce", "voice-pe-03", "--play", PLAY_URL)
+    )
+    assert code == 0
+    assert received == [
+        {
+            "type": "play",
+            "id": "speak-test-1",
+            "satellite": "voice-pe-03",
+            "data": {"url": PLAY_URL},
+        }
+    ]
+
+
+def test_announce_play_refused_is_exit_1(capsys: pytest.CaptureFixture[str]) -> None:
+    async def refused(connection: ServerConnection, received: list[dict[str, Any]]) -> None:
+        play = await receive(connection, received)
+        error = {"code": "bad_request", "message": "'url' must be an http or https URL"}
+        await connection.send(reply(play, error, "error"))
+
+    _, code = asyncio.run(scripted_hub(refused, "--announce", "voice-pe-02", "--play", PLAY_URL))
+    assert code == 1
+
+
+def test_announce_play_with_stop_after(capsys: pytest.CaptureFixture[str]) -> None:
+    async def stopped(connection: ServerConnection, received: list[dict[str, Any]]) -> None:
+        play = await receive(connection, received)
+        await connection.send(reply(play, {"playback_id": "p1"}))
+        stop = await receive(connection, received)
+        await connection.send(reply(stop, {}))
+        await connection.send(finished("p1"))
+
+    options = ("--announce", "voice-pe-02", "--play", PLAY_URL, "--stop-after", "0.05")
+    received, code = asyncio.run(scripted_hub(stopped, *options))
+    assert code == 0
+    assert [(c["type"], c["satellite"], c["data"]) for c in received] == [
+        ("play", "voice-pe-02", {"url": PLAY_URL}),
+        ("stop", "voice-pe-02", {}),
+    ]

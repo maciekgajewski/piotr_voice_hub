@@ -1,8 +1,9 @@
-"""T-017, T-019, T-020: parsing, validating and routing the API commands `speak` (with
-`listen_after`), `release` and `stop`."""
+"""T-017, T-019, T-020, T-021: parsing, validating and routing the API commands `speak` (with
+`listen_after`), `play`, `release` and `stop`."""
 
 import json
 import logging
+from typing import Any
 
 import pytest
 
@@ -11,7 +12,7 @@ from piotr_voice_hub.hub.commands import CommandError, CommandRouter, ErrorCode
 
 class FakeSession:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, ...] | tuple[str, str, float | None, bool]] = []
+        self.calls: list[tuple[Any, ...]] = []
         self.refuse: CommandError | None = None
 
     def speak(self, text: str, volume: float | None, listen_after: bool) -> str:
@@ -19,6 +20,12 @@ class FakeSession:
             raise self.refuse
         self.calls.append(("speak", text, volume, listen_after))
         return "playback-1"
+
+    def play(self, url: str, listen_after: bool) -> str:
+        if self.refuse is not None:
+            raise self.refuse
+        self.calls.append(("play", url, listen_after))
+        return "playback-2"
 
     def release(self) -> None:
         if self.refuse is not None:
@@ -72,6 +79,40 @@ def test_speak_with_listen_after_asks_for_the_follow_up_window() -> None:
     assert session.calls == [("speak", "Wziąć parasol?", None, True)]
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://10.0.0.2:8000/dzwonek.mp3",
+        "https://example.com/a.flac?token=x",
+        "HTTP://[fd00::2]/a.wav",
+    ],
+)
+def test_play_is_acked_with_its_playback_id_and_passes_the_url_unchanged(url: str) -> None:
+    commands, session = router()
+    reply = commands.handle(command("play", data={"url": url}))
+    assert reply == {
+        "type": "ack",
+        "reply_to": "c7",
+        "satellite": "voice-pe-02",
+        "data": {"playback_id": "playback-2"},
+    }
+    assert commands.handle(command("play", data={"url": url, "listen_after": True}))["type"] == (
+        "ack"
+    )
+    assert session.calls == [("play", url, False), ("play", url, True)]
+
+
+def test_play_takes_a_url_of_exactly_2048_characters_and_refuses_2049() -> None:
+    """Review N7: the limit is inclusive."""
+    commands, session = router()
+    url = "http://h/" + "a" * (2048 - len("http://h/"))
+    assert len(url) == 2048
+    assert commands.handle(command("play", data={"url": url}))["type"] == "ack"
+    reply = commands.handle(command("play", data={"url": url + "a"}))
+    assert reply["type"] == "error" and reply["data"]["code"] == "bad_request"
+    assert session.calls == [("play", url, False)]
+
+
 @pytest.mark.parametrize("kind", ["release", "stop"])
 def test_release_and_stop_are_acked_with_empty_data(kind: str) -> None:
     commands, session = router()
@@ -100,7 +141,25 @@ BAD = [
     pytest.param(command(extra=1), id="unknown-key"),
     pytest.param(command(data=[]), id="data-not-an-object"),
     pytest.param(command("hello"), id="unknown-type"),
-    pytest.param(command("play", data={"media_url": "x"}), id="play-not-yet"),
+    pytest.param(command("play"), id="play-no-url"),
+    pytest.param(command("play", data={"media_url": "http://h/a.mp3"}), id="play-unknown-key"),
+    pytest.param(command("play", data={"url": "http://h/a.mp3", "volume": 0.5}), id="play-volume"),
+    pytest.param(command("play", data={"url": 5}), id="play-url-not-a-string"),
+    pytest.param(command("play", data={"url": ""}), id="play-url-empty"),
+    pytest.param(command("play", data={"url": "http://h/" + "a" * 2048}), id="play-url-too-long"),
+    pytest.param(command("play", data={"url": "file:///tmp/a.mp3"}), id="play-file-url"),
+    pytest.param(command("play", data={"url": "ftp://h/a.mp3"}), id="play-ftp-url"),
+    pytest.param(command("play", data={"url": "rtsp://h/a"}), id="play-rtsp-url"),
+    pytest.param(command("play", data={"url": "a.mp3"}), id="play-relative-url"),
+    pytest.param(command("play", data={"url": "http:///a.mp3"}), id="play-url-no-host"),
+    pytest.param(command("play", data={"url": "http://h:99999/a"}), id="play-url-bad-port"),
+    pytest.param(command("play", data={"url": "http://[::1/a"}), id="play-url-bad-ipv6"),
+    pytest.param(command("play", data={"url": "http://h/a b.mp3"}), id="play-url-space"),
+    pytest.param(command("play", data={"url": "http://h/a\n.mp3"}), id="play-url-newline"),
+    pytest.param(
+        command("play", data={"url": "http://h/a.mp3", "listen_after": "yes"}),
+        id="play-listen-after-a-string",
+    ),
     pytest.param(command("release", data={"x": 1}), id="release-with-data"),
     pytest.param(command("stop", data={"playback_id": "x"}), id="stop-with-data"),
     pytest.param(command(data={}), id="speak-no-text"),
@@ -160,17 +219,21 @@ def test_the_session_refusing_is_the_reply(code: ErrorCode) -> None:
     assert error(commands.handle(command(data={"text": "x"}))) == ("c7", "voice-pe-02", code.value)
     assert error(commands.handle(command("release")))[2] == code.value
     assert error(commands.handle(command("stop")))[2] == code.value
+    play = command("play", data={"url": "http://h/a.mp3"})
+    assert error(commands.handle(play))[2] == code.value
 
 
 def test_one_info_line_per_command_without_the_text(caplog: pytest.LogCaptureFixture) -> None:
     commands, _ = router()
     caplog.set_level(logging.INFO, "piotr_voice_hub.hub.commands")
     commands.handle(command(data={"text": "Tajny tekst"}))
+    commands.handle(command("play", data={"url": "http://h/a.mp3?token=Tajny"}))
     commands.handle(command("play"))
     lines = [r.getMessage() for r in caplog.records]
     assert lines == [
         "API command speak c7 for voice-pe-02: ack {'playback_id': 'playback-1'} (11 characters)",
-        "API command play c7 for voice-pe-02: error bad_request ('play' is not supported yet "
-        "(T-021))",
+        "API command play c7 for voice-pe-02: ack {'playback_id': 'playback-2'}",
+        "API command play c7 for voice-pe-02: error bad_request (play needs a string 'url' of 1 "
+        "to 2048 characters)",
     ]
     assert not any("Tajny" in line for line in lines)

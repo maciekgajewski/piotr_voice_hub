@@ -125,7 +125,9 @@ class FakeClient:
     reports only the IDLE, as ESPHome did on hardware for a short cue; `cue_announces = False`
     never announces. `cue_start_seconds` is the delay before the cue's first report;
     `extra_update_after` sends an unrelated IDLE update (a volume change) that long after a cue
-    call. With `url_states`, an announced URL reports PLAYING once fetched and IDLE at its end.
+    call. With `url_states`, an announced URL reports PLAYING once fetched and IDLE at its end,
+    and a STOP reports IDLE. `initial_state` is the state sent on subscribe (review B: PLAYING
+    for a play that outlived the hub; None sends none).
     `timeline` records each reported state and each URL with its loop time."""
 
     def __init__(self, services: tuple[str, ...] = ALL_SERVICES) -> None:
@@ -161,6 +163,7 @@ class FakeClient:
         self.cue_start_seconds = 0.01  # the firmware's script starts it after the call returns
         self.extra_update_after: float | None = None
         self.url_states = False
+        self.initial_state: MediaPlayerState | None = MediaPlayerState.IDLE  # None: never sent
         self.timeline: list[tuple[str, float]] = []
         self._tasks: set[asyncio.Task[Any]] = set()
 
@@ -215,7 +218,8 @@ class FakeClient:
 
     def subscribe_states(self, on_state: Callable[[Any], None]) -> None:
         self.on_state = on_state
-        self._later(self.player(MediaPlayerState.IDLE))  # the initial state, as ESPHome sends
+        if self.initial_state is not None:  # the initial state, as ESPHome sends
+            self._later(self.player(self.initial_state))
 
     async def player(self, state: MediaPlayerState, volume: float = 0.3) -> None:
         assert self.on_state is not None

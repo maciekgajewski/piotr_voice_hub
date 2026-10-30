@@ -1,5 +1,5 @@
-"""T-010, T-017, T-019, T-020: the satellite session state machine, with a fake driver, STT and
-TTS."""
+"""T-010, T-017, T-019, T-020, T-021: the satellite session state machine, with a fake driver,
+STT and TTS."""
 
 import asyncio
 import logging
@@ -25,6 +25,7 @@ from piotr_voice_hub.hub.events import (
     WakeCancelled,
 )
 from piotr_voice_hub.hub.session import SatelliteSession
+from piotr_voice_hub.satellites import esphome
 from piotr_voice_hub.satellites.interfaces import MicrophoneUnavailable
 from piotr_voice_hub.satellites.messages import (
     AudioChunk,
@@ -38,6 +39,7 @@ from piotr_voice_hub.satellites.messages import (
     PlaybackChunk,
     PlaybackEnd,
     PlaybackStop,
+    PlaybackUrl,
     PlayCue,
     ResetWakeCandidate,
     SetVisualState,
@@ -269,7 +271,7 @@ class FakeDriver:
                 self.push(ListeningStopped(event.listen_id, event.reason))
             elif isinstance(event, PlayCue):
                 self.push(CueFinished(event.cue_id))
-            elif isinstance(event, PlaybackEnd):
+            elif isinstance(event, PlaybackEnd | PlaybackUrl):
                 self.push(DriverPlaybackFinished(event.playback_id))
             elif isinstance(event, PlaybackStop) and event.playback_id not in self.finished:
                 self.push(DriverPlaybackFinished(event.playback_id))  # else already queued
@@ -309,6 +311,8 @@ class FakeDriver:
                 return "end"
             if isinstance(c, PlaybackStop):
                 return "stop-playback"
+            if isinstance(c, PlaybackUrl):
+                return ("url", c.url)
             assert isinstance(c, SetVisualState)
             return c.state
 
@@ -2638,3 +2642,255 @@ async def _test_follow_up_chain() -> None:
     assert h.hub(PlaybackFinished)[-1] == PlaybackFinished("kitchen", second, True)
     assert h.driver.without_ids()[-3:] == [VisualState.LISTENING, "start", VisualState.IDLE]
     assert CueType.TIMEOUT not in h.driver.without_ids()
+
+
+# play (T-021): a URL the satellite fetches itself, with speak's busy, stop and follow-up rules
+
+URL = "http://10.0.0.2:8000/dzwonek.mp3"
+
+
+def test_play_plays_the_reply_url_then_rearms() -> None:
+    asyncio.run(_test_play_reply())
+
+
+async def _test_play_reply() -> None:
+    h = Harness(reply_timeout=10)
+    await accepted(h)
+    playback_id = h.session.play(URL)
+    assert playback_id.startswith("playback-")
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert after_processing(h) == [("url", URL), VisualState.IDLE, "start"]
+    sent = next(c for c in h.driver.commands if isinstance(c, PlaybackUrl))
+    assert sent == PlaybackUrl(playback_id, URL)
+    assert h.events[h.events.index(PROCESSING) + 2 :] == [
+        SPEAKING,
+        PlaybackFinished("kitchen", playback_id, False),
+        IDLE,
+    ]
+    assert h.tts.texts == [] and CueType.TIMEOUT not in h.driver.without_ids()
+
+
+def test_play_to_an_idle_satellite_is_an_announcement() -> None:
+    asyncio.run(_test_play_announcement())
+
+
+async def _test_play_announcement() -> None:
+    h = Harness()
+    await idle(h)
+    playback_id = h.session.play(URL)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.driver.without_ids() == [
+        VisualState.IDLE,
+        "start",
+        ("stop", "announcement"),
+        ("url", URL),
+        VisualState.IDLE,
+        "start",
+    ]
+    assert h.events == [
+        OFFLINE,
+        IDLE,
+        SPEAKING,
+        PlaybackFinished("kitchen", playback_id, False),
+    ] + [IDLE]
+
+
+@pytest.mark.parametrize("announcement", [False, True])
+def test_play_with_listen_after_opens_the_follow_up_window(announcement: bool) -> None:
+    asyncio.run(_test_play_listen_after(announcement))
+
+
+async def _test_play_listen_after(announcement: bool) -> None:
+    h = Harness(reply_timeout=10)
+    h.stt.say("u2", "Tak.", ())
+    if announcement:
+        await idle(h)
+    else:
+        await accepted(h)
+    playback_id = h.session.play(URL, listen_after=True)
+    await h.until(lambda: len(h.driver.starts()) == 2 and h.events[-1:] == [LISTENING])
+    assert h.driver.without_ids()[-3:] == [("url", URL), VisualState.LISTENING, "start"]
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, True)]
+    h.driver.push(*segments("u2")(h.driver.starts()[1].listen_id))
+    await h.until(lambda: len(h.hub(TranscriptFinal)) == (1 if announcement else 2))
+    await h.stop()
+    assert h.hub(TranscriptFinal)[-1] == follow_up_final("Tak", "Tak.")
+
+
+@pytest.mark.parametrize("announcement", [False, True])
+@pytest.mark.parametrize("when", ["at-the-ack", "playing"])
+def test_stop_ends_a_play_with_one_playback_finished_then_rearms(
+    announcement: bool, when: str
+) -> None:
+    asyncio.run(_test_stop_play(announcement, when))
+
+
+async def _test_stop_play(announcement: bool, when: str) -> None:
+    h = Harness(reply_timeout=10)
+    h.driver.silent.add(PlaybackUrl)  # the device is still playing
+    if announcement:
+        await idle(h)
+    else:
+        await accepted(h)
+    playback_id = h.session.play(URL, listen_after=True)
+    if when == "playing":
+        await h.until(lambda: ("url", URL) in h.driver.without_ids())
+        await asyncio.sleep(0.01)  # waiting for PlaybackFinished
+    started = asyncio.get_running_loop().time()
+    h.session.stop()
+    with pytest.raises(CommandError, match=f"already stopping {playback_id}"):
+        h.session.stop()
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    assert asyncio.get_running_loop().time() - started < 0.5
+    await h.until(lambda: h.events[-1:] == [IDLE])  # stopped: no follow-up window
+    await h.stop()
+    played = h.driver.without_ids()[-4:]
+    if when == "at-the-ack":  # nothing went out, and no cue
+        assert ("url", URL) not in h.driver.without_ids()
+        assert played[-2:] == [VisualState.IDLE, "start"]
+    else:
+        assert played == [("url", URL), "stop-playback", VisualState.IDLE, "start"]
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
+    assert h.events[-3:] == [SPEAKING, PlaybackFinished("kitchen", playback_id, False), IDLE]
+    assert CueType.TIMEOUT not in h.driver.without_ids()
+
+
+@pytest.mark.parametrize("stop_first", [False, True])
+def test_a_stop_as_the_play_finishes_gives_one_playback_finished(stop_first: bool) -> None:
+    asyncio.run(_test_stop_as_play_finishes(stop_first))
+
+
+async def _test_stop_as_play_finishes(stop_first: bool) -> None:
+    h = Harness(reply_timeout=10)
+    h.driver.silent.add(PlaybackUrl)
+    await accepted(h)
+    playback_id = h.session.play(URL)
+    await h.until(lambda: ("url", URL) in h.driver.without_ids())
+    await asyncio.sleep(0.01)
+    if stop_first:
+        h.session.stop()
+        h.driver.push(DriverPlaybackFinished(playback_id))
+    else:
+        h.driver.push(DriverPlaybackFinished(playback_id))
+        h.session.stop()
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert ("stop-playback" in h.driver.without_ids()) == stop_first
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", playback_id, False)]
+    assert h.driver.events.empty()
+
+
+def test_play_follows_the_busy_policy_of_speak() -> None:
+    asyncio.run(_test_play_busy())
+
+
+async def _test_play_busy() -> None:
+    h = Harness(reply_timeout=10)
+    h.driver.silent.add(PlaybackUrl)
+    assert busy(lambda: h.session.play(URL)) == ErrorCode.SATELLITE_OFFLINE
+    await idle(h)
+    first = h.session.play(URL)
+    with pytest.raises(CommandError, match="already has an announcement"):
+        h.session.play(URL)
+    await h.until(lambda: ("url", URL) in h.driver.without_ids())
+    with pytest.raises(CommandError, match=r"kitchen is busy \(speaking\)"):
+        h.session.play(URL)
+    with pytest.raises(CommandError, match=r"kitchen is busy \(speaking\)"):
+        h.session.speak("Obiad.", None)
+    with pytest.raises(CommandError, match=r"kitchen is busy \(speaking\)"):
+        h.session.release()
+    h.driver.push(DriverPlaybackFinished(first))
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.hub(PlaybackFinished) == [PlaybackFinished("kitchen", first, False)]
+
+
+def test_a_play_after_the_reply_timeout_is_busy() -> None:
+    asyncio.run(_test_play_after_the_reply_timeout())
+
+
+async def _test_play_after_the_reply_timeout() -> None:
+    h = Harness(reply_timeout=0.05)
+    await accepted(h)
+    await h.until(lambda: CueType.TIMEOUT in h.driver.without_ids())
+    assert busy(lambda: h.session.play(URL)) == ErrorCode.BUSY
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert not h.hub(PlaybackFinished)
+
+
+def test_the_session_bound_on_a_play_is_above_the_drivers_own_worst_case() -> None:
+    """Review N7: the driver ends every URL itself (free wait, start bound, floor, end bound,
+    the wait after its STOP); the session's bound only catches a stalled driver."""
+    driver_worst = (
+        esphome.PLAYER_FREE_TIMEOUT_SECONDS
+        + esphome.URL_START_TIMEOUT_SECONDS
+        + esphome.CUE_MIN_SECONDS
+        + esphome.URL_MAX_SECONDS
+        + esphome.PLAYER_FREE_TIMEOUT_SECONDS
+    )
+    assert session_module.PLAY_URL_FINISHED_SECONDS > driver_worst + 60
+
+
+def test_a_play_that_never_finishes_recovers_and_still_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_module, "PLAY_URL_FINISHED_SECONDS", 0.05)
+    asyncio.run(_test_play_never_finishes())
+
+
+async def _test_play_never_finishes() -> None:
+    h = Harness(reply_timeout=10)
+    h.driver.silent.add(PlaybackUrl)
+    await accepted(h)
+    playback_id = h.session.play(URL, listen_after=True)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.events[h.events.index(SPEAKING) :] == [
+        SPEAKING,
+        PlaybackFinished("kitchen", playback_id, False),
+        OFFLINE,
+        IDLE,
+    ]
+    assert h.driver.closes == 1 and h.sleeps == [1.0]
+
+
+@pytest.mark.parametrize("fails", ["url", "stop"])
+@pytest.mark.parametrize("announcement", [False, True])
+def test_a_disconnect_during_a_play_still_finishes_once(fails: str, announcement: bool) -> None:
+    asyncio.run(_test_play_disconnect(fails, announcement))
+
+
+async def _test_play_disconnect(fails: str, announcement: bool) -> None:
+    h = Harness(reply_timeout=10)
+    if fails == "url":
+        h.driver.fail_on.add(PlaybackUrl)
+    else:
+        h.driver.silent.add(PlaybackUrl)
+        h.driver.fail_on.add(PlaybackStop)
+    if announcement:
+        await idle(h)
+    else:
+        await accepted(h)
+    playback_id = h.session.play(URL, listen_after=True)
+    if fails == "stop":
+        await h.until(lambda: ("url", URL) in h.driver.without_ids())
+        h.session.stop()
+    await h.until(lambda: h.driver.closes == 1)
+    await h.until(lambda: len(h.driver.starts()) == 2)
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert h.events[h.events.index(SPEAKING) :] == [
+        SPEAKING,
+        PlaybackFinished("kitchen", playback_id, False),
+        OFFLINE,
+        IDLE,
+    ]
+    assert "stop-playback" not in h.driver.without_ids()  # it failed, or was never sent

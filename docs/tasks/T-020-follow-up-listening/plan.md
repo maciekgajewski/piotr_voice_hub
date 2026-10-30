@@ -1,6 +1,6 @@
 # T-020: follow-up listening: plan
 
-**Status:** in review (2026-10-30). Branch `t-020-follow-up-listening`, from `origin/main`
+**Status:** done (merged as PR #29, 2026-10-30). Branch `t-020-follow-up-listening`, from `origin/main`
 (e60e03a, T-019 merged as PR #28).
 
 ## Goal
