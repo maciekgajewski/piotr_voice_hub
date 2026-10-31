@@ -26,3 +26,24 @@
   the tool's output with `tee` and grep its `wake`, `transcript_partial`, `transcript_final`
   and `wake_cancelled` lines (each with `ts` and `satellite`; the hub log has no transcript
   text), with one table row per false wake.
+
+## 2026-10-31 (review 5719990609)
+
+- S1: 6.4 plays `long.wav` (`speech.wav` 60 times, about 2 min, made on the laptop in 0.5 with
+  the review's `wave` recipe), so the clip outlasts the 10–20 s restart; the expected result is
+  the WARNING `the media player is PLAYING at connect (…); stopping it` and INFO `stopped the
+  media player at connect` (checked in `_stop_stray_player`), plus the seconds to silence.
+- S2: 2.4 runs per satellite: voice-pe-02 `--since S2 --until S3`, voice-pe-03 `--since S3
+  --until E3` (E3 is new: the end of 2.2), `head -10` each.
+- S3: 2.1 uses the 7.1 rules (accept: `ts` and `raw_text`; cancelled candidate: the `wake`'s
+  `ts` and its last partial). N4's `wake` then `wake_cancelled` is not a false wake (the
+  designed outcome for the phrase in the first three words, design §4.1; no cue, nothing to
+  a consumer, no partial); an accept on N4 is.
+- S4: tmux and screen are both on piotr (`command -v`); 7.1 and 7.2 run in a named tmux
+  session that carries `$SHA`, with `tmux ls` and `tmux attach`.
+- N1: 2.3 uses `--until E3`, and greps the startup `speaker hint off` WARNING over the whole log
+  (it was before S2, so the old grep could not show it). N2: 6.1's WARNING needs profiles.
+  N3: one `$SHA`, set and checked (`curl -fsSI`) at the top; the 21 commands use
+  `${SHA:?…}`. N4: new 0.6 (no other API consumer), repeated before 3.3. N5: 0.1 also takes
+  HUB_CACHE from the `/hf` mount. N6: 4.6's second request is also answered with the 20 s
+  text (`--long` answers every request with `LONG_TEXT`, which ends "Koniec długiego testu.").

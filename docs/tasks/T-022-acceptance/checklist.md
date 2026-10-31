@@ -5,8 +5,18 @@ merged P1 feature end to end, the recovery cases, and the baseline numbers. Writ
 into this task's `log.md` (or the PR) with the step numbers.
 
 **How to read the steps.** Run every command on piotr, in a terminal of its own unless a step
-says otherwise. `<sha>` is the commit the hub runs (step 0); `<laptop-ip>` is the laptop's
-192.168.0.x address. The tool prints every hub message (`satellite`, `wake`,
+says otherwise. `<laptop-ip>` is the laptop's 192.168.0.x address.
+
+**`$SHA`, in every terminal** (after 0.1's `git pull`; the production checkout is then at the
+commit the hub runs). Every tool command fetches `speak_test.py` at `$SHA`; if it is
+unset, bash prints `SHA: set SHA, see the top` and the tool does nothing; the `curl` checks the SHA exists on GitHub (a wrong one would
+otherwise make the tool silently do nothing):
+
+```
+export SHA="$(git -C ~/src/piotr_voice_hub rev-parse HEAD)" && curl -fsSI "https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/$SHA/tools/speak_test.py" >/dev/null && echo "SHA ok: $SHA"
+```
+
+Expect `SHA ok: <the SHA recorded in 0.1>`. The tool prints every hub message (`satellite`, `wake`,
 `transcript_final`, `ack`, `playback_finished`, …) and its own commands prefixed `>>> `; it
 answers every `transcript_final` with `speak` "Usłyszałem: <text>" unless the step adds an
 option. Ctrl-C quits it. Log lines quoted below are the hub's own wording; `docker logs -t`
@@ -28,13 +38,14 @@ running containers, so nothing about the config changes). In `~/src/piotr_voice_
 cd ~/src/piotr_voice_hub && git pull --ff-only && git rev-parse HEAD
 export HUB_CONFIG="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/config/hub.yaml"}}{{.Source}}{{end}}{{end}}' piotr-voice-hub-hub-1)"
 export HUB_USER="$(docker inspect -f '{{.Config.User}}' piotr-voice-hub-hub-1)"
+export HUB_CACHE="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/hf"}}{{.Source}}{{end}}{{end}}' piotr-voice-hub-hub-1)"
 export SPEAKER_PROFILES="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/profiles"}}{{.Source}}{{end}}{{end}}' piotr-voice-hub-speaker-recognition-1)"
 docker compose up -d --build && docker compose ps
 ```
 
 Expect: `git rev-parse HEAD` is the merged main; all three services `healthy` within about
-3 minutes (a new Piper container compiles for about 50 s, design §4.3). Record: the SHA (that
-is `<sha>` below) and `date -u +%FT%TZ` as **T0**.
+3 minutes (a new Piper container compiles for about 50 s, design §4.3). Record: the SHA (then set
+`$SHA` as at the top, in this and every other terminal) and `date -u +%FT%TZ` as **T0**.
 
 0.2. **Restarts at the start:**
 `docker inspect -f '{{.Name}} restarts={{.RestartCount}} started={{.State.StartedAt}}' piotr-voice-hub-hub-1 piotr-voice-hub-piper-1 piotr-voice-hub-speaker-recognition-1`
@@ -54,16 +65,24 @@ Record the three lines (design §9: speaker recognition about 0.3–0.45 GB).
 mkdir -p ~/t022-audio && cd ~/t022-audio
 curl -fsSLo speech.wav https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/fa4316cd17990b1cc0e7a645a20366acabc60e60/tests/data/speech_pl_16k.wav
 curl -fsSLo jfk.flac https://raw.githubusercontent.com/openai/whisper/6e3be77e1a105e59086e3e21ff5f609fd6fa89a5/tests/jfk.flac
+python3 -c "import wave; r=wave.open('speech.wav'); p=r.getparams(); f=r.readframes(r.getnframes()); w=wave.open('long.wav','wb'); w.setparams(p); w.writeframes(f*60); w.close()"
 python3 -m http.server 8000
 ```
 
-Leave it running (2.1 s Polish speech, 11 s English speech).
+Leave it running (2.1 s Polish speech, 11 s English speech, and `long.wav`: `speech.wav`
+60 times, about 2 minutes, for 6.4).
+
+0.6. **No other API consumer** (a second one would answer finals too: `busy` replies, and it
+would spoil 3.3):
+`docker logs piotr-voice-hub-hub-1 2>&1 | grep -E "API .* (dis)?connected \(" | tail -1`
+Expect: no line, or a last line ending `(0 clients)`. Otherwise find and stop that consumer
+before step 1, and repeat this check before 3.3.
 
 ## 1. P1 exit criteria (design §11), both satellites
 
 1.1. **voice-pe-02.** Run, then say "Ryszardzie, jaka będzie jutro pogoda?", wait for the reply,
 then within 8 s say "a pojutrze?" without the phrase, then stay silent:
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --listen-after`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --listen-after`
 Expect: the accepted cue; `transcript_final` with `text` like "jaka będzie jutro pogoda",
 `follow_up: false` and `speaker` `{"name": "Maciek", …}` (or `null` if no profile is
 configured, step 2.3); the reply "Usłyszałem: …" right after the cue; `playback_finished` with
@@ -80,7 +99,7 @@ Record: as 1.1.
 2.1. **voice-pe-02, 25 utterances.** Note `date -u +%FT%TZ` as **S2**, run the tool, and say
 each line below from where you usually talk to it, waiting for the reply (or for nothing, on
 N1–N5) before the next:
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)"`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)"`
 
 | # | Say | Expect |
 | --- | --- | --- |
@@ -113,47 +132,63 @@ N1–N5) before the next:
 "Answered": the accepted cue, `transcript_final` with the text after the phrase, the reply.
 "Nothing": no accepted cue and no `transcript_final`. Ctrl-C at the end.
 Record per line: answered or missed (1–20), woke or not (N1–N5), and whether the transcript
-is wrong in a way that changes the meaning. A negative line that woke is a false wake: record
-its `ts` and `raw_text` from the tool's `transcript_final` (or `wake_cancelled`) line. Then the counts (paste S2):
+is wrong in a way that changes the meaning. False wakes on N1–N5 (the rules of 7.1; plan
+interpretation 4):
+- A false accept is a `transcript_final`: record its `ts` and `raw_text`. Any accept on N1–N5
+  is a false wake.
+- A cancelled candidate is `wake` … `wake_cancelled`: record the `wake`'s `ts` and the `text`
+  of the last `transcript_partial` before the cancel, if there is one (a partial carries only
+  the text after the phrase, not the whole transcript). On N1–N3 and N5 it is a false wake.
+- **N4** ("Dziękuję, Ryszardzie."): a `wake` then `wake_cancelled` is the designed outcome,
+  **not** a false wake. The matcher raises a candidate for the phrase in the first three words
+  (design §4.1), and the final cancels it with no cue and nothing sent to a consumer; there is
+  no partial, because nothing follows the phrase. Record only whether the candidate appeared
+  (baseline). An accept on N4 is a false wake. Then the counts (paste S2):
 `docker logs --since <S2> piotr-voice-hub-hub-1 2>&1 | grep "session\[voice-pe-02\]: segment" | grep -c "wake=True"`
 Expect 20 (each accepted utterance has one `wake=True` segment, line 19 included; more than 20
 means a negative line was accepted, fewer means misses). Misses = 20 minus the answered lines
 (no threshold: the baseline).
 
-2.2. **voice-pe-03:** the same list (note **S3**), the same command, then
-`docker logs --since <S3> piotr-voice-hub-hub-1 2>&1 | grep "session\[voice-pe-03\]: segment" | grep -c "wake=True"`
+2.2. **voice-pe-03:** the same list (note **S3** before and **E3** after), the same command, then
+`docker logs --since <S3> --until <E3> piotr-voice-hub-hub-1 2>&1 | grep "session\[voice-pe-03\]: segment" | grep -c "wake=True"`
 Record: as 2.1.
 
 2.3. **Speaker hint** over 2.1 and 2.2:
-`docker logs --since <S2> piotr-voice-hub-hub-1 2>&1 | grep -E "speaker utterance-|speaker hint" | cut -c1-160`
-Expect: one `speaker <utterance_id>: <name> confidence <c> (…)` or `…: null (…)` INFO line per accepted utterance (a
-`speaker hint off: no speaker_recognition.profiles configured` WARNING at startup means no
-profile is set: then every `speaker` is `null`, which is expected, not a failure). Record:
+`docker logs --since <S2> --until <E3> piotr-voice-hub-hub-1 2>&1 | grep "speaker utterance-" | cut -c1-160`
+and, for the startup line, `docker logs piotr-voice-hub-hub-1 2>&1 | grep "speaker hint off"`.
+Expect: one `speaker <utterance_id>: <name> confidence <c> (…)` or `…: null (…)` INFO line
+per accepted utterance. If the second command prints the startup WARNING `speaker hint off:
+no speaker_recognition.profiles configured`, no profile is set: then there are no `speaker`
+lines and every `speaker` is `null`, which is expected, not a failure. Record:
 how many of the 40 named you, and the confidence range; one line per other speaker if
 someone else said a few lines (expected `null`).
 
 2.4. **Reply latency** (plan interpretation 5), from the 2.1 and 2.2 runs:
-`docker logs -t --since <S2> piotr-voice-hub-hub-1 2>&1 | grep -E "segment utterance_id=.*wake=True|playback .* requested by" | head -24`
+voice-pe-02 (only it is addressed between S2 and S3):
+`docker logs -t --since <S2> --until <S3> piotr-voice-hub-hub-1 2>&1 | grep -E "segment utterance_id=.*wake=True|playback .* requested by" | head -10`
+voice-pe-03:
+`docker logs -t --since <S3> --until <E3> piotr-voice-hub-hub-1 2>&1 | grep -E "segment utterance_id=.*wake=True|playback .* requested by" | head -10`
 The lines come in pairs: a `segment … wake=True` line, then the `playback … requested by`
-line of its reply. Record the difference for the first five pairs of each satellite (in
+line of its reply. Record the difference for the five pairs of each satellite (in
 seconds) and, by ear, whether the reply came promptly after the cue (no threshold: the
 baseline).
 
 ## 3. Bare wake, release and the reply timeout
 
 3.1. **Bare wake with no request, voice-pe-03.** Run, say "Ryszardzie." and stay silent:
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)"`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)"`
 Expect: the `LISTENING` light; about 3 s after you stop, `wake_cancelled`, the timeout cue
 and `idle`; no `transcript_final`. Ctrl-C. Record: pass/fail and
 `docker logs -t --since 10m piotr-voice-hub-hub-1 2>&1 | grep -E "wake word alone|no request within"`
 (expect one line each).
 
 3.2. **Release, voice-pe-02.** Run, say "Ryszardzie, nic nie mów.":
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --release`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --release`
 Expect: the accepted cue, `transcript_final`, `>>> release`, its `ack`, then `idle` with no
 sound. Ctrl-C. Record: pass/fail.
 
-3.3. **Reply timeout, voice-pe-03.** No tool runs for this step (nobody answers). Say
+3.3. **Reply timeout, voice-pe-03.** No tool runs for this step (nobody answers; repeat the
+0.6 check first). Say
 "Ryszardzie, która godzina?" and wait 30 s. Then:
 `docker logs -t --since 10m piotr-voice-hub-hub-1 2>&1 | grep "reply timeout"`
 Expect: the accepted cue and the `PROCESSING` light, about 30 s later the timeout cue and the
@@ -162,36 +197,37 @@ Expect: the accepted cue and the `PROCESSING` light, about 30 s later the timeou
 ## 4. Announcements, busy and stop
 
 4.1. **Announcement, voice-pe-02** (no wake phrase):
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --announce voice-pe-02`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-02`
 Expect: no cue; "To jest test ogłoszenia z huba."; the light stays idle; one
 `playback_finished`; exit 0; "Ryszardzie" works right after. Record: pass/fail.
 
 4.2. **Busy, voice-pe-03.** Start a 20 s announcement:
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --announce voice-pe-03 --long`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-03 --long`
 and while it plays, in a second terminal:
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --announce voice-pe-03`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-03`
 Expect: the second one gets an immediate `busy` error and exits 1; the first plays on
 unaffected and exits 0. Record: pass/fail.
 
 4.3. **Stop with nothing playing is busy, voice-pe-02:**
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --stop voice-pe-02`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --stop voice-pe-02`
 Expect: a `busy` error, exit 1, nothing heard. Record: pass/fail.
 
 4.4. **Stop a reply mid-speech, voice-pe-02.** Run, say "Ryszardzie, opowiedz coś długiego.":
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --long --stop-after 4`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --long --stop-after 4`
 Expect: the reply cuts off about 4 s in; `stop` gets an `ack`; one `playback_finished` with
 `listening_for_follow_up: false`; `idle`. Ctrl-C. Record: pass/fail.
 
 4.5. **Stop an announcement mid-speech, voice-pe-03:**
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --announce voice-pe-03 --long --stop-after 4`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-03 --long --stop-after 4`
 Expect: as 4.4, exit 0. Record: pass/fail.
 
 4.6. **The end of a long reply (T-017 playback-end check), voice-pe-03.** Run, say
 "Ryszardzie, opowiedz coś długiego.", listen to the end, then right after it say
 "Ryszardzie, która godzina?":
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --long`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --long`
 Expect: the 20 s reply is heard to its last words ("Koniec długiego testu.") with nothing cut
-off; the second request is answered (the satellite re-armed in time); no `segment` line in the
+off; the second request is answered (the satellite re-armed in time), again with the same
+20 s text (with `--long` the tool answers every request with it; that is expected); no `segment` line in the
 hub log between `played playback_id=…` and your second request (the satellite did not hear
 its own reply). Ctrl-C. Record: pass/fail and
 `docker logs -t --since 10m piotr-voice-hub-hub-1 2>&1 | grep -E "played playback_id|segment utterance_id" | tail -4`
@@ -199,20 +235,20 @@ its own reply). Ctrl-C. Record: pass/fail and
 ## 5. Play a URL (T-021)
 
 5.1. **Reply play, voice-pe-02.** Run, say "Ryszardzie, puść test.":
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --play http://<laptop-ip>:8000/speech.wav`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --play http://<laptop-ip>:8000/speech.wav`
 Expect: the accepted cue, then right after it the 2 s clip (the laptop server logs the GET);
 one `playback_finished`; `idle`. Ctrl-C. Record: pass/fail and the INFO line from
 `docker logs -t --since 10m piotr-voice-hub-hub-1 2>&1 | grep "playback finished"` (`… (url) after N s`).
 
 5.2. **Play with a follow-up, voice-pe-03.** Run, say "Ryszardzie, puść test.", after the clip say
 "jeszcze raz" without the phrase, then stay silent:
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --play http://<laptop-ip>:8000/speech.wav --listen-after`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --play http://<laptop-ip>:8000/speech.wav --listen-after`
 Expect: the clip, `playback_finished` with `listening_for_follow_up: true` and the `LISTENING`
 light; the follow-up is accepted (`follow_up: true`) and answered with the clip again; then
 `follow_up_timeout` with no cue. Ctrl-C. Record: pass/fail.
 
 5.3. **Announcement play, stopped, voice-pe-02:**
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --announce voice-pe-02 --play http://<laptop-ip>:8000/jfk.flac --stop-after 4`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-02 --play http://<laptop-ip>:8000/jfk.flac --stop-after 4`
 Expect: no cue, the clip cuts off about 4 s in, one `playback_finished`, exit 0. Record:
 pass/fail.
 
@@ -220,9 +256,11 @@ pass/fail.
 
 6.1. **Speaker service stopped, voice-pe-02.** `docker stop piotr-voice-hub-speaker-recognition-1`,
 then run and say "Ryszardzie, kto mówi?":
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)"`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)"`
 Expect: answered as usual, `speaker: null`, and one WARNING
-`speaker <id>: recognition failed: …; hint is null`. Ctrl-C, then
+`speaker <id>: recognition failed: …; hint is null` (only if profiles are configured, see
+2.3: with none, the hub never calls the service, so there is no WARNING and nothing to
+check in this step but the answer). Ctrl-C, then
 `docker start piotr-voice-hub-speaker-recognition-1` and, once
 `docker inspect -f '{{.State.Health.Status}}' piotr-voice-hub-speaker-recognition-1` says
 `healthy`, the same command and sentence again: the speaker is back. Record: pass/fail and
@@ -230,7 +268,7 @@ Expect: answered as usual, `speaker: null`, and one WARNING
 
 6.2. **Piper stopped, voice-pe-03.** `docker stop piotr-voice-hub-piper-1`, then run and say
 "Ryszardzie, która godzina?":
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)"`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)"`
 Expect: the accepted cue, then the timeout cue (no audio, never a hang); one
 `playback_finished`; `idle`; one ERROR `speak playback_id=…: TTS failed: …`; the hub keeps
 running. Ctrl-C, then `docker start piotr-voice-hub-piper-1`, wait for
@@ -241,7 +279,7 @@ healthy.
 6.3. **Hub restart.** Note the time, then:
 `docker restart piotr-voice-hub-hub-1`
 then, once the API is up again (about 10–20 s; the tool says it cannot connect before that):
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)"`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)"`
 Expect: the tool shows both satellites `connected: true`, state `idle` (in its first messages
 or soon after, as they reconnect);
 "Ryszardzie, która godzina?" is answered on voice-pe-02 and on voice-pe-03. Record: the
@@ -249,19 +287,22 @@ seconds from the restart to both satellites `idle` (the `docker logs -t` timesta
 `hub running` and the two `listening listen_id` lines), from
 `docker logs -t --since 10m piotr-voice-hub-hub-1 2>&1 | grep -E "hub running|connected to|listening listen_id"`.
 
-6.4. **Hub killed while a URL plays (the connect check), voice-pe-02.** Start a long play:
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --announce voice-pe-02 --play http://<laptop-ip>:8000/jfk.flac`
-and within 3 s, in a second terminal:
-`docker kill piotr-voice-hub-hub-1 && docker start piotr-voice-hub-hub-1`
-Expect: SIGKILL skips `close()`, so the clip plays on until the hub reconnects; then, if it is
-still playing, WARNING `the media player is PLAYING at connect … stopping it` and INFO
-`stopped the media player at connect`, and it stops (an 11 s clip may end on its own first:
-then no WARNING, which is fine); the satellite is `idle` and a wake works. Record which
-happened and
+6.4. **Hub killed while a URL plays (the connect check), voice-pe-02.** Start the 2 minute
+`long.wav` (0.5; longer than the hub's 10–20 s restart):
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-02 --play http://<laptop-ip>:8000/long.wav`
+and within 3 s, in a second terminal (note the time it returns):
+`docker kill piotr-voice-hub-hub-1 && docker start piotr-voice-hub-hub-1 && date -u +%T`
+Expect: SIGKILL skips `close()`, so the clip plays on while the hub restarts; when the hub
+reconnects, the WARNING `the media player is PLAYING at connect (a play that outlived a lost
+connection or a hub restart?); stopping it` (the state may read `ANNOUNCING` instead), then
+INFO `stopped the media player at connect`, and the audio stops; the satellite is `idle` and
+a wake works. If the clip was still playing more than 30 s after the `docker start`, or there
+is no WARNING, that is a fail. Record: pass/fail, the seconds from the `docker start` to
+silence, and
 `docker logs -t --since 5m piotr-voice-hub-hub-1 2>&1 | grep -E "at connect|of connecting|close: stopped"`
 
 6.5. **Satellite power cycle, voice-pe-03.** Run the tool:
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)"`
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)"`
 unplug voice-pe-03 for 30 s, plug it back in and wait for it to boot.
 Expect: `satellite voice-pe-03` `connected: false`, state `error` soon after the unplug (at
 the latest when the API connection times out); voice-pe-02 keeps working meanwhile (say
@@ -273,10 +314,15 @@ from plug-in to `idle`, and
 ## 7. False wakes and the end of the run
 
 7.1. **TV period, 2 h** (an evening with the TV on in the living room, at your usual volume;
-voice-pe-03 in the quiet study). Note `date -u +%FT%TZ` as **V0**, leave this running, and do
-not address the hub (the tool's output is also saved to `~/t022-tv.log`):
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --release | tee ~/t022-tv.log`
-Afterwards (Ctrl-C), paste V0 and the end time V1:
+voice-pe-03 in the quiet study). The run must survive an ssh drop, so it runs in `tmux` (installed
+on piotr). Start a session that carries `$SHA`:
+`tmux new -s t022-tv -e SHA="$SHA"`
+and in it note `date -u +%FT%TZ` as **V0**, then run (the tool's output is also saved to
+`~/t022-tv.log`) and do not address the hub:
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --release | tee ~/t022-tv.log`
+Detach with Ctrl-b d; check it is still there with `tmux ls`; reattach (also after an ssh
+drop) with `tmux attach -t t022-tv`. Afterwards, reattach, Ctrl-C, `exit`, and paste V0 and the
+end time V1:
 `docker logs --since <V0> --until <V1> piotr-voice-hub-hub-1 2>&1 | grep -E "segment utterance_id|wake word alone" | grep -E "candidate=True|wake=True|wake word alone" | cut -c1-160`
 Expect: ideally no lines (each line is a false wake candidate or accept). False wakes do not
 fail the run on their own (no threshold), but every one is logged. The time and transcript
@@ -294,8 +340,10 @@ Record: the count per satellite, the total segments
 | | | | | |
 
 7.2. **Overnight quiet period, at least 8 h**, both satellites, nobody addressing them: the
-same command and counts with **Q0**/**Q1**, the output saved to `~/t022-night.log`:
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --release | tee ~/t022-night.log`
+same command and counts with **Q0**/**Q1**, in its own tmux session
+(`tmux new -s t022-night -e SHA="$SHA"`, reattach with `tmux attach -t t022-night`), the
+output saved to `~/t022-night.log`:
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --release | tee ~/t022-night.log`
 then `grep -E '"type":"(wake|transcript_partial|transcript_final|wake_cancelled)"' ~/t022-night.log`.
 Record: as 7.1, with "what was going on" (if known) instead of "what was on TV".
 

@@ -58,7 +58,14 @@ with the measurements the tasks README asks for.
    phrase), plus 5 that must not wake (other case forms, the vocative at the end). False
    wakes: a 2 h evening period with the TV on next to voice-pe-02 and an overnight quiet
    period of at least 8 h on both, counted from the hub log, each one recorded with its time
-   and transcript from the tool's output (interpretation 3). That is the README's "fixed set
+   and transcript from the tool's output (interpretation 3); both run in `tmux` on piotr so an
+   ssh drop does not end them. A false wake is an accept (`transcript_final`: its `ts` and
+   `raw_text`) or a cancelled candidate (`wake` … `wake_cancelled`: the `wake`'s `ts` and its
+   last partial's text, if any) that nobody meant. **N4** ("Dziękuję, Ryszardzie.", the
+   vocative at the end) raising a candidate that the final cancels is the designed outcome,
+   not a false wake: the matcher looks for the phrase in the first three words (design §4.1),
+   and the cancel has no cue and reaches no consumer; it is recorded as a baseline. An accept
+   on N4 is a false wake. That is the README's "fixed set
    of utterances per satellite" and "false wakes over a quiet period", and it also covers the
    design's two hardware revisits (§4.1 step 4: does Whisper keep the vocative ending; does
    the 3 s bare-wake window misfire with the TV on).
@@ -76,10 +83,11 @@ with the measurements the tasks README asks for.
 8. **The T-017 playback-end check (README carry-forward)** on Voice PE: a 20 s reply must be
    heard to its last words, and the hub must not hear its own reply (no segment right after
    `played`). The estimate is kept unless that fails.
-9. **Recovery cases:** the hub restarted, the hub killed mid-play (the connect check, T-021),
-   a satellite power-cycled, the speaker service stopped (hint `null`, one WARNING), Piper
-   stopped (the accepted cue, then the timeout cue, never a hang), and the reply timeout. All
-   are Maciej's actions on his own deploy; none changes config or satellite settings.
+9. **Recovery cases:** the hub restarted, the hub killed mid-play (the connect check, T-021,
+   with a 2 minute clip so it outlasts the restart), a satellite power-cycled, the speaker
+   service stopped (hint `null`, one WARNING if profiles are configured), Piper stopped (the
+   accepted cue, then the timeout cue, never a hang), and the reply timeout. All are Maciej's
+   actions on his own deploy; none changes config or satellite settings.
 10. **The `play` steps use the LAN http server on the laptop** (as in T-021's checklist), so they
    check the real-device fetch without internet.
 
