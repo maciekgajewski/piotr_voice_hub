@@ -53,3 +53,20 @@
     `--stop-after` must be > 0 (0 is an option error); `--announce` gives up after 120 s
     (`ANNOUNCE_TIMEOUT_SECONDS`, exit 1, "no playback_finished for … within 120 s"). Tool tests
     adjusted and added. Hardware checklist step 5 now expects exit 1 on the busy reply.
+
+## 2026-10-31 (hardware, e60e03a)
+
+- Hardware session on production e60e03a, reported by the manager; voice-pe-03 (study), at
+  Maciej's request, plus the voice-pe-02 announcement in step 1. Times UTC.
+- Step 1: an announcement on voice-pe-03 and on voice-pe-02, both exit 0.
+- Step 2a: `busy` (idle, capturing speech). Step 2b: `busy` (speaking); the long announcement
+  played to the end.
+- Step 3: a stop after 4 s ended with one `playback_finished`.
+- Step 4: an announcement stopped after 4 s, exit 0.
+- Step 5: `stop` on an idle satellite gave `busy`, exit 1.
+- Step 6: two "stopped" lines (16:30:38 and 16:31:15) and no "still busy".
+- Result: **PASS**.
+- Observations (details in the T-022 log, same date): voice-pe-03 ended its voice-assistant
+  stream once while listening (16:23:27) and recovered by itself; and without a TTY,
+  `docker exec` test clients kept running in the hub container after their ssh client was
+  killed, as extra API consumers.

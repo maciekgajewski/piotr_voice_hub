@@ -55,3 +55,16 @@
 - Merged as PR #30 (cd8c36a). The review's remaining nits are done in T-022: N3 (the connect
   check is bounded at about 6 s, not 3 s, in design.md and microphone-protocol.md) and N2 (a
   test that `close()` stops only a URL, not a TTS stream).
+
+## 2026-10-31 (deploy)
+
+- cd8c36a deployed to production on piotr at 17:42 CET (16:42 UTC), from fa4316c: all three
+  services healthy, restart count 0, both satellites connected, the expected
+  `play_follow_up_ready_cue` WARNING only, no connect-check line (nothing was playing), no
+  ERROR, VRAM 4475 MiB (piper and hub), 0 API clients, the image's 32 .py files match
+  cd8c36a (32/32).
+- Rollback images are kept as `piotr-voice-hub:rollback-fa4316c` and
+  `piotr-voice-hub:rollback-e60e03a` until the 2026-11-01 session.
+- The T-021 hardware run is in the 2026-11-01 session (with T-020), voice-pe-03 only, at
+  Maciej's request; its voice-pe-02 parts are deferred. Checklist on piotr:
+  `~/probe/hw_session_2026-11-01.md` (not in the repo, as for the other PR checklists).

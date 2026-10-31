@@ -39,3 +39,14 @@
     partial ("♪", no `wake`). Checked by dropping `text and` in `_read_partials`: both fail.
   - N2: `test_stop_ends_the_speak_with_one_playback_finished_then_rearms` waits for the
     re-arm's `IDLE` before cancelling.
+
+## 2026-10-31 (deploy)
+
+- fa4316c deployed to production on piotr at 17:36 CET (16:36 UTC), from e60e03a: healthy,
+  the expected `play_follow_up_ready_cue` WARNING only, VRAM 4471 MiB (piper and hub),
+  0 API clients, the image's 32 .py files match fa4316c (32/32). Superseded the same
+  evening by cd8c36a (T-021 log).
+- The T-020 hardware run did not happen on fa4316c; it is folded into the 2026-11-01
+  session on cd8c36a, voice-pe-03 only (Maciej's request); step 4 is deferred. The session
+  checklist is on piotr at `~/probe/hw_session_2026-11-01.md` (not in the repo: hardware
+  checklists live in the PR bodies, except T-022's).

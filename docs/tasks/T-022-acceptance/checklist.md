@@ -48,6 +48,11 @@ runs (`tmux ls`) unless you mean to end that run too.
 docker exec piotr-voice-hub-hub-1 sh -c 'for p in /proc/[0-9]*; do case "$(tr "\0" " " < $p/cmdline 2>/dev/null)" in "timeout -s INT "*) kill -INT "${p#/proc/}";; esac; done' </dev/null
 ```
 
+**Sessions.** If `tmux new` says `duplicate session: …` (any of `t022-2-1`, `t022-2-2`,
+`t022-tv`, `t022-night`), an earlier run of that step is still there: send the stop line
+first (it ends every session, see above), wait until `tmux has-session -t <name>` fails, then
+retry the step.
+
 The one-shot commands (`--announce`, `--stop`) exit by themselves. Before 1.1 and before 3.3,
 0.6 checks that no tool is still connected. Log lines quoted below are the hub's own
 wording; `docker logs -t` prefixes each with a UTC timestamp. The wake phrase is "Ryszardzie".
@@ -186,7 +191,8 @@ Expect 20 (each accepted utterance has one `wake=True` segment, line 19 included
 means a negative line was accepted, fewer means misses). Misses = 20 minus the answered lines
 (no threshold: the baseline).
 
-2.2. **voice-pe-03:** the same list (note **S3** before and **E3** after), in its own detached
+2.2. **voice-pe-03:** start it only after 2.1 has ended (`tmux has-session -t t022-2-1`
+fails): the same list (note **S3** before and **E3** after), in its own detached
 session `t022-2-2` with its own log:
 `{ mkdir -p ~/probe; date -u +%FT%TZ; tmux new -d -s t022-2-2 -e SHA="$SHA" 'docker exec piotr-voice-hub-hub-1 timeout -s INT --preserve-status 900 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" </dev/null 2>&1 | tee ~/probe/t022-2.2.log'; }`
 check it with `{ tmux has-session -t t022-2-2 && echo running; tail -n 3 ~/probe/t022-2.2.log; }`,

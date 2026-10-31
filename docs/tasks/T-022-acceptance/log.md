@@ -103,3 +103,19 @@
   `docker` (the fake `docker exec` reads all stdin): both sessions see `$SHA`, the checks print
   `running`, the script lines after them run, both sessions outlive the calling shell and
   end by themselves, the logs hold stdout and stderr, and the grep finds the `wake` event.
+
+## 2026-10-31 (observations from the T-018/T-019 hardware session; review 5720161225)
+
+- Baseline observations from the hardware session on e60e03a (voice-pe-03, times UTC):
+  - (a) 16:23:27: voice-pe-03 logged "device ended its voice-assistant stream while
+    listening; re-arming in 1 s" and recovered by itself. One occurrence; for the baseline.
+  - (b) Process: without a TTY, `docker exec` test clients kept running inside the hub
+    container after their ssh client was killed, and stayed connected as extra consumers.
+    This confirms the `timeout -s INT` + stop-line approach of PR #32.
+- Production now runs cd8c36a (deployed 17:42 CET; T-021 log). The next session
+  (2026-11-01, T-020 and T-021 on voice-pe-03 only) uses `~/probe/hw_session_2026-11-01.md`
+  on piotr, not in the repo.
+- Review 5720161225 (PR #32) nits, in checklist.md: 2.2 starts only after
+  `tmux has-session -t t022-2-1` fails; a "Sessions" note after the stop line: on
+  `duplicate session` (any of the four sessions), stop line first, wait until
+  `has-session` fails, then retry.
