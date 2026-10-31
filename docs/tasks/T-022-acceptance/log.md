@@ -47,3 +47,22 @@
   `${SHA:?…}`. N4: new 0.6 (no other API consumer), repeated before 3.3. N5: 0.1 also takes
   HUB_CACHE from the `/hf` mount. N6: 4.6's second request is also answered with the 20 s
   text (`--long` answers every request with `LONG_TEXT`, which ends "Koniec długiego testu.").
+
+## 2026-10-31 (review 5720030107 nits, branch `t-022-nits`)
+
+- PR #31 merged as fed8b07 (review 5720030107: MERGE). Follow-up branch `t-022-nits` from it.
+- N1 (correction of the "review 5719990609" entry above, S3): "nothing to a consumer" was
+  wrong. The `wake` and `wake_cancelled` events do go out to API clients; what is not sent is a
+  `transcript_final`. Fixed in checklist 2.1 and plan interpretation 4.
+- N2: the checklist runs over ssh without a TTY. `docker exec -i` (never `-t`); every
+  listening tool runs under `timeout -s INT --preserve-status <s>` in the container, so it
+  quits cleanly by itself (without a TTY, Ctrl-C would stop only the local client and leave the
+  tool connected); a "stop line" sends the same SIGINT sooner. 4.2 and 6.4 are one command
+  each (the first part in the background). 7.1 and 7.2 start detached tmux sessions
+  (`tmux new -d -s … -e SHA="$SHA" '… | tee …'`) that end by themselves, with a
+  `tmux has-session` check. Each non-interactive ssh call is a new shell, so it starts with the
+  `$SHA` line. No step pages or prompts (no `git log`/`git diff`; `git pull --ff-only` makes no
+  merge commit).
+- N3: 6.4 records the timestamped `hub running`, `connected to`, `at connect` and
+  `stopped the media player at connect` lines before calling a fail, so a slow start is told
+  apart from a missing connect check.
