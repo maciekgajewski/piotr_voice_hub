@@ -49,3 +49,9 @@
   (WARNING "the media player is PLAYING at connect …", INFO "stopped the media player at
   connect"). Records the path, the seconds from `docker start` to silence and the two lines'
   timestamps (`docker logs -t`). Docs only; step 11 unchanged.
+
+## 2026-10-31
+
+- Merged as PR #30 (cd8c36a). The review's remaining nits are done in T-022: N3 (the connect
+  check is bounded at about 6 s, not 3 s, in design.md and microphone-protocol.md) and N2 (a
+  test that `close()` stops only a URL, not a TTS stream).

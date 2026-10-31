@@ -1,6 +1,6 @@
 # T-021: play-url: plan
 
-**Status:** in review (2026-10-30). Branch `t-021-play-url`, from `origin/main` (fa4316c,
+**Status:** done (merged as PR #30, cd8c36a, 2026-10-31). Branch `t-021-play-url`, from `origin/main` (fa4316c,
 T-020 merged as PR #29).
 
 ## Goal

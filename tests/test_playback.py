@@ -330,6 +330,28 @@ def test_close_during_playback_cancels_it_and_releases_the_stream() -> None:
     run(scenario)
 
 
+def test_close_during_a_stream_sends_no_stop() -> None:
+    """PR #30 review N2: `close()` stops only a URL. A stream ends with its released GET, so
+    closing mid-drain sends the media player nothing (a STOP here would be harmless but is
+    not the design)."""
+
+    async def scenario() -> None:
+        async with serving() as server:
+            mic, clients = await playing(server)
+            await mic.send_output_event(PlaybackBegin("pb-1", RATE, WIDTH, CHANNELS))
+            await mic.send_output_event(PlaybackChunk("pb-1", bytes(BYTE_RATE)))  # 1 s
+            await mic.send_output_event(PlaybackEnd("pb-1"))
+            await asyncio.sleep(0.2)  # fetched, still draining
+            await clients.last.player(MediaPlayerState.PLAYING)
+            await mic.close()
+            assert len(clients.last.media_commands) == 1  # the URL only, no STOP
+            assert "media_url" in clients.last.media_commands[0]
+            assert clients.last.disconnects == 1
+            assert (await get_wav(server, "pb-1")).startswith(b"HTTP/1.1 404")
+
+    run(scenario)
+
+
 STOP = {"command": MediaPlayerCommand.STOP, "announcement": True}
 
 
