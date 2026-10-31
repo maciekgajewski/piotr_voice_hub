@@ -19,8 +19,9 @@ call with this line, and put the step's command in braces:
 <the SHA line> && { <the step's command>; }
 ```
 
-The braces matter for steps with `&` or `;` (4.2, 6.4, 7.1, 7.2): without them, `&` would send
-the whole `export … && …` chain to the background and the rest would run without `$SHA`.
+The braces matter for steps with `&` or `;` (2.1, 2.2, 4.2, 6.4, 7.1, 7.2): without them, `&`
+would send the whole `export … && …` chain to the background and the rest would run without
+`$SHA`.
 Every tool command fetches `speak_test.py` at `$SHA`; if it is unset, bash prints
 `SHA: set SHA, see the top` and the tool does nothing; the `curl` checks the SHA exists on
 GitHub (a wrong one would otherwise make the tool silently do nothing):
@@ -39,9 +40,9 @@ tool would stay connected to the hub as a consumer (it would answer later finals
 command that keeps listening runs under `timeout -s INT --preserve-status <s>` in the
 container: after that many seconds it gets SIGINT, quits cleanly and exits 0. Each step's
 window is long enough for what you say in it. To end one sooner, send the same SIGINT
-(the stop line). **It ends every `timeout` in the hub container**, including a running 7.1 or
-7.2 session: do not use it while `t022-tv` or `t022-night` runs (`tmux ls`) unless you mean
-to end that period too.
+(the stop line). **It ends every `timeout` in the hub container**, including a running 2.1,
+2.2, 7.1 or 7.2 session: do not use it while `t022-2-1`, `t022-2-2`, `t022-tv` or `t022-night`
+runs (`tmux ls`) unless you mean to end that run too.
 
 ```
 docker exec piotr-voice-hub-hub-1 sh -c 'for p in /proc/[0-9]*; do case "$(tr "\0" " " < $p/cmdline 2>/dev/null)" in "timeout -s INT "*) kill -INT "${p#/proc/}";; esac; done' </dev/null
@@ -125,11 +126,14 @@ Record: as 1.1.
 
 ## 2. Wake, STT and speaker hint (wake miss rate, README note "P1 → T-022")
 
-2.1. **voice-pe-02, 25 utterances.** Note `date -u +%FT%TZ` as **S2**, run the tool, and say
+2.1. **voice-pe-02, 25 utterances.** Note the time the command prints as **S2**, and say
 each line below from where you usually talk to it, waiting for the reply (or for nothing, on
-N1–N5) before the next. The tool's output (the only place with the transcripts) is saved to
-`~/probe/t022-2.1.log`:
-`{ mkdir -p ~/probe; docker exec piotr-voice-hub-hub-1 timeout -s INT --preserve-status 900 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" </dev/null 2>&1 | tee ~/probe/t022-2.1.log; }`
+N1–N5) before the next. As in 7.1, the tool runs in a detached `tmux` session (`t022-2-1`,
+ends by itself after 15 min) that carries `$SHA` and saves its output (the only place with the
+transcripts) to `~/probe/t022-2.1.log`, so an ssh drop loses nothing:
+`{ mkdir -p ~/probe; date -u +%FT%TZ; tmux new -d -s t022-2-1 -e SHA="$SHA" 'docker exec piotr-voice-hub-hub-1 timeout -s INT --preserve-status 900 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" </dev/null 2>&1 | tee ~/probe/t022-2.1.log'; }`
+Check it is running (any time; also after an ssh drop):
+`{ tmux has-session -t t022-2-1 && echo running; tail -n 3 ~/probe/t022-2.1.log; }`
 
 | # | Say | Expect |
 | --- | --- | --- |
@@ -160,10 +164,11 @@ N1–N5) before the next. The tool's output (the only place with the transcripts
 | N5 | Mój kolega Ryszard lubi kawę. | nothing |
 
 "Answered": the accepted cue, `transcript_final` with the text after the phrase, the reply.
-"Nothing": no accepted cue and no `transcript_final`. Use the stop line when done.
+"Nothing": no accepted cue and no `transcript_final`. Use the stop line when done (it ends
+the session).
 Record per line: answered or missed (1–20), woke or not (N1–N5), and whether the transcript
 is wrong in a way that changes the meaning. False wakes on N1–N5 (the rules of 7.1; plan
-interpretation 4), from
+interpretation 4), once the session has ended (`tmux has-session -t t022-2-1` fails), from
 `grep -E '"type":"(wake|transcript_partial|transcript_final|wake_cancelled)"' ~/probe/t022-2.1.log`:
 - A false accept is a `transcript_final`: record its `ts` and `raw_text`. Any accept on N1–N5
   is a false wake.
@@ -181,10 +186,11 @@ Expect 20 (each accepted utterance has one `wake=True` segment, line 19 included
 means a negative line was accepted, fewer means misses). Misses = 20 minus the answered lines
 (no threshold: the baseline).
 
-2.2. **voice-pe-03:** the same list (note **S3** before and **E3** after), the same command
-with its own log:
-`{ mkdir -p ~/probe; docker exec piotr-voice-hub-hub-1 timeout -s INT --preserve-status 900 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" </dev/null 2>&1 | tee ~/probe/t022-2.2.log; }`
-then the false wakes as in 2.1 (from `~/probe/t022-2.2.log`) and
+2.2. **voice-pe-03:** the same list (note **S3** before and **E3** after), in its own detached
+session `t022-2-2` with its own log:
+`{ mkdir -p ~/probe; date -u +%FT%TZ; tmux new -d -s t022-2-2 -e SHA="$SHA" 'docker exec piotr-voice-hub-hub-1 timeout -s INT --preserve-status 900 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" </dev/null 2>&1 | tee ~/probe/t022-2.2.log'; }`
+check it with `{ tmux has-session -t t022-2-2 && echo running; tail -n 3 ~/probe/t022-2.2.log; }`,
+and after it has ended, the false wakes as in 2.1 (from `~/probe/t022-2.2.log`) and
 `docker logs --since <S3> --until <E3> piotr-voice-hub-hub-1 2>&1 | grep "session\[voice-pe-03\]: segment" | grep -c "wake=True"`
 Record: as 2.1.
 

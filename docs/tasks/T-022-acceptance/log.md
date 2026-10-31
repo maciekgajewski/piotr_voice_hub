@@ -89,3 +89,17 @@
   `playback playback_id=… consumer url=…` line, which shows the `play` went out first.
 - N3: the stop line ends every `timeout` in the container, 7.1/7.2 included; the checklist
   says not to use it while those run unless that is meant.
+
+## 2026-10-31 (review 5720132658, PR #32)
+
+- The six findings of review 5720087443 are confirmed fixed. Gap: 2.1 and 2.2 ran `tee` in
+  the foreground of the ssh call, so an ssh drop would end `tee` while the tool kept
+  answering, and the rest of the transcripts would be lost. 2.1 and 2.2 now run like 7.1 and
+  7.2: detached tmux sessions `t022-2-1` / `t022-2-2` with `-e SHA="$SHA"` and
+  `… </dev/null 2>&1 | tee ~/probe/t022-2.x.log`, a braced `tmux has-session` / `tail`
+  check, and the wake-events grep on the log once the session has ended. The stop-line
+  warning and its `tmux ls` note name the new sessions.
+- Checked locally under `bash -s` fed by a heredoc, with real tmux and fake `git`/`curl`/
+  `docker` (the fake `docker exec` reads all stdin): both sessions see `$SHA`, the checks print
+  `running`, the script lines after them run, both sessions outlive the calling shell and
+  end by themselves, the logs hold stdout and stderr, and the grep finds the `wake` event.
