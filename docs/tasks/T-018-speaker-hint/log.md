@@ -73,3 +73,15 @@
   CapEff 0, NoNewPrivs 1. Same-voice clip: Speech 0.663 in 42–48 ms; 2.6 s: null in about
   78 ms; 15.6 s: 390–440 ms (was about 200 ms with all threads); RAM 429 MiB. Loopback only.
   Container and image removed by name.
+
+## 2026-10-31 (hardware, e60e03a)
+
+- Hardware session on production e60e03a, reported by the manager; voice-pe-03 (study) only,
+  at Maciej's request. Times UTC.
+- Steps 4/5 (16:23–16:24): four wakes, two of them split; all came back as `Maciek`,
+  confidence 0.54–0.66.
+- Step 6 (16:33:33): another person speaking scored 0.118 and came back as `null`.
+- Step 7: with the service stopped (the manager stopped and started speaker-recognition at
+  about 16:28 UTC, 17:28 CET), one WARNING "hint is null" (16:28:26), the reply played; the
+  service was started again and is healthy.
+- Result: **PASS**. The voice-pe-02 run is not part of this session.
