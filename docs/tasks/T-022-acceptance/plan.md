@@ -44,19 +44,21 @@ with the measurements the tasks README asks for.
    short version with a link. AGENTS.md asks every PR for a manual checklist; this one is
    long, has record tables, and is the run's own record afterwards (Maciej's results go into
    `log.md`).
-3. **Pass/fail is functional; numbers are a baseline.** The design gives a pass criterion only
-   for the P1 exit (functional) and the VRAM budget (§4.3: hub and Piper about 4.4 GB, up to
-   about 4.9 GB with concurrent partials). It gives no number for the wake miss rate, false
-   wakes, reply latency or memory. T-022 passes when every functional step behaves as
-   expected, VRAM is within the budget, and no container restarts on its own. The rest is
-   recorded as the baseline the P2 soak compares against; a result that looks wrong (for
-   example several misses on one satellite, any false accept) is written up, not silently
-   passed.
+3. **Pass/fail is functional; the numbers are a baseline, with no thresholds** (decided by
+   the manager, 2026-10-31). The design gives a pass criterion only for the P1 exit
+   (functional) and the VRAM budget (§4.3: hub and Piper about 4.4 GB, up to about 4.9 GB
+   with concurrent partials). This run sets **no numeric threshold** for the wake miss rate,
+   false wakes or reply latency (nor memory): they are recorded as the baseline for P2, and
+   Maciej's judgement at acceptance decides whether they are good enough. The checklist
+   passes when every functional step behaves as expected, VRAM is within the budget, and no
+   container restarts on its own. **Every false wake is logged** with its time and transcript
+   (checklist 2.1, 7.1, 7.2), even though false wakes do not fail the run on their own.
 4. **Wake miss rate and false wakes (README note "P1 → T-022").** Misses: a fixed list of 20
    addressed utterances per satellite (18 plain, one bare-wake-then-request, one repeated
    phrase), plus 5 that must not wake (other case forms, the vocative at the end). False
    wakes: a 2 h evening period with the TV on next to voice-pe-02 and an overnight quiet
-   period of at least 8 h on both, counted from the hub log. That is the README's "fixed set
+   period of at least 8 h on both, counted from the hub log, each one recorded with its time
+   and transcript from the tool's output (interpretation 3). That is the README's "fixed set
    of utterances per satellite" and "false wakes over a quiet period", and it also covers the
    design's two hardware revisits (§4.1 step 4: does Whisper keep the vocative ending; does
    the 3 s bare-wake window misfire with the TV on).
@@ -95,4 +97,5 @@ with the measurements the tasks README asks for.
   busy, stop, release, reply timeout, listen_after follow-up, `play`, and the recovery cases,
   each step with one command, the expected result and what to record.
 - Maciej's run (after merge): every functional step as expected, VRAM within §4.3, no
-  unplanned restart; the numbers recorded in this task's `log.md`.
+  unplanned restart; the numbers (no thresholds: a baseline, Maciej's judgement) and every
+  false wake with its time and transcript recorded in this task's `log.md`.

@@ -13,9 +13,11 @@ option. Ctrl-C quits it. Log lines quoted below are the hub's own wording; `dock
 prefixes each with a UTC timestamp. The wake phrase is "Ryszardzie".
 
 **Pass/fail** (plan interpretation 3): every step behaves as expected, VRAM stays within the
-design budget (step 0.3), and no container restarts on its own (step 7.3). The counts and
-latencies are recorded as the baseline for the P2 soak; anything that looks wrong is written
-up.
+design budget (step 0.3), and no container restarts on its own (step 7.3). There is **no
+numeric threshold** for the wake miss rate, false wakes or reply latency: they are recorded
+as the baseline for P2, and your judgement at acceptance decides. **Every false wake is
+logged** with its time and transcript (2.1, 7.1, 7.2), though false wakes alone do not fail
+the run.
 
 ## 0. Deploy and baseline
 
@@ -111,10 +113,12 @@ N1–N5) before the next:
 "Answered": the accepted cue, `transcript_final` with the text after the phrase, the reply.
 "Nothing": no accepted cue and no `transcript_final`. Ctrl-C at the end.
 Record per line: answered or missed (1–20), woke or not (N1–N5), and whether the transcript
-is wrong in a way that changes the meaning. Then the counts (paste S2):
+is wrong in a way that changes the meaning. A negative line that woke is a false wake: record
+its `ts` and `raw_text` from the tool's `transcript_final` (or `wake_cancelled`) line. Then the counts (paste S2):
 `docker logs --since <S2> piotr-voice-hub-hub-1 2>&1 | grep "session\[voice-pe-02\]: segment" | grep -c "wake=True"`
 Expect 20 (each accepted utterance has one `wake=True` segment, line 19 included; more than 20
-means a negative line was accepted, fewer means misses). Misses = 20 minus the answered lines.
+means a negative line was accepted, fewer means misses). Misses = 20 minus the answered lines
+(no threshold: the baseline).
 
 2.2. **voice-pe-03:** the same list (note **S3**), the same command, then
 `docker logs --since <S3> piotr-voice-hub-hub-1 2>&1 | grep "session\[voice-pe-03\]: segment" | grep -c "wake=True"`
@@ -132,7 +136,8 @@ someone else said a few lines (expected `null`).
 `docker logs -t --since <S2> piotr-voice-hub-hub-1 2>&1 | grep -E "segment utterance_id=.*wake=True|playback .* requested by" | head -24`
 The lines come in pairs: a `segment … wake=True` line, then the `playback … requested by`
 line of its reply. Record the difference for the first five pairs of each satellite (in
-seconds) and, by ear, whether the reply came promptly after the cue.
+seconds) and, by ear, whether the reply came promptly after the cue (no threshold: the
+baseline).
 
 ## 3. Bare wake, release and the reply timeout
 
@@ -269,20 +274,30 @@ from plug-in to `idle`, and
 
 7.1. **TV period, 2 h** (an evening with the TV on in the living room, at your usual volume;
 voice-pe-03 in the quiet study). Note `date -u +%FT%TZ` as **V0**, leave this running, and do
-not address the hub:
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --release`
+not address the hub (the tool's output is also saved to `~/t022-tv.log`):
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --release | tee ~/t022-tv.log`
 Afterwards (Ctrl-C), paste V0 and the end time V1:
 `docker logs --since <V0> --until <V1> piotr-voice-hub-hub-1 2>&1 | grep -E "segment utterance_id|wake word alone" | grep -E "candidate=True|wake=True|wake word alone" | cut -c1-160`
-Expect: no lines (each line is a false wake candidate or accept; every `transcript_final` the
-tool printed is a false accept). Record: the count per satellite, the time and what was on
-TV for each, and the total segments
+Expect: ideally no lines (each line is a false wake candidate or accept). False wakes do not
+fail the run on their own (no threshold), but every one is logged. The time and transcript
+of each, from the saved tool output (the hub log has no transcript text):
+`grep -E '"type":"(wake|transcript_partial|transcript_final|wake_cancelled)"' ~/t022-tv.log`
+Each line has `ts` (UTC) and `satellite`. A false accept is a `transcript_final`: its
+transcript is `raw_text`. A candidate that was cancelled is `wake` … `wake_cancelled`: its
+transcript is the last `transcript_partial` `text` before it (none for a bare "Ryszardzie").
+Record: the count per satellite, the total segments
 `docker logs --since <V0> --until <V1> piotr-voice-hub-hub-1 2>&1 | grep -c "segment utterance_id"`
-(how much speech the VAD let through).
+(how much speech the VAD let through), and one row per false wake:
+
+| ts (UTC) | satellite | accepted or cancelled | transcript | what was on TV |
+| --- | --- | --- | --- | --- |
+| | | | | |
 
 7.2. **Overnight quiet period, at least 8 h**, both satellites, nobody addressing them: the
-same command and counts with **Q0**/**Q1**.
-`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --release`
-Record: as 7.1.
+same command and counts with **Q0**/**Q1**, the output saved to `~/t022-night.log`:
+`docker exec -it piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/<sha>/tools/speak_test.py)" --release | tee ~/t022-night.log`
+then `grep -E '"type":"(wake|transcript_partial|transcript_final|wake_cancelled)"' ~/t022-night.log`.
+Record: as 7.1, with "what was going on" (if known) instead of "what was on TV".
 
 7.3. **End of the run:** repeat 0.2, 0.3 and 0.4, plus the reconnects since T0:
 `docker logs --since <T0> piotr-voice-hub-hub-1 2>&1 | grep -E "esphome\[voice-pe-0[23]\]: connected to" | grep -oE "voice-pe-0[23]" | sort | uniq -c`
