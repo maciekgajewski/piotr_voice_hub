@@ -61,8 +61,8 @@
 - cd8c36a deployed to production on piotr at 17:42 CET (16:42 UTC), from fa4316c: all three
   services healthy, restart count 0, both satellites connected, the expected
   `play_follow_up_ready_cue` WARNING only, no connect-check line (nothing was playing), no
-  ERROR, VRAM 4475 MiB (piper and hub), 0 API clients, the image's 32 .py files match
-  cd8c36a (32/32).
+  ERROR, 0 API clients. From the developer's deploy check: VRAM 4475 MiB (piper and hub);
+  the image's 32 .py files match cd8c36a (32/32).
 - Rollback images are kept as `piotr-voice-hub:rollback-fa4316c` and
   `piotr-voice-hub:rollback-e60e03a` until the 2026-11-01 session.
 - The T-021 hardware run is in the 2026-11-01 session (with T-020), voice-pe-03 only, at
