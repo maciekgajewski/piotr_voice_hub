@@ -66,3 +66,26 @@
 - N3: 6.4 records the timestamped `hub running`, `connected to`, `at connect` and
   `stopped the media player at connect` lines before calling a fail, so a slow start is told
   apart from a missing connect check.
+
+## 2026-10-31 (review 5720087443, PR #32)
+
+- B1: `<SHA line> && a & b` backgrounds the whole `&&` chain (export included), so `b` ran
+  without `$SHA`. The checklist now says `<SHA line> && { <step>; }`, and 4.2, 6.4, 7.1, 7.2
+  and the `tmux has-session` checks are braced; every other step is one pipeline. Checked
+  locally under `bash -s` fed by a heredoc, with fake `git`/`curl`/`docker`: braced, both
+  parts of 4.2 and 6.4 and the tmux session in 7.1 see `$SHA`; unbraced, the second part fails
+  with `SHA: set SHA, see the top`.
+- S1 (correction of the entry above, N2): `docker exec -i` reads stdin and swallows the rest
+  of a script fed by `ssh piotr bash -s`. All 21 tool commands and the stop line are now plain
+  `docker exec … </dev/null` (background parts included). Checked with a fake `docker exec`
+  that reads all stdin: with `</dev/null` the following script lines run; without it they are
+  swallowed.
+- S2: 2.1 and 2.2 tee the tool's output to `~/probe/t022-2.1.log` / `t022-2.2.log` (the
+  false-wake transcripts are only there), with the grep for the events; 7.1 and 7.2 tee
+  `2>&1`.
+- N1: in 6.4 the background tool dies with the container (likely 137, no message); `wait`
+  ignores it.
+- N2: 6.4 kills the hub 5 s in (not 2 s), and its grep includes `consumer url`, the hub's
+  `playback playback_id=… consumer url=…` line, which shows the `play` went out first.
+- N3: the stop line ends every `timeout` in the container, 7.1/7.2 included; the checklist
+  says not to use it while those run unless that is meant.
