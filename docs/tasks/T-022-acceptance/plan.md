@@ -1,7 +1,8 @@
 # T-022: acceptance: plan
 
-**Status:** in review (2026-10-31). Branch `t-022-acceptance`, from `origin/main` (cd8c36a,
-T-021 merged as PR #30). Planning and docs only; the hardware run is Maciej's.
+**Status:** plan merged (PR #31, fed8b07, 2026-10-31; nits in `t-022-nits`); the hardware run
+is pending. Branch `t-022-acceptance`, from `origin/main` (cd8c36a, T-021 merged as PR #30).
+Planning and docs only; the hardware run is Maciej's.
 
 ## Goal
 
@@ -55,20 +56,22 @@ with the measurements the tasks README asks for.
    (checklist 2.1, 7.1, 7.2), even though false wakes do not fail the run on their own.
 4. **Wake miss rate and false wakes (README note "P1 → T-022").** Misses: a fixed list of 20
    addressed utterances per satellite (18 plain, one bare-wake-then-request, one repeated
-   phrase), plus 5 that must not wake (other case forms, the vocative at the end). False
-   wakes: a 2 h evening period with the TV on next to voice-pe-02 and an overnight quiet
-   period of at least 8 h on both, counted from the hub log, each one recorded with its time
-   and transcript from the tool's output (interpretation 3); both run in `tmux` on piotr so an
-   ssh drop does not end them. A false wake is an accept (`transcript_final`: its `ts` and
-   `raw_text`) or a cancelled candidate (`wake` … `wake_cancelled`: the `wake`'s `ts` and its
-   last partial's text, if any) that nobody meant. **N4** ("Dziękuję, Ryszardzie.", the
-   vocative at the end) raising a candidate that the final cancels is the designed outcome,
-   not a false wake: the matcher looks for the phrase in the first three words (design §4.1),
-   and the cancel has no cue and reaches no consumer; it is recorded as a baseline. An accept
-   on N4 is a false wake. That is the README's "fixed set
-   of utterances per satellite" and "false wakes over a quiet period", and it also covers the
-   design's two hardware revisits (§4.1 step 4: does Whisper keep the vocative ending; does
-   the 3 s bare-wake window misfire with the TV on).
+   phrase), plus 5 that must not wake (other case forms, the vocative at the end). False wakes:
+   a 2 h evening period with the TV on next to voice-pe-02 and an overnight quiet period of at
+   least 8 h on both, counted from the hub log, each one recorded with its time and transcript
+   from the tool's output (interpretation 3); both run in detached `tmux` sessions on piotr that
+   end by themselves, so an ssh drop does not end them and no TTY is needed (the whole checklist
+   runs over a non-TTY ssh: plain `docker exec … </dev/null`, every listening tool under
+   `timeout -s INT`). A false wake is an accept (`transcript_final`: its `ts` and `raw_text`) or
+   a cancelled candidate (`wake` … `wake_cancelled`: the `wake`'s `ts` and its last partial's
+   text, if any) that nobody meant. **N4** ("Dziękuję, Ryszardzie.", the vocative at the end)
+   raising a candidate that the final cancels is the designed outcome, not a false wake: the
+   matcher looks for the phrase in the first three words (design §4.1), and the cancel has no
+   cue and sends no `transcript_final` to a consumer (the `wake` and `wake_cancelled` events do
+   go out); it is recorded as a baseline. An accept on N4 is a false wake. That is the README's
+   "fixed set of utterances per satellite" and "false wakes over a quiet period", and it also
+   covers the design's two hardware revisits (§4.1 step 4: does Whisper keep the vocative
+   ending; does the 3 s bare-wake window misfire with the TV on).
 5. **Reply latency, from the hub log:** the time from the `segment … wake=True` line (the final
    transcript is in) to `playback … requested by` (the satellite starts fetching the reply).
    It covers the accepted cue, the speaker hint and Piper's first audio; the STT final and

@@ -47,3 +47,59 @@
   `${SHA:?…}`. N4: new 0.6 (no other API consumer), repeated before 3.3. N5: 0.1 also takes
   HUB_CACHE from the `/hf` mount. N6: 4.6's second request is also answered with the 20 s
   text (`--long` answers every request with `LONG_TEXT`, which ends "Koniec długiego testu.").
+
+## 2026-10-31 (review 5720030107 nits, branch `t-022-nits`)
+
+- PR #31 merged as fed8b07 (review 5720030107: MERGE). Follow-up branch `t-022-nits` from it.
+- N1 (correction of the "review 5719990609" entry above, S3): "nothing to a consumer" was
+  wrong. The `wake` and `wake_cancelled` events do go out to API clients; what is not sent is a
+  `transcript_final`. Fixed in checklist 2.1 and plan interpretation 4.
+- N2: the checklist runs over ssh without a TTY. `docker exec -i` (never `-t`); every
+  listening tool runs under `timeout -s INT --preserve-status <s>` in the container, so it
+  quits cleanly by itself (without a TTY, Ctrl-C would stop only the local client and leave the
+  tool connected); a "stop line" sends the same SIGINT sooner. 4.2 and 6.4 are one command
+  each (the first part in the background). 7.1 and 7.2 start detached tmux sessions
+  (`tmux new -d -s … -e SHA="$SHA" '… | tee …'`) that end by themselves, with a
+  `tmux has-session` check. Each non-interactive ssh call is a new shell, so it starts with the
+  `$SHA` line. No step pages or prompts (no `git log`/`git diff`; `git pull --ff-only` makes no
+  merge commit).
+- N3: 6.4 records the timestamped `hub running`, `connected to`, `at connect` and
+  `stopped the media player at connect` lines before calling a fail, so a slow start is told
+  apart from a missing connect check.
+
+## 2026-10-31 (review 5720087443, PR #32)
+
+- B1: `<SHA line> && a & b` backgrounds the whole `&&` chain (export included), so `b` ran
+  without `$SHA`. The checklist now says `<SHA line> && { <step>; }`, and 4.2, 6.4, 7.1, 7.2
+  and the `tmux has-session` checks are braced; every other step is one pipeline. Checked
+  locally under `bash -s` fed by a heredoc, with fake `git`/`curl`/`docker`: braced, both
+  parts of 4.2 and 6.4 and the tmux session in 7.1 see `$SHA`; unbraced, the second part fails
+  with `SHA: set SHA, see the top`.
+- S1 (correction of the entry above, N2): `docker exec -i` reads stdin and swallows the rest
+  of a script fed by `ssh piotr bash -s`. All 21 tool commands and the stop line are now plain
+  `docker exec … </dev/null` (background parts included). Checked with a fake `docker exec`
+  that reads all stdin: with `</dev/null` the following script lines run; without it they are
+  swallowed.
+- S2: 2.1 and 2.2 tee the tool's output to `~/probe/t022-2.1.log` / `t022-2.2.log` (the
+  false-wake transcripts are only there), with the grep for the events; 7.1 and 7.2 tee
+  `2>&1`.
+- N1: in 6.4 the background tool dies with the container (likely 137, no message); `wait`
+  ignores it.
+- N2: 6.4 kills the hub 5 s in (not 2 s), and its grep includes `consumer url`, the hub's
+  `playback playback_id=… consumer url=…` line, which shows the `play` went out first.
+- N3: the stop line ends every `timeout` in the container, 7.1/7.2 included; the checklist
+  says not to use it while those run unless that is meant.
+
+## 2026-10-31 (review 5720132658, PR #32)
+
+- The six findings of review 5720087443 are confirmed fixed. Gap: 2.1 and 2.2 ran `tee` in
+  the foreground of the ssh call, so an ssh drop would end `tee` while the tool kept
+  answering, and the rest of the transcripts would be lost. 2.1 and 2.2 now run like 7.1 and
+  7.2: detached tmux sessions `t022-2-1` / `t022-2-2` with `-e SHA="$SHA"` and
+  `… </dev/null 2>&1 | tee ~/probe/t022-2.x.log`, a braced `tmux has-session` / `tail`
+  check, and the wake-events grep on the log once the session has ended. The stop-line
+  warning and its `tmux ls` note name the new sessions.
+- Checked locally under `bash -s` fed by a heredoc, with real tmux and fake `git`/`curl`/
+  `docker` (the fake `docker exec` reads all stdin): both sessions see `$SHA`, the checks print
+  `running`, the script lines after them run, both sessions outlive the calling shell and
+  end by themselves, the logs hold stdout and stderr, and the grep finds the `wake` event.
