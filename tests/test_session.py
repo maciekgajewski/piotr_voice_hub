@@ -6,6 +6,7 @@ import logging
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import cast
 
 import pytest
 
@@ -52,7 +53,7 @@ from piotr_voice_hub.satellites.messages import (
 from piotr_voice_hub.satellites.messages import PlaybackFinished as DriverPlaybackFinished
 from piotr_voice_hub.satellites.types import MicrophoneContext, PlaybackTarget
 from piotr_voice_hub.speaker.interfaces import SpeakerMatch
-from piotr_voice_hub.stt.whisper import StreamingTextEvent, TextEnd, TextPartial
+from piotr_voice_hub.stt.whisper import FinalObserver, StreamingTextEvent, TextEnd, TextPartial
 from piotr_voice_hub.tts.interfaces import AudioFormat, TtsError
 
 TIMEOUT = 2.0
@@ -121,6 +122,7 @@ class FakeStt:
     def __init__(self) -> None:
         self.scripts: dict[str, tuple[list[str], str, float]] = {}
         self.sessions: dict[str, tuple[float, FakeSttSession]] = {}
+        self.oneshots: list[tuple[str, object]] = []
         self.linger = 0.0
         self.setup: Callable[[FakeSttSession], None] = lambda _session: None
 
@@ -129,7 +131,10 @@ class FakeStt:
     ) -> None:
         self.scripts[utterance_id] = (list(partials), final, delay)
 
-    def create_streaming_session(self, session_id: str, max_audio_seconds: float) -> FakeSttSession:
+    def create_streaming_session(
+        self, session_id: str, max_audio_seconds: float, *, oneshot: object = None
+    ) -> FakeSttSession:
+        self.oneshots.append((session_id, oneshot))
         partials, final, delay = self.scripts[session_id]
         session = FakeSttSession(partials, final, delay)
         session.linger = self.linger
@@ -2339,6 +2344,33 @@ async def _test_listen_after(said: str, text: str) -> None:
     commands = h.driver.without_ids()
     assert CueType.FOLLOW_UP_READY not in commands and CueType.TIMEOUT not in commands
     assert h.speaker.requests[-1] == (CHUNK * 2, "u2")
+
+
+def test_oneshot_is_offered_only_on_the_follow_up_and_release_plays_no_cue() -> None:
+    """The diagnostic hook is not on the wake segment. `release` is the existing command:
+    no timeout cue and no second playback."""
+    asyncio.run(_test_oneshot_follow_up_release())
+
+
+async def _test_oneshot_follow_up_release() -> None:
+    h = Harness(reply_timeout=10)
+    marker = object()
+    h.session._oneshot = cast(FinalObserver, marker)
+    h.stt.say("u2", "Wszystkie prawa zastrzeżone.", ())
+    await follow_up_window(h)
+    h.driver.push(*segments("u2")(h.driver.starts()[1].listen_id))
+    await h.until(lambda: len(h.hub(TranscriptFinal)) == 2)
+    h.session.release()
+    await h.until(lambda: len(h.driver.starts()) == 3)
+    await h.stop()
+    assert h.stt.oneshots[0] == ("u1", None)
+    assert h.stt.oneshots[1][0] == "u2" and h.stt.oneshots[1][1] is marker
+    assert all(oneshot is None for _, oneshot in h.stt.oneshots[2:])
+    commands = h.driver.without_ids()
+    assert CueType.TIMEOUT not in commands
+    begins = [c for c in commands if isinstance(c, tuple) and c[0] == "begin"]
+    assert len(begins) == 1  # the reply that opened the window; release plays nothing
+    assert not any(isinstance(c, tuple) and c[0] == "url" for c in commands)
 
 
 def request_partial(said: str) -> str:

@@ -61,6 +61,7 @@ def test_example_config_matches_design() -> None:
     assert config.speaker_recognition.url == "http://127.0.0.1:2141"
     assert config.speaker_recognition.profiles == {"Maciek": "/profiles/maciek.npz"}
     assert config.tts.voice == "pl_PL-bass-high"
+    assert config.stt_capture is None
 
 
 def test_defaults_apply_and_device_values_win(tmp_path: Path) -> None:
@@ -229,6 +230,53 @@ def test_duplicate_yaml_key(tmp_path: Path) -> None:
 @pytest.mark.parametrize("text", ["", "- just\n- a list\n"])
 def test_top_level_must_be_mapping(tmp_path: Path, text: str) -> None:
     expect_error(tmp_path, text, "<top level>: must be a mapping")
+
+
+CAPTURE = "stt_capture: {enabled: false, satellite: voice-pe-03, directory: /tmp/stt-oneshot}\n"
+
+
+def test_stt_capture_is_optional_and_off_by_default(tmp_path: Path) -> None:
+    assert load_text(tmp_path, MINIMAL).stt_capture is None
+    capture = load_text(tmp_path, MINIMAL + CAPTURE).stt_capture
+    assert capture is not None
+    assert capture.enabled is False
+    assert capture.satellite == "voice-pe-03"
+    assert capture.directory == "/tmp/stt-oneshot"
+
+
+def test_stt_capture_rejects_another_satellite_or_a_relative_directory(tmp_path: Path) -> None:
+    expect_error(
+        tmp_path,
+        MINIMAL + CAPTURE.replace("voice-pe-03", "voice-pe-02"),
+        "must be 'voice-pe-03'",
+    )
+    expect_error(
+        tmp_path,
+        MINIMAL + CAPTURE.replace("/tmp/stt-oneshot", "stt-oneshot"),
+        "absolute path",
+    )
+    expect_error(
+        tmp_path,
+        MINIMAL + CAPTURE.replace("/tmp/stt-oneshot", "/tmp/../stt-oneshot"),
+        "absolute path",
+    )
+    expect_error(
+        tmp_path,
+        MINIMAL + "stt_capture: {enabled: false, satellite: voice-pe-03}\n",
+        "missing key",
+    )
+
+
+def test_enabled_capture_requires_the_study_satellite_in_the_file(tmp_path: Path) -> None:
+    expect_error(
+        tmp_path,
+        MINIMAL + CAPTURE.replace("enabled: false", "enabled: true"),
+        "not a configured satellite",
+    )
+    text = MINIMAL.replace("id: sat-b", "id: voice-pe-03")
+    loaded = text + CAPTURE.replace("enabled: false", "enabled: true")
+    capture = load_text(tmp_path, loaded).stt_capture
+    assert capture is not None and capture.enabled is True
 
 
 def test_redacted_hides_api_keys(tmp_path: Path) -> None:

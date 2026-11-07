@@ -91,7 +91,7 @@ from piotr_voice_hub.satellites.messages import (
 from piotr_voice_hub.satellites.messages import PlaybackFinished as DriverPlaybackFinished
 from piotr_voice_hub.satellites.protocol import MicrophoneProtocolState
 from piotr_voice_hub.speaker.interfaces import SpeakerHint
-from piotr_voice_hub.stt.whisper import StreamingTextEvent, TextEnd
+from piotr_voice_hub.stt.whisper import FinalObserver, StreamingTextEvent, TextEnd
 from piotr_voice_hub.tts.interfaces import TextToSpeech, TtsError
 
 BACKOFF_FIRST_SECONDS = 1.0
@@ -131,7 +131,13 @@ class SttSession(Protocol):
 
 
 class Stt(Protocol):
-    def create_streaming_session(self, session_id: str, max_audio_seconds: float) -> SttSession: ...
+    def create_streaming_session(
+        self,
+        session_id: str,
+        max_audio_seconds: float,
+        *,
+        oneshot: FinalObserver | None = None,
+    ) -> SttSession: ...
 
 
 class _Deadline(Exception):
@@ -197,6 +203,7 @@ class SatelliteSession:
         *,
         tts: TextToSpeech,
         speaker: SpeakerHint,
+        oneshot: FinalObserver | None = None,
     ) -> None:
         self._config = config
         self._microphone = microphone
@@ -205,6 +212,7 @@ class SatelliteSession:
         self._speaker = speaker
         self._emit = emit
         self._sleep = sleep
+        self._oneshot = oneshot
         self._max_audio_seconds = config.max_segment_seconds + SEGMENT_MARGIN_SECONDS
         # The speaker hint's audio: the last this many bytes of the accepted utterance.
         self._max_hint_bytes = int(self._max_audio_seconds * 1000) * BYTES_PER_MS
@@ -452,12 +460,20 @@ class SatelliteSession:
 
     def _start_segment(self, utterance_id: str) -> None:
         assert self._segment is None, f"segment {self._segment.utterance_id} is still open"
-        stt = self._stt.create_streaming_session(utterance_id, self._max_audio_seconds)
         follow_up, self._follow_up_deadline = self._follow_up_deadline is not None, None
+        stt = self._stt.create_streaming_session(
+            utterance_id,
+            self._max_audio_seconds,
+            oneshot=self._oneshot if follow_up else None,
+        )
         segment = _Segment(utterance_id, stt, follows=self._bare_wake, follow_up=follow_up)
         segment.candidate = segment.follows is not None  # `wake` sent, LISTENING shown
         if follow_up:
             self._logger.info("follow-up speech utterance_id=%s", utterance_id)
+            if self._oneshot is not None:
+                self._logger.debug(
+                    "follow-up utterance_id=%s offered to one-shot capture", utterance_id
+                )
         segment.partials = asyncio.create_task(self._read_partials(segment))
         self._segment = segment
 

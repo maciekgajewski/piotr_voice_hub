@@ -222,6 +222,12 @@ Errors are `busy`, `unknown_satellite`, `satellite_offline` and `bad_request`. A
 
 The speaker is a **hint**: the top ECAPA match above the threshold, otherwise `null`.
 
+`raw_text` is the transcript **after** cleanup (bracketed notes, whitespace, symbol-only text,
+the five spelling replacements), including the wake phrase when there was one. `audio_ms` is a
+duration. The API does not carry the PCM submitted to STT or Whisper's segments from before
+that cleanup. A one-shot file capture for a single study follow-up is §7.1; it adds no event
+and no command.
+
 ## 7. Config
 
 ```yaml
@@ -251,6 +257,34 @@ tts: {uri: tcp://127.0.0.1:10201, voice: pl_PL-bass-high}
 ```
 
 There is no default volume: `speak` changes the satellite's volume only when the command passes `volume` (T-017 follow-up). There is no `tts.volume` key; a config that still has one is refused like any unknown key.
+
+### 7.1 One-shot STT diagnostic (T-023, default off)
+
+Not part of normal operation. Omit `stt_capture` and the hub never reads or writes a capture
+file. The section is optional; when present every key below is required, and `satellite` must
+be `voice-pe-03`. `enabled: false` still does not touch the disk.
+
+```yaml
+stt_capture: {enabled: false, satellite: voice-pe-03, directory: /home/maciek/probe/stt-oneshot}
+```
+
+When `enabled` is true the directory must exist or be creatable as mode `0700` (not a symlink,
+no group or other bits) and `voice-pe-03` must be a configured device. The hub stays disarmed
+until that directory contains a regular file `ARM`, mode `0600` (no group or other bits),
+whose bytes are exactly `voice-pe-03\n`, and whose age is at most 120 s. The next follow-up
+**final** on that satellite only then writes one pair and deletes `ARM`:
+
+- `stt-oneshot-<utterance_id>.pcm` — the exact PCM buffer passed into the final transcribe
+  (16 kHz, 16-bit little-endian mono, the driver's pre-roll included because it is already in
+  that buffer). At most 640000 bytes. A larger or odd-length buffer is not written.
+- `stt-oneshot-<utterance_id>.json` — format metadata, each Whisper segment's text and scores
+  from before cleanup, the joined string the preprocessor receives, and the cleaned text.
+
+Both files are mode `0600`. Partials, other satellites, and a second final write nothing.
+Overflow, a stale or loose `ARM`, a write error, cancellation, and hub shutdown delete `ARM`
+and any partial pair. A finished pair is deleted 1800 s after the write, including on the next
+start that still has the capture enabled. The study client (§6 `release` only; it never sends
+`speak` or `play`) is what ends the accepted utterance so the reply-timeout cue does not play.
 
 Language is not configurable: Polish is fixed.
 

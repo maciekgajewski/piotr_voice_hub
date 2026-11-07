@@ -31,6 +31,7 @@ import numpy as np
 from faster_whisper import WhisperModel
 
 from piotr_voice_hub.config import SttConfig
+from piotr_voice_hub.stt.capture import DecodeRecords, SegmentRecord, info_fields, segment_record
 from piotr_voice_hub.stt.transcript_preprocessor import TranscriptPreprocessor
 
 LANGUAGE = "pl"
@@ -67,6 +68,21 @@ class Transcriber(Protocol):
         ...
 
 
+class FinalObserver(Protocol):
+    """One follow-up final. The session attaches it only for that segment (T-023)."""
+
+    async def observe_final(
+        self,
+        utterance_id: str,
+        pcm: bytes,
+        raw_joined: str,
+        segments: tuple[SegmentRecord, ...],
+        cleaned: str,
+        beam_size: int,
+        info: dict[str, str | int | float],
+    ) -> None: ...
+
+
 type TranscriberFactory = Callable[[SttConfig], Transcriber]
 type FatalHandler = Callable[[str], NoReturn]
 
@@ -80,10 +96,25 @@ def exit_process(message: str) -> NoReturn:
 class FasterWhisperTranscriber:
     def __init__(self, model: Any) -> None:
         self._model = model
+        self._records: DecodeRecords | None = None
+
+    def bind_decode_records(self, records: DecodeRecords | None) -> None:
+        """Set for the duration of one locked model call. None keeps the join-only path."""
+        self._records = records
 
     def transcribe(self, audio: np.ndarray, beam_size: int) -> str:
-        segments, _info = self._model.transcribe(audio, language=LANGUAGE, beam_size=beam_size)
-        return " ".join(segment.text.strip() for segment in segments).strip()
+        segments, info = self._model.transcribe(audio, language=LANGUAGE, beam_size=beam_size)
+        records = self._records
+        if records is None:
+            return " ".join(segment.text.strip() for segment in segments).strip()
+        parts: list[str] = []
+        for segment in segments:
+            parts.append(segment.text.strip())
+            record = segment_record(segment)
+            if record is not None:
+                records.segments.append(record)
+        records.info.update(info_fields(info))
+        return " ".join(parts).strip()
 
 
 def create_faster_whisper_transcriber(config: SttConfig) -> Transcriber:
@@ -145,9 +176,16 @@ class FasterWhisperSpeechToText:
         _logger.info("STT model ready duration_seconds=%.2f", time.monotonic() - started_at)
 
     def create_streaming_session(
-        self, session_id: str, max_audio_seconds: float
+        self,
+        session_id: str,
+        max_audio_seconds: float,
+        *,
+        oneshot: FinalObserver | None = None,
     ) -> "FasterWhisperStreamingSttSession":
-        """`max_audio_seconds`: the segment cap (max_segment_seconds plus the pre-roll)."""
+        """`max_audio_seconds`: the segment cap (max_segment_seconds plus the pre-roll).
+
+        `oneshot` is set only for one follow-up segment on the study satellite (T-023).
+        """
         assert self._transcriber is not None, "start() the STT before creating sessions"
         return FasterWhisperStreamingSttSession(
             session_id,
@@ -156,6 +194,7 @@ class FasterWhisperSpeechToText:
             self._config,
             max_audio_seconds,
             self._on_fatal,
+            oneshot,
         )
 
 
@@ -176,7 +215,10 @@ class FasterWhisperStreamingSttSession:
         config: SttConfig,
         max_audio_seconds: float,
         on_fatal: FatalHandler,
+        oneshot: FinalObserver | None = None,
     ) -> None:
+        self._session_id = session_id
+        self._oneshot = oneshot
         self._transcriber = transcriber
         self._lock = lock
         self._on_fatal = on_fatal
@@ -292,14 +334,31 @@ class FasterWhisperStreamingSttSession:
             self._logger.debug("STT model busy; skipping this partial")
             return None
         started_at = time.monotonic()
+        records = DecodeRecords() if kind == "final" and self._oneshot is not None else None
         try:
             async with asyncio.timeout(GPU_CALL_TIMEOUT_SECONDS):
-                raw = await self._run_model(pcm, beam_size)
+                raw = await self._run_model(pcm, beam_size, records)
         except TimeoutError:
             self._on_fatal(f"STT {kind} transcription timed out")
         except Exception as error:
             self._on_fatal(f"STT {kind} transcription failed: {error!r}")
         text = self._preprocessor.preprocess(raw)
+        if records is not None and self._oneshot is not None:
+            # A capture failure must not drop the utterance or kill the process.
+            try:
+                await self._oneshot.observe_final(
+                    self._session_id,
+                    pcm,
+                    raw,
+                    tuple(records.segments),
+                    text,
+                    beam_size,
+                    records.info,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._logger.error("STT one-shot capture failed: %s", type(error).__name__)
         self._logger.debug("STT %s transcript raw=%r text=%r", kind, raw, text)
         self._logger.debug(
             "STT %s done audio_seconds=%.2f beam_size=%s duration_seconds=%.2f",
@@ -310,14 +369,21 @@ class FasterWhisperStreamingSttSession:
         )
         return text
 
-    async def _run_model(self, pcm: bytes, beam_size: int) -> str:
+    async def _run_model(
+        self, pcm: bytes, beam_size: int, records: DecodeRecords | None = None
+    ) -> str:
         """One model call under the lock; the lock is released when the thread finishes."""
         await self._lock.acquire()
+        bind = getattr(self._transcriber, "bind_decode_records", None)
+        if bind is not None:
+            bind(records)
         try:
             call = asyncio.ensure_future(
                 asyncio.to_thread(self._transcriber.transcribe, pcm_to_float(pcm), beam_size)
             )
         except BaseException:
+            if bind is not None:
+                bind(None)
             self._lock.release()
             raise
         call.add_done_callback(self._model_call_done)
@@ -329,6 +395,9 @@ class FasterWhisperStreamingSttSession:
             raise
 
     def _model_call_done(self, _call: "asyncio.Future[str]") -> None:
+        bind = getattr(self._transcriber, "bind_decode_records", None)
+        if bind is not None:
+            bind(None)
         self._lock.release()
 
     def _abandoned_call_done(self, call: "asyncio.Future[str]") -> None:
