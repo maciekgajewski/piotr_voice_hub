@@ -18,3 +18,5 @@
   cancelled writer could publish after the next final cleared a shared abort flag. Each write
   now has its own abort flag that is never cleared; `_stop_write` and `close()` set it and
   wait, then delete. Re-review: clean.
+- After that fix, `make check` again: 979 passed, 8 skipped. PR #34 opened against `main`.
+  Not merged. Not deployed. Production remains `cd8c36a`.
