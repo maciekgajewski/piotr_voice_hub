@@ -28,7 +28,7 @@ CHANNELS = 1
 # 20 s at 16 kHz 16-bit mono. A segment is at most max_segment_seconds (15) plus 1 s pre-roll.
 MAX_PCM_BYTES = 20 * SAMPLE_RATE * SAMPLE_WIDTH_BYTES
 ARM_NAME = "ARM"
-ARM_BODY = b"voice-pe-03\n"
+PLAY_NAME = "PLAY"  # the play-only client writes the playback id here; the hub never reads it
 ARM_MAX_AGE_SECONDS = 120.0
 RETAIN_SECONDS = 1800.0
 WRITE_TIMEOUT_SECONDS = 2.0
@@ -102,6 +102,34 @@ def info_fields(info: object) -> dict[str, str | int | float]:
     return fields
 
 
+def playback_id_ok(value: str) -> bool:
+    if not value or len(value) > 80:
+        return False
+    return all(c.isalnum() or c in "-_" for c in value)
+
+
+def arm_body(playback_id: str) -> bytes:
+    """`ARM` contents: the study satellite and the one playback that opened its follow-up."""
+    if not playback_id_ok(playback_id):
+        raise ValueError(playback_id)
+    return f"{STUDY_SATELLITE_ID}\n{playback_id}\n".encode()
+
+
+def parse_arm(body: bytes) -> str | None:
+    """The playback id, or None when the bytes are not an arm file."""
+    try:
+        text = body.decode()
+    except UnicodeError:
+        return None
+    satellite, sep, rest = text.partition("\n")
+    playback_id, sep2, tail = rest.partition("\n")
+    if sep != "\n" or sep2 != "\n" or tail != "" or satellite != STUDY_SATELLITE_ID:
+        return None
+    if not playback_id_ok(playback_id):
+        return None
+    return playback_id
+
+
 def _finite(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
@@ -129,8 +157,8 @@ class OneShotSttCapture:
         clock: Clock = time.time,
         write_timeout: float = WRITE_TIMEOUT_SECONDS,
     ) -> None:
-        assert config.enabled, "construct a capture only when it is enabled"
         assert config.satellite == STUDY_SATELLITE_ID, config.satellite
+        self._enabled = config.enabled
         self._directory = Path(config.directory)
         self._satellite = config.satellite
         self._clock = clock
@@ -147,14 +175,19 @@ class OneShotSttCapture:
         return BoundOneshot(self, satellite)
 
     def prepare(self) -> None:
-        """Create or check the directory, then drop pairs that are already past retention."""
+        """Create or check the directory, then drop leftovers from a previous process."""
+        assert self._enabled
         self._ensure_directory()
-        self._sweep()
+        self._delete_artifacts()
         self._logger.info("one-shot capture ready directory=%s disarmed=true", self._directory)
 
+    def discard_leftovers(self) -> None:
+        """`enabled: false`: delete a previous study's files if the directory is still there.
+        A missing directory is normal. This does not create one and does not raise."""
+        self._delete_artifacts()
+
     def close(self) -> None:
-        """Shutdown: cancel retention timers and delete `ARM`. Finished pairs stay until
-        retention (the next enabled start sweeps them)."""
+        """Normal shutdown: stop a writer and delete the study files, including partials."""
         for handle in self._timers:
             handle.cancel()
         self._timers.clear()
@@ -164,12 +197,13 @@ class OneShotSttCapture:
             slot.abort.set()
         for slot in pending:
             slot.done.wait(self._write_timeout)
-        self._unlink_quiet(self._directory / ARM_NAME)
+        self._delete_artifacts()
         self._logger.info("one-shot capture closed")
 
     async def observe_final(
         self,
         satellite: str,
+        playback_id: str,
         utterance_id: str,
         pcm: bytes,
         raw_joined: str,
@@ -178,12 +212,12 @@ class OneShotSttCapture:
         beam_size: int,
         info: dict[str, str | int | float],
     ) -> None:
-        """Store one final, or disarm. A failure here must not fail the utterance."""
+        """Store the follow-up final of `playback_id`. A different playback leaves `ARM`."""
         async with self._lock:
-            if satellite != self._satellite:
+            if satellite != self._satellite or not playback_id_ok(playback_id):
                 self._logger.debug("ignoring final for satellite=%s", satellite)
                 return
-            if not self._consume_arm():
+            if not self._consume_arm(playback_id):
                 return
             if len(pcm) > MAX_PCM_BYTES or len(pcm) % SAMPLE_WIDTH_BYTES != 0:
                 self._logger.error(
@@ -198,6 +232,7 @@ class OneShotSttCapture:
                 return
             payload = _payload(
                 satellite,
+                playback_id,
                 utterance_id,
                 pcm,
                 raw_joined,
@@ -239,8 +274,22 @@ class OneShotSttCapture:
             self._logger.info("one-shot capture wrote bytes=%d file=%s.pcm", len(pcm), stem)
 
     def sweep_expired(self) -> None:
-        """Drop pairs whose `remove_after_unix` has passed. Used at start and by tests."""
+        """Drop pairs whose `remove_after_unix` has passed. The live process also schedules this."""
         self._sweep()
+
+    def _delete_artifacts(self) -> None:
+        """Remove ARM, PLAY, capture pairs, and partials. Does not follow a symlink."""
+        if not self._directory.exists() or self._directory.is_symlink():
+            return
+        try:
+            entries = list(os.scandir(self._directory))
+        except OSError as error:
+            self._logger.error("one-shot capture could not list the directory: %s", error.strerror)
+            return
+        for entry in entries:
+            name = entry.name
+            if name in (ARM_NAME, PLAY_NAME) or name.startswith(_PREFIX):
+                self._unlink_quiet(Path(entry.path))
 
     async def _stop_write(
         self, task: asyncio.Task[None], slot: "_InFlight", stem: str, reason: str
@@ -264,8 +313,9 @@ class OneShotSttCapture:
                 return
             await asyncio.sleep(min(0.01, remaining))
 
-    def _consume_arm(self) -> bool:
-        """True only when a fresh, private, exact `ARM` was unlinked. Otherwise no audio."""
+    def _consume_arm(self, playback_id: str) -> bool:
+        """True only when `ARM` names this playback and was unlinked. A different playback
+        leaves the file. A corrupt, loose, or stale arm is removed and captures nothing."""
         path = self._directory / ARM_NAME
         try:
             info = os.lstat(path)
@@ -292,19 +342,23 @@ class OneShotSttCapture:
             self._logger.error("one-shot capture disarmed: cannot read arm: %s", error.strerror)
             return False
         try:
-            body = os.read(fd, len(ARM_BODY) + 1)
+            body = os.read(fd, 256)
         finally:
             os.close(fd)
-        if body != ARM_BODY:
+        armed = parse_arm(body)
+        if armed is None:
             self._unlink_quiet(path)
             self._logger.error("one-shot capture disarmed: arm contents refused")
+            return False
+        if armed != playback_id:
+            self._logger.debug("arm is for playback_id=%s, final is %s", armed, playback_id)
             return False
         try:
             os.unlink(path)
         except OSError as error:
             self._logger.error("one-shot capture disarmed: cannot remove arm: %s", error.strerror)
             return False
-        self._logger.info("one-shot capture armed window consumed")
+        self._logger.info("one-shot capture armed window consumed playback_id=%s", playback_id)
         return True
 
     def _stem(self, utterance_id: str) -> str | None:
@@ -454,11 +508,17 @@ class OneShotSttCapture:
 
 
 class BoundOneshot:
-    """`FinalObserver` for one satellite. The STT session does not know the satellite id."""
+    """`FinalObserver` for one satellite and, after `for_playback`, one playback id."""
 
-    def __init__(self, capture: OneShotSttCapture, satellite: str) -> None:
+    def __init__(
+        self, capture: OneShotSttCapture, satellite: str, playback_id: str | None = None
+    ) -> None:
         self._capture = capture
         self._satellite = satellite
+        self._playback_id = playback_id
+
+    def for_playback(self, playback_id: str) -> "BoundOneshot":
+        return BoundOneshot(self._capture, self._satellite, playback_id)
 
     async def observe_final(
         self,
@@ -470,8 +530,11 @@ class BoundOneshot:
         beam_size: int,
         info: dict[str, str | int | float],
     ) -> None:
+        if self._playback_id is None:
+            return
         await self._capture.observe_final(
             self._satellite,
+            self._playback_id,
             utterance_id,
             pcm,
             raw_joined,
@@ -491,6 +554,7 @@ def _lstat_dir(path: Path, label: str) -> os.stat_result:
 
 def _payload(
     satellite: str,
+    playback_id: str,
     utterance_id: str,
     pcm: bytes,
     raw_joined: str,
@@ -502,6 +566,7 @@ def _payload(
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "satellite": satellite,
+        "playback_id": playback_id,
         "utterance_id": utterance_id,
         "kind": "final",
         "follow_up": True,

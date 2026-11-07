@@ -2354,17 +2354,28 @@ def test_oneshot_is_offered_only_on_the_follow_up_and_release_plays_no_cue() -> 
 
 async def _test_oneshot_follow_up_release() -> None:
     h = Harness(reply_timeout=10)
-    marker = object()
-    h.session._oneshot = cast(FinalObserver, marker)
+
+    class _Hook:
+        def __init__(self) -> None:
+            self.playback_id: str | None = None
+            self.bound = object()
+
+        def for_playback(self, playback_id: str) -> object:
+            self.playback_id = playback_id
+            return self.bound
+
+    hook = _Hook()
+    h.session._oneshot = cast(FinalObserver, hook)
     h.stt.say("u2", "Wszystkie prawa zastrzeżone.", ())
-    await follow_up_window(h)
+    playback_id = await follow_up_window(h)
     h.driver.push(*segments("u2")(h.driver.starts()[1].listen_id))
     await h.until(lambda: len(h.hub(TranscriptFinal)) == 2)
     h.session.release()
     await h.until(lambda: len(h.driver.starts()) == 3)
     await h.stop()
     assert h.stt.oneshots[0] == ("u1", None)
-    assert h.stt.oneshots[1][0] == "u2" and h.stt.oneshots[1][1] is marker
+    assert h.stt.oneshots[1] == ("u2", hook.bound)
+    assert hook.playback_id == playback_id
     assert all(oneshot is None for _, oneshot in h.stt.oneshots[2:])
     commands = h.driver.without_ids()
     assert CueType.TIMEOUT not in commands

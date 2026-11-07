@@ -3,6 +3,7 @@
 # Usage (on piotr, from the repo root; see the T-012 and T-018 PR checklists):
 #   export HUB_CONFIG=~/hub-wake.yaml HUB_USER="$(id -u):$(id -g)"
 #   mkdir -p ~/.cache/piotr_voice_hub/huggingface ~/speaker-profiles
+#   mkdir -m 0700 -p ~/.cache/piotr_voice_hub/stt-oneshot   # T-023; owner is HUB_USER
 #   docker compose up -d --build
 # HUB_CONFIG holds the satellites' API keys: keep it mode 600. The container runs as HUB_USER,
 # the config's owner, so it can read the file without loosening its permissions.
@@ -37,6 +38,12 @@ services:
       - type: bind  # the model cache; must exist (mkdir -p), else compose fails at once
         source: "${HUB_CACHE:-${HOME}/.cache/piotr_voice_hub/huggingface}"
         target: /hf
+        bind: {create_host_path: false}
+      - type: bind  # T-023: container path /stt-oneshot. Host dir mode 0700, owned by HUB_USER.
+        # create_host_path false: Docker must not create it as root. Missing dir fails compose
+        # at once (not a hub restart loop). The hub config's stt_capture.directory is this path.
+        source: "${HUB_STT_CAPTURE:-${HOME}/.cache/piotr_voice_hub/stt-oneshot}"
+        target: /stt-oneshot
         bind: {create_host_path: false}
     logging:
       driver: json-file

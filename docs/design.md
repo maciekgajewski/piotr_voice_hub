@@ -262,29 +262,36 @@ There is no default volume: `speak` changes the satellite's volume only when the
 
 Not part of normal operation. Omit `stt_capture` and the hub never reads or writes a capture
 file. The section is optional; when present every key below is required, and `satellite` must
-be `voice-pe-03`. `enabled: false` still does not touch the disk.
+be `voice-pe-03`. The directory is the path **inside the hub container**, the bind mount
+`/stt-oneshot` (compose volume from a host directory mode `0700` owned by `HUB_USER`). A host
+path such as `/home/maciek/probe/...` is not that mount: its parent is missing in the
+container, `prepare` raises, and `restart: unless-stopped` loops. The runbook is
+`docs/tasks/T-023-stt-oneshot-capture/runbook.md`.
 
 ```yaml
-stt_capture: {enabled: false, satellite: voice-pe-03, directory: /home/maciek/probe/stt-oneshot}
+stt_capture: {enabled: false, satellite: voice-pe-03, directory: /stt-oneshot}
 ```
 
-When `enabled` is true the directory must exist or be creatable as mode `0700` (not a symlink,
-no group or other bits) and `voice-pe-03` must be a configured device. The hub stays disarmed
-until that directory contains a regular file `ARM`, mode `0600` (no group or other bits),
-whose bytes are exactly `voice-pe-03\n`, and whose age is at most 120 s. The next follow-up
-**final** on that satellite only then writes one pair and deletes `ARM`:
+`enabled: false` does not create the directory. If the directory exists, startup deletes
+leftover study files there (pairs, partials, `ARM`, `PLAY`). `enabled: true` requires the
+directory mode `0700`, not a symlink, owned by the hub user, and `voice-pe-03` configured.
+The hub stays disarmed until `ARM` (mode `0600`, age at most 120 s) contains
+`voice-pe-03\n<playback_id>\n`. Only the follow-up **final** opened by that playback is
+written; a different playback leaves `ARM` in place. One pair, mode `0600`, at most 640000
+PCM bytes:
 
-- `stt-oneshot-<utterance_id>.pcm` — the exact PCM buffer passed into the final transcribe
-  (16 kHz, 16-bit little-endian mono, the driver's pre-roll included because it is already in
-  that buffer). At most 640000 bytes. A larger or odd-length buffer is not written.
-- `stt-oneshot-<utterance_id>.json` — format metadata, each Whisper segment's text and scores
-  from before cleanup, the joined string the preprocessor receives, and the cleaned text.
+- `stt-oneshot-<utterance_id>.pcm` — the exact final PCM buffer (16 kHz, 16-bit mono,
+  pre-roll included).
+- `stt-oneshot-<utterance_id>.json` — format, segment text before cleanup, the joined
+  string, `cleaned_text`, and `playback_id`.
 
-Both files are mode `0600`. Partials, other satellites, and a second final write nothing.
-Overflow, a stale or loose `ARM`, a write error, cancellation, and hub shutdown delete `ARM`
-and any partial pair. A finished pair is deleted 1800 s after the write, including on the next
-start that still has the capture enabled. The study client (§6 `release` only; it never sends
-`speak` or `play`) is what ends the accepted utterance so the reply-timeout cue does not play.
+While that process stays up, the pair is deleted 1800 s after the write. Normal shutdown
+deletes it, including partials. The next start deletes it when this section is still present,
+enabled or not, even if 1800 s have not passed. There is no host timer and no second service:
+a crash leaves the files until that next start, or until the operator deletes the directory.
+Removing the section does not delete them. Copy the pair before shutdown. The capture client
+sends `release` and never `play` or `speak`. The play-only client sends one `play` and ignores
+transcripts. `tools/speak_test.py` answers every transcript and is not used here.
 
 Language is not configurable: Polish is fixed.
 

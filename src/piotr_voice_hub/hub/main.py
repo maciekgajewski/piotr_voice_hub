@@ -206,11 +206,16 @@ async def check_tts(
 
 
 def build_oneshot(config: HubConfig) -> OneShotSttCapture | None:
-    """None unless `stt_capture.enabled`. A bad directory raises `CaptureError`."""
+    """None unless `stt_capture.enabled`. A disabled section still deletes leftovers in its
+    directory when that directory exists. A bad directory raises `CaptureError` only when
+    enabled."""
     chosen = config.stt_capture
-    if chosen is None or not chosen.enabled:
+    if chosen is None:
         return None
     capture = OneShotSttCapture(chosen)
+    if not chosen.enabled:
+        capture.discard_leftovers()
+        return None
     capture.prepare()
     return capture
 

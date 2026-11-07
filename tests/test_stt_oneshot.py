@@ -10,14 +10,12 @@ from typing import Any, NoReturn
 
 import numpy as np
 import pytest
-from websockets.exceptions import ConnectionClosed
 
 from piotr_voice_hub.config import SttCaptureConfig, SttConfig, SttPartialConfig, load_config
 from piotr_voice_hub.hub.commands import CommandRouter
 from piotr_voice_hub.hub.main import build_oneshot
 from piotr_voice_hub.stt import capture as capture_module
 from piotr_voice_hub.stt.capture import (
-    ARM_BODY,
     ARM_MAX_AGE_SECONDS,
     ARM_NAME,
     MAX_PCM_BYTES,
@@ -25,6 +23,7 @@ from piotr_voice_hub.stt.capture import (
     SAMPLE_RATE,
     SAMPLE_WIDTH_BYTES,
     OneShotSttCapture,
+    arm_body,
 )
 from piotr_voice_hub.stt.whisper import (
     BYTES_PER_SECOND,
@@ -35,16 +34,19 @@ from piotr_voice_hub.stt.whisper import (
 from piotr_voice_hub.stt.whisper import SAMPLE_RATE as WHISPER_RATE
 from piotr_voice_hub.stt_oneshot_client import (
     ClientError,
-    Watcher,
+    StudyWatch,
     arm,
+    capture_outcome,
     disarm,
     main,
     parse_args,
     release_command,
-    watch,
+    write_play_id,
 )
+from piotr_voice_hub.stt_oneshot_play import on_play_message, play_command
 
 STUDY = "voice-pe-03"
+PLAYBACK = "pb-1"
 EXAMPLE = Path(__file__).resolve().parent.parent / "config" / "hub.example.yaml"
 _HUB = """\
 log_level: INFO
@@ -106,7 +108,9 @@ def _ready(directory: Path, **kwargs: Any) -> OneShotSttCapture:
     return capture
 
 
-def _arm(directory: Path, body: bytes = ARM_BODY, mode: int = 0o600) -> Path:
+def _arm(directory: Path, body: bytes | None = None, mode: int = 0o600) -> Path:
+    if body is None:
+        body = arm_body(PLAYBACK)
     path = directory / ARM_NAME
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     try:
@@ -133,9 +137,11 @@ async def _observe(
     utterance_id: str = "utt-1",
     raw: str = "Wszystkie prawa zastrzeżone.",
     cleaned: str | None = None,
+    playback_id: str = PLAYBACK,
 ) -> None:
     await capture.observe_final(
         satellite,
+        playback_id,
         utterance_id,
         pcm,
         raw,
@@ -250,7 +256,7 @@ def test_a_second_final_does_not_write_again(tmp_path: Path) -> None:
     assert files == {"stt-oneshot-utt-1.pcm", "stt-oneshot-utt-1.json"}
     assert (directory / "stt-oneshot-utt-1.pcm").read_bytes() == pcm
     capture.close()
-    assert _names(directory) == files  # close drops the arm, not a finished pair
+    assert _names(directory) == set()  # shutdown deletes the pair; copy it before then
 
 
 def test_cancel_and_timeout_leave_no_audio(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,7 +414,9 @@ def test_final_stores_the_pcm_and_the_text_from_before_cleanup(tmp_path: Path) -
         )
         await stt.start()
         model.calls.clear()
-        session = stt.create_streaming_session("utt-7", 16.0, oneshot=capture.bind(STUDY))
+        session = stt.create_streaming_session(
+            "utt-7", 16.0, oneshot=capture.bind(STUDY).for_playback(PLAYBACK)
+        )
         pcm = b"\x01\x00" * 800
         await session.send_audio(pcm)
         text = await session.transcribe_final()
@@ -478,7 +486,9 @@ def test_partials_do_not_consume_the_arm(tmp_path: Path) -> None:
         )
         await stt.start()
         model.calls.clear()
-        session = stt.create_streaming_session("utt-3", 16.0, oneshot=capture.bind(STUDY))
+        session = stt.create_streaming_session(
+            "utt-3", 16.0, oneshot=capture.bind(STUDY).for_playback(PLAYBACK)
+        )
         await session.send_audio(b"\x00\x00" * 400)
         while not any(call.get("beam_size") == 1 for call in model.calls):
             await asyncio.sleep(0.005)
@@ -551,112 +561,170 @@ def test_the_client_refuses_to_arm_without_the_flags_or_for_another_satellite(
         parse_args(arm_args)
 
 
-def test_client_watch_releases_once_and_never_plays(tmp_path: Path) -> None:
+def test_a_different_playback_does_not_consume_the_arm(tmp_path: Path) -> None:
+    directory = tmp_path / "cap"
+    capture = _ready(directory)
+    _arm(directory, arm_body("pb-intended"))
+
+    async def run() -> None:
+        await _observe(capture, b"\x01\x00" * 8, playback_id="pb-other", utterance_id="utt-other")
+        await _observe(capture, b"\x02\x00" * 8, playback_id="pb-intended", utterance_id="utt-ok")
+
+    asyncio.run(run())
+    assert _names(directory) == {"stt-oneshot-utt-ok.pcm", "stt-oneshot-utt-ok.json"}
+    body = json.loads((directory / "stt-oneshot-utt-ok.json").read_text(encoding="utf-8"))
+    assert body["playback_id"] == "pb-intended"
+    capture.close()
+
+
+def test_disabled_restart_deletes_unexpired_files_and_partials(tmp_path: Path) -> None:
+    directory = tmp_path / "cap"
+    directory.mkdir(mode=0o700)
+    (directory / "stt-oneshot-utt-old.pcm").write_bytes(b"\x00\x00")
+    (directory / "stt-oneshot-utt-old.json").write_text(
+        json.dumps({"remove_after_unix": 10**12}), encoding="utf-8"
+    )
+    (directory / "stt-oneshot-utt-old.pcm.partial").write_bytes(b"\x01\x00")
+    (directory / ARM_NAME).write_bytes(arm_body(PLAYBACK))
+    text = _HUB + _disabled(directory)
+    loaded = load_config(_write_hub(tmp_path, text))
+    assert build_oneshot(loaded) is None
+    assert _names(directory) == set()
+
+
+def test_client_arms_only_after_the_named_playback_and_matches_the_utterance(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "cap"
+    directory.mkdir(mode=0o700)
     source = Path(release_command.__code__.co_filename).read_text(encoding="utf-8")
     assert '"type": "play"' not in source
     assert '"type": "speak"' not in source
-    sent: list[dict[str, Any]] = []
-    transcript = {
-        "type": "transcript_final",
-        "satellite": STUDY,
-        "data": {
-            "utterance_id": "utt-1",
-            "text": "Wszystkie prawa zastrzeżone.",
-            "raw_text": "Wszystkie prawa zastrzeżone.",
-            "follow_up": True,
-            "speaker": None,
-            "audio_ms": 1280,
-        },
-    }
-    messages = [
-        json.dumps(
+    watch = StudyWatch(STUDY)
+    assert watch.on_message(
+        {
+            "type": "transcript_final",
+            "satellite": STUDY,
+            "data": {"utterance_id": "utt-early", "raw_text": "earlier", "follow_up": True},
+        }
+    ) == release_command(STUDY, next(iter(watch.releases.values())))
+    assert not (directory / ARM_NAME).exists()
+    assert (
+        watch.on_message(
             {
                 "type": "playback_finished",
                 "satellite": STUDY,
-                "data": {"playback_id": "pb", "listening_for_follow_up": True},
-            }
-        ),
-        json.dumps(
-            {
-                "type": "transcript_final",
-                "satellite": "voice-pe-02",
-                "data": transcript["data"],
-            }
-        ),
-        json.dumps(
-            {
-                "type": "transcript_final",
-                "satellite": STUDY,
-                "data": {**transcript["data"], "follow_up": False},
-            }
-        ),
-        json.dumps(transcript),
-        json.dumps(transcript),
-        json.dumps({"type": "ack", "reply_to": "c1", "satellite": STUDY, "data": {}}),
-    ]
-
-    async def recv() -> str:
-        return messages.pop(0)
-
-    async def send(payload: str) -> None:
-        sent.append(json.loads(payload))
-
-    watcher = asyncio.run(watch(recv, send, Watcher(STUDY, "c1"), timeout=2))
-    assert sent == [release_command(STUDY, "c1")]
-    assert watcher.release_acked and watcher.saw_follow_up_final
-    session = _Session()
-    reply = CommandRouter({STUDY: session}).handle(json.dumps(sent[0]))
-    assert reply["type"] == "ack"
-    assert session.calls == ["release"]
-
-
-def test_client_disarms_on_disconnect_and_arm_is_one_shot(tmp_path: Path) -> None:
-    directory = tmp_path / "cap"
-    arm(directory)
-    path = directory / ARM_NAME
-    assert path.read_bytes() == ARM_BODY
-    assert _mode(path) == 0o600 and _mode(directory) == 0o700
-    with pytest.raises(ClientError, match="already present"):
-        arm(directory)
-    os.utime(path, (1, 1))
-    arm(directory)  # stale arm is replaced
-    disarm(directory)
-    assert not path.exists()
-
-    async def recv() -> str:
-        raise ConnectionClosed(None, None)
-
-    async def send(_payload: str) -> None:
-        raise AssertionError("nothing to send")
-
-    with pytest.raises(ConnectionClosed):
-        asyncio.run(watch(recv, send, Watcher(STUDY, "c1"), timeout=1))
-    # A disconnect before a transcript leaves the arm for the caller to drop.
-    arm(directory)
-    disarm(directory)
-    assert _names(directory) == set()
-
-    sent: list[dict[str, Any]] = []
-    pending = [
-        json.dumps(
-            {
-                "type": "transcript_final",
-                "satellite": STUDY,
-                "data": {"text": "x", "follow_up": True},
+                "data": {"playback_id": "pb-other", "listening_for_follow_up": True},
             }
         )
+        is None
+    )
+    assert watch.should_arm() is False
+    write_play_id(directory, "pb-study")
+    watch.playback_id = "pb-study"
+    assert watch.should_arm() is False  # PLAY is not enough; the finish event is required
+    watch.on_message(
+        {
+            "type": "playback_finished",
+            "satellite": STUDY,
+            "data": {"playback_id": "pb-study", "listening_for_follow_up": True},
+        }
+    )
+    assert watch.should_arm() is True
+    arm(directory, "pb-study")
+    watch.armed = True
+    meta = {
+        "playback_id": "pb-study",
+        "utterance_id": "utt-study",
+        "cleaned_text": "Wszystkie prawa zastrzeżone.",
+    }
+    (directory / "stt-oneshot-utt-study.json").write_text(json.dumps(meta), encoding="utf-8")
+    assert capture_outcome(directory, "pb-study", {}, set()) == "waiting"
+    command = watch.on_message(
+        {
+            "type": "transcript_final",
+            "satellite": STUDY,
+            "data": {
+                "utterance_id": "utt-study",
+                "raw_text": meta["cleaned_text"],
+                "follow_up": True,
+            },
+        }
+    )
+    assert command is not None and command["type"] == "release"
+    session = _Session()
+    assert CommandRouter({STUDY: session}).handle(json.dumps(command))["type"] == "ack"
+    assert session.calls == ["release"]
+    watch.on_message({"type": "ack", "reply_to": command["id"], "satellite": STUDY, "data": {}})
+    assert capture_outcome(directory, "pb-study", watch.transcripts, watch.acked) == "matched"
+    meta["cleaned_text"] = ""
+    (directory / "stt-oneshot-utt-study.json").write_text(json.dumps(meta), encoding="utf-8")
+    assert capture_outcome(directory, "pb-study", {}, set()) == "empty"
+
+
+def test_play_client_sends_one_play_and_ignores_transcripts() -> None:
+    source = Path(play_command.__code__.co_filename).read_text(encoding="utf-8")
+    assert '"type": "speak"' not in source
+    assert '"type": "release"' not in source
+    command = play_command(STUDY, "https://example.com/study.wav")
+    assert command["type"] == "play" and command["data"]["listen_after"] is True
+    playback_id = None
+    steps = []
+    messages = [
+        {
+            "type": "transcript_final",
+            "satellite": STUDY,
+            "data": {"text": "again", "follow_up": True},
+        },
+        {
+            "type": "ack",
+            "reply_to": command["id"],
+            "satellite": STUDY,
+            "data": {"playback_id": "pb-study"},
+        },
+        {
+            "type": "transcript_final",
+            "satellite": STUDY,
+            "data": {"text": "again", "follow_up": True},
+        },
+        {
+            "type": "playback_finished",
+            "satellite": STUDY,
+            "data": {"playback_id": "pb-study", "listening_for_follow_up": True},
+        },
     ]
+    for message in messages:
+        step = on_play_message(message, playback_id, STUDY)
+        steps.append(step)
+        if step == "ack":
+            playback_id = message["data"]["playback_id"]
+    assert steps == ["ignore", "ack", "ignore", "finished"]
+    assert playback_id == "pb-study"
 
-    async def recv_then_drop() -> str:
-        if pending:
-            return pending.pop(0)
-        raise ConnectionClosed(None, None)
 
-    async def send_release(payload: str) -> None:
-        sent.append(json.loads(payload))
+def test_runbook_uses_the_container_mount_not_a_host_only_path() -> None:
+    root = Path(__file__).resolve().parent.parent
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    design = (root / "docs" / "design.md").read_text(encoding="utf-8")
+    runbook = (root / "docs" / "tasks" / "T-023-stt-oneshot-capture" / "runbook.md").read_text(
+        encoding="utf-8"
+    )
+    assert "target: /stt-oneshot" in compose
+    assert "directory: /stt-oneshot" in design
+    assert "directory: /home/maciek/probe" not in design
+    assert "/stt-oneshot" in runbook
+    assert "speak_test" in runbook
 
-    watcher = Watcher(STUDY, "c1")
-    with pytest.raises(ConnectionClosed):
-        asyncio.run(watch(recv_then_drop, send_release, watcher, timeout=2))
-    assert sent == [release_command(STUDY, "c1")]
-    assert watcher.release_sent and not watcher.release_acked
+
+def test_arm_file_names_the_playback_and_disarm_removes_it(tmp_path: Path) -> None:
+    directory = tmp_path / "cap"
+    arm(directory, PLAYBACK)
+    path = directory / ARM_NAME
+    assert path.read_bytes() == arm_body(PLAYBACK)
+    assert _mode(path) == 0o600 and _mode(directory) == 0o700
+    with pytest.raises(ClientError, match="already present"):
+        arm(directory, PLAYBACK)
+    os.utime(path, (1, 1))
+    arm(directory, PLAYBACK)
+    disarm(directory)
+    assert not path.exists()

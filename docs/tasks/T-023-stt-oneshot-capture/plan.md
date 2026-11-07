@@ -1,8 +1,7 @@
 # T-023: one-shot STT capture on voice-pe-03
 
-**Status:** PR #34 open. Not for merge until Maciej accepts the design note and a later,
-separate trigger. Production stays `cd8c36a`. This branch does not deploy, open a listener,
-play audio, or read the piotr evidence files.
+**Status:** PR #34 open, head updated for review. Not for merge. Production stays `cd8c36a`.
+This branch does not deploy, open a listener, play audio, or read the piotr evidence files.
 
 ## Goal
 
