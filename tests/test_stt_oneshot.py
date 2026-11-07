@@ -3,8 +3,9 @@
 import asyncio
 import json
 import os
+import shutil
 import stat
-import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -19,11 +20,11 @@ from piotr_voice_hub.stt.capture import (
     ARM_MAX_AGE_SECONDS,
     ARM_NAME,
     MAX_PCM_BYTES,
-    RETAIN_SECONDS,
     SAMPLE_RATE,
     SAMPLE_WIDTH_BYTES,
     OneShotSttCapture,
     arm_body,
+    cleanup_command,
 )
 from piotr_voice_hub.stt.whisper import (
     BYTES_PER_SECOND,
@@ -41,6 +42,8 @@ from piotr_voice_hub.stt_oneshot_client import (
     main,
     parse_args,
     release_command,
+    teardown,
+    verify_cleanup_job,
     write_play_id,
 )
 from piotr_voice_hub.stt_oneshot_play import on_play_message, play_command
@@ -103,6 +106,9 @@ def _config(directory: Path, *, enabled: bool = True) -> SttCaptureConfig:
 
 
 def _ready(directory: Path, **kwargs: Any) -> OneShotSttCapture:
+    if not directory.exists():
+        directory.mkdir()
+        os.chmod(directory, 0o700)
     capture = OneShotSttCapture(_config(directory), **kwargs)
     capture.prepare()
     return capture
@@ -145,10 +151,7 @@ async def _observe(
         utterance_id,
         pcm,
         raw,
-        (),
         cleaned if cleaned is not None else raw,
-        5,
-        {"language": "pl"},
     )
 
 
@@ -256,119 +259,36 @@ def test_a_second_final_does_not_write_again(tmp_path: Path) -> None:
     assert files == {"stt-oneshot-utt-1.pcm", "stt-oneshot-utt-1.json"}
     assert (directory / "stt-oneshot-utt-1.pcm").read_bytes() == pcm
     capture.close()
-    assert _names(directory) == set()  # shutdown deletes the pair; copy it before then
+    assert _names(directory) == files  # the hub does not delete; the host at job does
 
 
-def test_cancel_and_timeout_leave_no_audio(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_shutdown_does_not_delete_the_pair(tmp_path: Path) -> None:
     directory = tmp_path / "cap"
-    capture = _ready(directory, write_timeout=0.05)
+    capture = _ready(directory)
     _arm(directory)
-
-    async def hang(fn: Any, *args: Any) -> None:
-        await asyncio.sleep(5)
-
-    monkeypatch.setattr(capture_module.asyncio, "to_thread", hang)
-
-    async def timed_out() -> None:
-        await _observe(capture, b"\x00\x00")
-
-    asyncio.run(timed_out())
-    assert _names(directory) == set()
-
-    wrote: list[Path] = []
-
-    async def write_then_cancel(fn: Any, *args: Any) -> None:
-        fn(*args)
-        wrote.append(directory)
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(capture_module.asyncio, "to_thread", write_then_cancel)
-    _arm(directory)
-
-    async def cancelled() -> None:
-        with pytest.raises(asyncio.CancelledError):
-            await _observe(capture, b"\x04\x00" * 4)
-
-    asyncio.run(cancelled())
-    assert wrote  # the write ran, then the cancel path deleted it
-    assert _names(directory) == set()
-    capture.close()
-
-
-def test_a_cancelled_writer_cannot_publish_after_the_next_final(tmp_path: Path) -> None:
-    """Cancelling the asyncio wrapper must not let the thread publish once abort is set,
-    including after another final has run."""
-    directory = tmp_path / "cap"
-    capture = _ready(directory, write_timeout=0.05)
-    _arm(directory)
-    started = threading.Event()
-    release = threading.Event()
-    real = capture._write_files
-
-    def blocked(stem: str, pcm: bytes, payload: dict[str, Any], abort: threading.Event) -> None:
-        started.set()
-        release.wait(timeout=2)
-        real(stem, pcm, payload, abort)
-
-    capture._write_files = blocked  # type: ignore[method-assign]
 
     async def run() -> None:
-        task = asyncio.create_task(_observe(capture, b"\x07\x00" * 8, utterance_id="utt-1"))
-        while not started.is_set():
-            await asyncio.sleep(0.005)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await _observe(capture, b"\x08\x00" * 8, utterance_id="utt-2")
-        release.set()
-        await asyncio.sleep(0.05)
+        await _observe(capture, b"\x02\x00" * 4)
 
     asyncio.run(run())
-    assert _names(directory) == set()
+    names = _names(directory)
     capture.close()
+    assert names and _names(directory) == names
 
 
-def test_expired_pairs_and_symlinks_are_removed(tmp_path: Path) -> None:
-    directory = tmp_path / "cap"
-    clock = {"now": 0.0}
-    capture = _ready(directory, clock=lambda: clock["now"])
-    _arm(directory)
-    clock["now"] = os.lstat(directory / ARM_NAME).st_mtime
-    pcm = b"\x05\x00" * 8
-
-    async def run() -> None:
-        await _observe(capture, pcm, utterance_id="utt-9")
-
-    asyncio.run(run())
-    meta = directory / "stt-oneshot-utt-9.json"
-    body = json.loads(meta.read_text(encoding="utf-8"))
-    assert body["remove_after_unix"] == clock["now"] + RETAIN_SECONDS
-    other = tmp_path / "elsewhere"
-    other.write_text("keep", encoding="utf-8")
-    (directory / "stt-oneshot-utt-9.pcm.link").symlink_to(other)
-    capture.sweep_expired()
-    assert other.read_text(encoding="utf-8") == "keep"
-    assert not (directory / "stt-oneshot-utt-9.pcm.link").exists()
-    clock["now"] = body["remove_after_unix"]
-    capture.sweep_expired()
-    assert _names(directory) == set()
-    capture.close()
+def test_a_missing_parent_leaves_the_hub_up_and_unarmed(tmp_path: Path) -> None:
+    missing = tmp_path / "no-such" / "stt-oneshot"
+    text = _HUB + (
+        "stt_capture: {enabled: true, satellite: voice-pe-03, directory: " + str(missing) + "}\n"
+    )
+    loaded = load_config(_write_hub(tmp_path, text))
+    assert build_oneshot(loaded) is None
+    assert not missing.exists()
 
 
 class _Segment:
-    def __init__(self, text: str, **scores: float) -> None:
+    def __init__(self, text: str) -> None:
         self.text = text
-        for key, value in scores.items():
-            setattr(self, key, value)
-
-
-class _Info:
-    language = "pl"
-    language_probability = 0.91
-    duration = 1.28
-    duration_after_vad = 1.0
-    all_language_probs = [("pl", 0.91)]
-    transcription_options = {"initial_prompt": "SECRET"}
 
 
 class _Model:
@@ -377,36 +297,17 @@ class _Model:
         self.calls: list[dict[str, Any]] = []
         self.audio: np.ndarray | None = None
 
-    def transcribe(self, audio: np.ndarray, **kwargs: Any) -> tuple[list[_Segment], _Info]:
+    def transcribe(self, audio: np.ndarray, **kwargs: Any) -> tuple[list[_Segment], object]:
         self.calls.append(kwargs)
         self.audio = audio
-        return self.segments, _Info()
+        return self.segments, None
 
 
 def test_final_stores_the_pcm_and_the_text_from_before_cleanup(tmp_path: Path) -> None:
     directory = tmp_path / "cap"
     capture = _ready(directory)
     _arm(directory)
-    model = _Model(
-        [
-            _Segment(
-                " Wszystkie prawa zastrzeżone. ",
-                start=0.0,
-                end=1.2,
-                avg_logprob=-0.2,
-                no_speech_prob=0.71,
-                compression_ratio=1.1,
-            ),
-            _Segment(
-                " (muzyka) ",
-                start=1.2,
-                end=1.28,
-                avg_logprob=-0.4,
-                no_speech_prob=0.2,
-                compression_ratio=1.4,
-            ),
-        ]
-    )
+    model = _Model([_Segment(" Wszystkie prawa zastrzeżone. "), _Segment(" (muzyka) ")])
 
     async def run() -> str:
         stt = FasterWhisperSpeechToText(
@@ -441,11 +342,9 @@ def test_final_stores_the_pcm_and_the_text_from_before_cleanup(tmp_path: Path) -
     }
     assert body["raw_joined"] == "Wszystkie prawa zastrzeżone. (muzyka)"
     assert body["cleaned_text"] == "Wszystkie prawa zastrzeżone."
-    assert body["segments"][0]["text"] == " Wszystkie prawa zastrzeżone. "
-    assert body["segments"][1]["text"] == " (muzyka) "
-    assert body["segments"][0]["no_speech_prob"] == 0.71
-    assert body["info"]["language"] == "pl"
-    assert "all_language_probs" not in body["info"]
+    assert body["playback_id"] == PLAYBACK
+    assert body["utterance_id"] == "utt-7"
+    assert "segments" not in body and "no_speech_prob" not in meta_path.read_text(encoding="utf-8")
     assert "SECRET" not in meta_path.read_text(encoding="utf-8")
     assert "api_key" not in meta_path.read_text(encoding="utf-8")
     assert not (directory / ARM_NAME).exists()
@@ -577,26 +476,23 @@ def test_a_different_playback_does_not_consume_the_arm(tmp_path: Path) -> None:
     capture.close()
 
 
-def test_disabled_restart_deletes_unexpired_files_and_partials(tmp_path: Path) -> None:
+def test_disabled_config_does_not_delete_files(tmp_path: Path) -> None:
     directory = tmp_path / "cap"
-    directory.mkdir(mode=0o700)
-    (directory / "stt-oneshot-utt-old.pcm").write_bytes(b"\x00\x00")
-    (directory / "stt-oneshot-utt-old.json").write_text(
-        json.dumps({"remove_after_unix": 10**12}), encoding="utf-8"
-    )
+    directory.mkdir()
+    os.chmod(directory, 0o700)
     (directory / "stt-oneshot-utt-old.pcm.partial").write_bytes(b"\x01\x00")
-    (directory / ARM_NAME).write_bytes(arm_body(PLAYBACK))
     text = _HUB + _disabled(directory)
     loaded = load_config(_write_hub(tmp_path, text))
     assert build_oneshot(loaded) is None
-    assert _names(directory) == set()
+    assert _names(directory) == {"stt-oneshot-utt-old.pcm.partial"}
 
 
 def test_client_arms_only_after_the_named_playback_and_matches_the_utterance(
     tmp_path: Path,
 ) -> None:
     directory = tmp_path / "cap"
-    directory.mkdir(mode=0o700)
+    directory.mkdir()
+    os.chmod(directory, 0o700)
     source = Path(release_command.__code__.co_filename).read_text(encoding="utf-8")
     assert '"type": "play"' not in source
     assert '"type": "speak"' not in source
@@ -718,6 +614,8 @@ def test_runbook_uses_the_container_mount_not_a_host_only_path() -> None:
 
 def test_arm_file_names_the_playback_and_disarm_removes_it(tmp_path: Path) -> None:
     directory = tmp_path / "cap"
+    directory.mkdir()
+    os.chmod(directory, 0o700)
     arm(directory, PLAYBACK)
     path = directory / ARM_NAME
     assert path.read_bytes() == arm_body(PLAYBACK)
@@ -728,3 +626,77 @@ def test_arm_file_names_the_playback_and_disarm_removes_it(tmp_path: Path) -> No
     arm(directory, PLAYBACK)
     disarm(directory)
     assert not path.exists()
+
+
+def _atq(job_id: str, when: datetime) -> str:
+    dow = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][when.weekday()]
+    mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][
+        when.month - 1
+    ]
+    stamp = f"{dow} {mon} {when.day:2d} {when.strftime('%H:%M:%S')} {when.year}"
+    return f"{job_id}\t{stamp} a grok-developer\n"
+
+
+def _at_c(directory: Path) -> str:
+    return "#!/bin/sh\n# atrun uid=1002 gid=1002\n" + cleanup_command(directory) + "\n"
+
+
+def test_atq_alone_does_not_authorize_arming(tmp_path: Path) -> None:
+    directory = tmp_path / "cap"
+    when = datetime(2026, 11, 7, 18, 0, 0)
+    now = datetime(2026, 11, 7, 16, 0, 0)
+    with pytest.raises(ClientError, match="at -c"):
+        verify_cleanup_job("7", directory, when, _atq("7", when), "#!/bin/sh\n", now=now)
+
+
+def test_cleanup_job_must_match_path_deadline_and_one_rm(tmp_path: Path) -> None:
+    directory = tmp_path / "cap"
+    when = datetime(2026, 11, 7, 18, 0, 0)
+    now = datetime(2026, 11, 7, 16, 0, 0)
+    verify_cleanup_job("7", directory, when, _atq("7", when), _at_c(directory), now=now)
+    with pytest.raises(ClientError, match="deadline"):
+        verify_cleanup_job(
+            "7",
+            directory,
+            datetime(2026, 11, 7, 18, 5, 0),
+            _atq("7", when),
+            _at_c(directory),
+            now=now,
+        )
+    with pytest.raises(ClientError, match="not in the future"):
+        verify_cleanup_job("7", directory, when, _atq("7", when), _at_c(directory), now=when)
+    other = tmp_path / "other"
+    with pytest.raises(ClientError, match="at -c"):
+        verify_cleanup_job("7", directory, when, _atq("7", when), _at_c(other), now=now)
+    extra = _at_c(directory) + cleanup_command(other) + "\n"
+    with pytest.raises(ClientError, match="at -c"):
+        verify_cleanup_job("7", directory, when, _atq("7", when), extra, now=now)
+    with pytest.raises(ClientError, match="not understood"):
+        verify_cleanup_job("7", directory, when, "7\twhenever a user\n", _at_c(directory), now=now)
+
+
+def test_teardown_deletes_the_directory_before_cancelling_the_job(tmp_path: Path) -> None:
+    directory = tmp_path / "cap"
+    directory.mkdir()
+    (directory / "stt-oneshot-utt.pcm.partial").write_bytes(b"\x00\x00")
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> int:
+        calls.append(argv)
+        if argv[0] == "rm":
+            assert (directory / "stt-oneshot-utt.pcm.partial").is_file()
+            shutil.rmtree(directory)
+            return 0
+        assert not directory.exists()
+        return 0
+
+    teardown(directory, "7", run)
+    assert calls[0][:3] == ["rm", "-rf", "--"]
+    assert calls[0][3] == str(directory)
+    assert calls[1] == ["atrm", "7"]
+
+    def fail_rm(argv: list[str]) -> int:
+        return 1
+
+    with pytest.raises(ClientError, match="still queued"):
+        teardown(directory, "7", fail_rm)

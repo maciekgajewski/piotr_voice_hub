@@ -206,17 +206,20 @@ async def check_tts(
 
 
 def build_oneshot(config: HubConfig) -> OneShotSttCapture | None:
-    """None unless `stt_capture.enabled`. A disabled section still deletes leftovers in its
-    directory when that directory exists. A bad directory raises `CaptureError` only when
-    enabled."""
+    """None unless capture is enabled and the directory is already usable.
+
+    A missing parent or a bad mode does not exit the process: Docker would restart that
+    forever. The study simply stays disarmed. Deletion is a host `at` job, not this process.
+    """
     chosen = config.stt_capture
-    if chosen is None:
+    if chosen is None or not chosen.enabled:
         return None
     capture = OneShotSttCapture(chosen)
-    if not chosen.enabled:
-        capture.discard_leftovers()
+    try:
+        capture.prepare()
+    except CaptureError as error:
+        logger.critical("STT one-shot capture left disarmed: %s", error)
         return None
-    capture.prepare()
     return capture
 
 
@@ -238,11 +241,7 @@ async def run_hub(config: HubConfig) -> int:
     tts = WyomingPiperTts(config.tts)
     if not await check_tts(tts):
         return EXIT_FAILED
-    try:
-        oneshot = build_oneshot(config)
-    except CaptureError as error:
-        logger.critical("STT one-shot capture refused, exiting: %s", error)
-        return EXIT_FAILED
+    oneshot = build_oneshot(config)
     stt = FasterWhisperSpeechToText(config.stt)
     # No startup check: the hint is optional, a failure is a null speaker (T-018 plan).
     speaker = HttpSpeakerRecognition(config.speaker_recognition)

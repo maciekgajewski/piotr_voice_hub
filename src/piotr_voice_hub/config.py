@@ -305,10 +305,11 @@ def _parse_stt_capture(raw: dict[str, Any], device_ids: set[str]) -> SttCaptureC
         or "\x00" in directory
         or not Path(directory).is_absolute()
         or ".." in Path(directory).parts
+        or any(c.isspace() for c in directory)
     ):
         raise ConfigError(
-            "stt_capture.directory: must be an absolute path without '..' "
-            f"of at most {MAX_CAPTURE_DIRECTORY_CHARS} characters"
+            "stt_capture.directory: must be an absolute path without '..' or whitespace, "
+            f"at most {MAX_CAPTURE_DIRECTORY_CHARS} characters"
         )
     enabled = _bool(section, "enabled", "stt_capture")
     if enabled and satellite not in device_ids:

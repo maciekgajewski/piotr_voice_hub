@@ -1,7 +1,7 @@
 # T-023: one-shot STT capture on voice-pe-03
 
-**Status:** PR #34 open, head updated for review. Not for merge. Production stays `cd8c36a`.
-This branch does not deploy, open a listener, play audio, or read the piotr evidence files.
+**Status:** PR #34, preparation only. `at` is not installed; cleanup is unsatisfied.
+Not capture-ready, not for merge, not for deploy. Production stays `cd8c36a`.
 
 ## Goal
 
@@ -31,15 +31,17 @@ The Nov 7 cause is not established. This task does not claim a hallucination or 
 ## Approach
 
 Optional config `stt_capture`, absent by default. `enabled: false` does not touch the disk.
-`enabled: true` is allowed only for satellite `voice-pe-03`. The hub stays disarmed until a
-mode-0600 `ARM` file appears. The next follow-up **final** on that satellite only, within
-120 s, writes one `.pcm` and one `.json` (mode 0600, at most 640000 PCM bytes) and removes
-the arm. Overflow, a stale arm, a write error, cancellation, and hub shutdown disarm and
-leave no partial audio. Files are removed 1800 s after a successful write.
+`enabled: true` is only `voice-pe-03`, and only if `/stt-oneshot` already exists mode 0700.
+A bad path disarms capture and leaves the hub up. `ARM` (mode 0600, age ≤ 120 s) names one
+playback id. Only that follow-up final is written: PCM (≤ 640000 bytes), `raw_joined`,
+`cleaned_text`, and ids. No scores. The hub does not delete the directory.
 
-The client is opt-in (`--arm` and `--confirm-one-shot`), refuses any other satellite, never
-sends `speak` or `play`, and on one `transcript_final` with `follow_up: true` sends
-`release`.
+The host `at` job `rm -rf -- <directory>` is the deleter, including partials. The capture
+client checks `at -c` and the `atq` deadline and does not write `ARM` if that check is
+uncertain. `at` is not installed; that prerequisite is unsatisfied. Teardown deletes the
+directory before `atrm`. The play client sends one `play` and ignores transcripts. The
+capture client connects first, then arms, and `release`s an accepted transcript without
+playing. Empty `cleaned_text` has no `transcript_final`.
 
 ## Out of scope
 

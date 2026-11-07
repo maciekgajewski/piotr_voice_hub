@@ -36,3 +36,12 @@
   until that start or until the operator deletes the directory. Container path is
   `/stt-oneshot`. Runbook: `docs/tasks/T-023-stt-oneshot-capture/runbook.md`.
 - `make check` on this head: 983 passed, 8 skipped. Not merged. Not deployed.
+- Sysadmin install of `at`/`atd` is blocked by a security gate. Nothing was installed.
+  `at` remains absent. No host check and no retry from this task. Cleanup prerequisite
+  is unsatisfied. No capture readiness.
+- Replaced hub-owned retention (timer, startup sweep, shutdown delete, segment scores)
+  with one host `at` job. The client reads `at -c` and the `atq` deadline and refuses
+  `ARM` unless they match this directory. Teardown deletes the directory before `atrm`.
+  A missing capture directory disarms the feature and leaves the hub up.
+- `make check`: 985 passed, 8 skipped. `at` still absent. Not capture-ready. Not merged.
+  Not deployed.

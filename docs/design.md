@@ -265,33 +265,31 @@ file. The section is optional; when present every key below is required, and `sa
 be `voice-pe-03`. The directory is the path **inside the hub container**, the bind mount
 `/stt-oneshot` (compose volume from a host directory mode `0700` owned by `HUB_USER`). A host
 path such as `/home/maciek/probe/...` is not that mount: its parent is missing in the
-container, `prepare` raises, and `restart: unless-stopped` loops. The runbook is
+container. A missing or unusable directory leaves capture disarmed and the hub stays up
+(it does not exit, so Docker does not restart-loop). The runbook is
 `docs/tasks/T-023-stt-oneshot-capture/runbook.md`.
 
 ```yaml
 stt_capture: {enabled: false, satellite: voice-pe-03, directory: /stt-oneshot}
 ```
 
-`enabled: false` does not create the directory. If the directory exists, startup deletes
-leftover study files there (pairs, partials, `ARM`, `PLAY`). `enabled: true` requires the
-directory mode `0700`, not a symlink, owned by the hub user, and `voice-pe-03` configured.
-The hub stays disarmed until `ARM` (mode `0600`, age at most 120 s) contains
-`voice-pe-03\n<playback_id>\n`. Only the follow-up **final** opened by that playback is
-written; a different playback leaves `ARM` in place. One pair, mode `0600`, at most 640000
-PCM bytes:
+`enabled: false` does not touch the disk. `enabled: true` uses the directory only when it
+already exists, mode `0700`, not a symlink, owned by the hub user, and `voice-pe-03` is
+configured. The hub does not create the directory. It stays disarmed until `ARM` (mode
+`0600`, age at most 120 s) names one playback id. Only that follow-up **final** is written;
+a different playback leaves `ARM`. One pair, mode `0600`, at most 640000 PCM bytes:
 
 - `stt-oneshot-<utterance_id>.pcm` — the exact final PCM buffer (16 kHz, 16-bit mono,
   pre-roll included).
-- `stt-oneshot-<utterance_id>.json` — format, segment text before cleanup, the joined
-  string, `cleaned_text`, and `playback_id`.
+- `stt-oneshot-<utterance_id>.json` — ids, format, `raw_joined` (the joined text before
+  cleanup), and `cleaned_text`. No segment scores.
 
-While that process stays up, the pair is deleted 1800 s after the write. Normal shutdown
-deletes it, including partials. The next start deletes it when this section is still present,
-enabled or not, even if 1800 s have not passed. There is no host timer and no second service:
-a crash leaves the files until that next start, or until the operator deletes the directory.
-Removing the section does not delete them. Copy the pair before shutdown. The capture client
-sends `release` and never `play` or `speak`. The play-only client sends one `play` and ignores
-transcripts. `tools/speak_test.py` answers every transcript and is not used here.
+The hub does not delete the directory. Deletion is one host `at` job, `rm -rf --` that
+directory, including partials, checked with `at -c` before `ARM` is written. `atq` alone is
+not enough. The job runs only if `atd` runs, including a due job after reboot. `at` is not
+installed here; that prerequisite is unsatisfied. The capture client sends `release` and
+never `play` or `speak`. The play-only client sends one `play` and ignores transcripts.
+`tools/speak_test.py` answers every transcript and is not used here.
 
 Language is not configurable: Polish is fixed.
 
