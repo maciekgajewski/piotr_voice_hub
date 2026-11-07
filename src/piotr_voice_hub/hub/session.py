@@ -91,7 +91,7 @@ from piotr_voice_hub.satellites.messages import (
 from piotr_voice_hub.satellites.messages import PlaybackFinished as DriverPlaybackFinished
 from piotr_voice_hub.satellites.protocol import MicrophoneProtocolState
 from piotr_voice_hub.speaker.interfaces import SpeakerHint
-from piotr_voice_hub.stt.whisper import StreamingTextEvent, TextEnd
+from piotr_voice_hub.stt.whisper import FinalObserver, StreamingTextEvent, TextEnd
 from piotr_voice_hub.tts.interfaces import TextToSpeech, TtsError
 
 BACKOFF_FIRST_SECONDS = 1.0
@@ -131,7 +131,13 @@ class SttSession(Protocol):
 
 
 class Stt(Protocol):
-    def create_streaming_session(self, session_id: str, max_audio_seconds: float) -> SttSession: ...
+    def create_streaming_session(
+        self,
+        session_id: str,
+        max_audio_seconds: float,
+        *,
+        oneshot: FinalObserver | None = None,
+    ) -> SttSession: ...
 
 
 class _Deadline(Exception):
@@ -197,6 +203,7 @@ class SatelliteSession:
         *,
         tts: TextToSpeech,
         speaker: SpeakerHint,
+        oneshot: FinalObserver | None = None,
     ) -> None:
         self._config = config
         self._microphone = microphone
@@ -205,6 +212,7 @@ class SatelliteSession:
         self._speaker = speaker
         self._emit = emit
         self._sleep = sleep
+        self._oneshot = oneshot
         self._max_audio_seconds = config.max_segment_seconds + SEGMENT_MARGIN_SECONDS
         # The speaker hint's audio: the last this many bytes of the accepted utterance.
         self._max_hint_bytes = int(self._max_audio_seconds * 1000) * BYTES_PER_MS
@@ -220,6 +228,8 @@ class SatelliteSession:
         self._stopping = False  # `stop` acked for the open playback
         self._stop_scope: asyncio.Timeout | None = None  # the speak's wait `stop` interrupts
         self._follow_up_next = False  # the next arm opens the follow-up window (T-020)
+        self._follow_up_playback_id: str | None = None  # the playback that set _follow_up_next
+        self._window_playback_id: str | None = None  # the open follow-up window's playback
         self._follow_up_deadline: float | None = None  # loop time; set while the window is open
         self._last_status: SatelliteStatus | None = None
         self._running = False  # run() is running; shutdown() needs it stopped
@@ -343,6 +353,8 @@ class SatelliteSession:
         """Arm idle, or, after a `listen_after` speak, open the follow-up window: `LISTENING`
         and no cue (T-020: no follow-up sound until the P2 firmware)."""
         follow_up, self._follow_up_next = self._follow_up_next, False
+        playback_id, self._follow_up_playback_id = self._follow_up_playback_id, None
+        self._window_playback_id = playback_id if follow_up else None
         listen_id = new_id("listen")
         visual = VisualState.LISTENING if follow_up else VisualState.IDLE
         await self._command(SetVisualState(visual))
@@ -452,12 +464,28 @@ class SatelliteSession:
 
     def _start_segment(self, utterance_id: str) -> None:
         assert self._segment is None, f"segment {self._segment.utterance_id} is still open"
-        stt = self._stt.create_streaming_session(utterance_id, self._max_audio_seconds)
         follow_up, self._follow_up_deadline = self._follow_up_deadline is not None, None
+        playback_id = self._window_playback_id if follow_up else None
+        if follow_up:
+            self._window_playback_id = None
+        oneshot = None
+        if follow_up and self._oneshot is not None and playback_id:
+            bind = getattr(self._oneshot, "for_playback", None)
+            if bind is not None:
+                oneshot = bind(playback_id)
+        stt = self._stt.create_streaming_session(
+            utterance_id,
+            self._max_audio_seconds,
+            oneshot=oneshot,
+        )
         segment = _Segment(utterance_id, stt, follows=self._bare_wake, follow_up=follow_up)
         segment.candidate = segment.follows is not None  # `wake` sent, LISTENING shown
         if follow_up:
             self._logger.info("follow-up speech utterance_id=%s", utterance_id)
+            if self._oneshot is not None:
+                self._logger.debug(
+                    "follow-up utterance_id=%s offered to one-shot capture", utterance_id
+                )
         segment.partials = asyncio.create_task(self._read_partials(segment))
         self._segment = segment
 
@@ -574,6 +602,7 @@ class SatelliteSession:
         sent is reset and cancelled, then `follow_up_timeout`, the `IDLE` visual and status
         `idle`. No cue and no disarm: listening goes on (design.md §4.1 step 7, PR #29 S1)."""
         self._follow_up_deadline = None
+        self._window_playback_id = None
         assert self._listen_id is not None
         if self._open_wake is not None:
             await self._command(ResetWakeCandidate(self._listen_id, self._open_wake))
@@ -732,6 +761,7 @@ class SatelliteSession:
                 self._logger.info("played playback_id=%s (%.1f s)", playback_id, audio_seconds)
         # The follow-up window opens only after audio that played to its end (T-020).
         self._follow_up_next = request.listen_after and began and not stopped
+        self._follow_up_playback_id = request.playback_id if self._follow_up_next else None
         if stopped:
             if began:  # also after PlaybackEnd: the device may still be playing
                 await self._command(PlaybackStop(playback_id))
@@ -775,6 +805,7 @@ class SatelliteSession:
             assert event == finished, f"expected {finished}, got {event}"
             self._logger.info("played playback_id=%s (a URL)", playback_id)
         self._follow_up_next = request.listen_after and not stopped
+        self._follow_up_playback_id = request.playback_id if self._follow_up_next else None
         if stopped:
             if sent:
                 await self._command(PlaybackStop(playback_id))
@@ -831,6 +862,8 @@ class SatelliteSession:
         self._listen_id = None
         self._bare_wake = None
         self._follow_up_next = False  # a disconnect ends the follow-up window, with no event
+        self._follow_up_playback_id = None
+        self._window_playback_id = None
         self._follow_up_deadline = None
         await self._abandon_segment()
         self._cancel_wake()  # every `wake` ends with transcript_final or wake_cancelled

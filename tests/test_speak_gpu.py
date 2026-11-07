@@ -39,7 +39,9 @@ OK_HEAD = b"HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nConnection: close\r\n\
 class AnyUtteranceStt:
     """Every segment is the accepted wake phrase."""
 
-    def create_streaming_session(self, session_id: str, max_audio_seconds: float) -> Any:
+    def create_streaming_session(
+        self, session_id: str, max_audio_seconds: float, *, oneshot: object = None
+    ) -> Any:
         return FakeSttSession([], "Ryszardzie, która godzina?", 0.0)
 
 

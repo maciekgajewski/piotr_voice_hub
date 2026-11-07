@@ -67,6 +67,14 @@ class Transcriber(Protocol):
         ...
 
 
+class FinalObserver(Protocol):
+    """One follow-up final. The session attaches it only for that segment (T-023)."""
+
+    async def observe_final(
+        self, utterance_id: str, pcm: bytes, raw_joined: str, cleaned: str
+    ) -> None: ...
+
+
 type TranscriberFactory = Callable[[SttConfig], Transcriber]
 type FatalHandler = Callable[[str], NoReturn]
 
@@ -145,9 +153,16 @@ class FasterWhisperSpeechToText:
         _logger.info("STT model ready duration_seconds=%.2f", time.monotonic() - started_at)
 
     def create_streaming_session(
-        self, session_id: str, max_audio_seconds: float
+        self,
+        session_id: str,
+        max_audio_seconds: float,
+        *,
+        oneshot: FinalObserver | None = None,
     ) -> "FasterWhisperStreamingSttSession":
-        """`max_audio_seconds`: the segment cap (max_segment_seconds plus the pre-roll)."""
+        """`max_audio_seconds`: the segment cap (max_segment_seconds plus the pre-roll).
+
+        `oneshot` is set only for one follow-up segment on the study satellite (T-023).
+        """
         assert self._transcriber is not None, "start() the STT before creating sessions"
         return FasterWhisperStreamingSttSession(
             session_id,
@@ -156,6 +171,7 @@ class FasterWhisperSpeechToText:
             self._config,
             max_audio_seconds,
             self._on_fatal,
+            oneshot,
         )
 
 
@@ -176,7 +192,10 @@ class FasterWhisperStreamingSttSession:
         config: SttConfig,
         max_audio_seconds: float,
         on_fatal: FatalHandler,
+        oneshot: FinalObserver | None = None,
     ) -> None:
+        self._session_id = session_id
+        self._oneshot = oneshot
         self._transcriber = transcriber
         self._lock = lock
         self._on_fatal = on_fatal
@@ -300,6 +319,15 @@ class FasterWhisperStreamingSttSession:
         except Exception as error:
             self._on_fatal(f"STT {kind} transcription failed: {error!r}")
         text = self._preprocessor.preprocess(raw)
+        if kind == "final" and self._oneshot is not None:
+            # A capture failure must not drop the utterance or kill the process.
+            # `raw` is the joined segment text before cleanup (the DEBUG `raw` line below).
+            try:
+                await self._oneshot.observe_final(self._session_id, pcm, raw, text)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._logger.error("STT one-shot capture failed: %s", type(error).__name__)
         self._logger.debug("STT %s transcript raw=%r text=%r", kind, raw, text)
         self._logger.debug(
             "STT %s done audio_seconds=%.2f beam_size=%s duration_seconds=%.2f",

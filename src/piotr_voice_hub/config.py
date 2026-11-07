@@ -83,6 +83,20 @@ class TtsConfig:
     voice: str
 
 
+# The only satellite a one-shot STT capture may name (T-023, design.md §7.1).
+STUDY_SATELLITE_ID = "voice-pe-03"
+MAX_CAPTURE_DIRECTORY_CHARS = 200
+
+
+@dataclass(frozen=True)
+class SttCaptureConfig:
+    """Optional. Absent from the file means off. `enabled` false does not touch the disk."""
+
+    enabled: bool
+    satellite: str
+    directory: str
+
+
 @dataclass(frozen=True)
 class HubConfig:
     log_level: str
@@ -93,6 +107,7 @@ class HubConfig:
     stt: SttConfig
     speaker_recognition: SpeakerRecognitionConfig
     tts: TtsConfig
+    stt_capture: SttCaptureConfig | None = None
 
     def redacted(self) -> "HubConfig":
         """A copy safe to log: satellite API keys replaced."""
@@ -167,19 +182,22 @@ def _parse_hub(raw: dict[str, Any]) -> HubConfig:
             "speaker_recognition",
             "tts",
         },
+        optional={"stt_capture"},
     )
     log_level = _str(raw, "log_level", "")
     if log_level not in LOG_LEVELS:
         raise ConfigError(f"log_level: must be one of {', '.join(LOG_LEVELS)}, got {log_level!r}")
+    satellites = _parse_satellites(_section(raw, "satellites", ""))
     return HubConfig(
         log_level=log_level,
         api=_parse_api(_section(raw, "api", "")),
         playback_http=_parse_playback(_section(raw, "playback_http", "")),
-        satellites=_parse_satellites(_section(raw, "satellites", "")),
+        satellites=satellites,
         wake_phrase=_str(raw, "wake_phrase", ""),
         stt=_parse_stt(_section(raw, "stt", "")),
         speaker_recognition=_parse_speaker(_section(raw, "speaker_recognition", "")),
         tts=_parse_tts(_section(raw, "tts", "")),
+        stt_capture=_parse_stt_capture(raw, {s.id for s in satellites}),
     )
 
 
@@ -270,6 +288,35 @@ def _parse_speaker(raw: dict[str, Any]) -> SpeakerRecognitionConfig:
     )
 
 
+def _parse_stt_capture(raw: dict[str, Any], device_ids: set[str]) -> SttCaptureConfig | None:
+    """Absent section: off, and the hub does not look at a capture directory."""
+    if "stt_capture" not in raw:
+        return None
+    section = _section(raw, "stt_capture", "")
+    _keys(section, "stt_capture", {"enabled", "satellite", "directory"})
+    satellite = _str(section, "satellite", "stt_capture")
+    if satellite != STUDY_SATELLITE_ID:
+        raise ConfigError(
+            f"stt_capture.satellite: must be {STUDY_SATELLITE_ID!r}, got {satellite!r}"
+        )
+    directory = _str(section, "directory", "stt_capture")
+    if (
+        len(directory) > MAX_CAPTURE_DIRECTORY_CHARS
+        or "\x00" in directory
+        or not Path(directory).is_absolute()
+        or ".." in Path(directory).parts
+        or any(c.isspace() for c in directory)
+    ):
+        raise ConfigError(
+            "stt_capture.directory: must be an absolute path without '..' or whitespace, "
+            f"at most {MAX_CAPTURE_DIRECTORY_CHARS} characters"
+        )
+    enabled = _bool(section, "enabled", "stt_capture")
+    if enabled and satellite not in device_ids:
+        raise ConfigError(f"stt_capture: {satellite} is not a configured satellite")
+    return SttCaptureConfig(enabled=enabled, satellite=satellite, directory=directory)
+
+
 def _parse_tts(raw: dict[str, Any]) -> TtsConfig:
     # No `volume` (T-017 follow-up): `speak` sets one only when the command passes it.
     _keys(raw, "tts", {"uri", "voice"})
@@ -358,6 +405,13 @@ def _keys(
     missing = sorted(required - set(raw))
     if missing:
         raise ConfigError(f"{path}: missing key(s): {', '.join(missing)}")
+
+
+def _bool(raw: dict[str, Any], key: str, path: str) -> bool:
+    value = raw[key]
+    if not isinstance(value, bool):
+        raise ConfigError(f"{_where(path, key)}: must be a boolean, got {value!r}")
+    return value
 
 
 def _str(raw: dict[str, Any], key: str, path: str) -> str:

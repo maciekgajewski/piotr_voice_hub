@@ -99,6 +99,12 @@ Task notes (they go into each task's plan.md):
   `play_follow_up_ready_cue`, the follow-up-ready state plays **no sound** and shows only the
   `LISTENING` visual; neither substitute cue is used.
 
+## Diagnostics
+
+| Task | Scope | Status |
+| --- | --- | --- |
+| T-023 stt-oneshot-capture | One default-off follow-up final on `voice-pe-03`: PCM at the STT boundary and Whisper text before cleanup, plus a client that sends `release` and never `play`/`speak`. No public API change. Not deployed. | in progress |
+
 ## P2 (design.md §11), for reference
 
 Not numbered yet: firmware trimmed to continuous mode and reflashed (including the cue

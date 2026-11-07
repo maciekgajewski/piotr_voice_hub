@@ -10,6 +10,7 @@ from typing import Protocol
 
 from piotr_voice_hub.config import HubConfig
 from piotr_voice_hub.hub.watchdog import Watchdog, heartbeat
+from piotr_voice_hub.stt.capture import CaptureError, OneShotSttCapture
 from piotr_voice_hub.tts.interfaces import TextToSpeech, TtsError, TtsUnavailableError
 
 EXIT_OK = 0
@@ -204,6 +205,24 @@ async def check_tts(
             return True
 
 
+def build_oneshot(config: HubConfig) -> OneShotSttCapture | None:
+    """None unless capture is enabled and the directory is already usable.
+
+    A missing parent or a bad mode does not exit the process: Docker would restart that
+    forever. The study simply stays disarmed. Deletion is a host `at` job, not this process.
+    """
+    chosen = config.stt_capture
+    if chosen is None or not chosen.enabled:
+        return None
+    capture = OneShotSttCapture(chosen)
+    try:
+        capture.prepare()
+    except CaptureError as error:
+        logger.critical("STT one-shot capture left disarmed: %s", error)
+        return None
+    return capture
+
+
 async def run_hub(config: HubConfig) -> int:
     """Build the real components and run them (not unit-tested: it needs the GPU and the LAN;
     covered by the live check, T-012 log)."""
@@ -222,6 +241,7 @@ async def run_hub(config: HubConfig) -> int:
     tts = WyomingPiperTts(config.tts)
     if not await check_tts(tts):
         return EXIT_FAILED
+    oneshot = build_oneshot(config)
     stt = FasterWhisperSpeechToText(config.stt)
     # No startup check: the hint is optional, a failure is a null speaker (T-018 plan).
     speaker = HttpSpeakerRecognition(config.speaker_recognition)
@@ -229,6 +249,7 @@ async def run_hub(config: HubConfig) -> int:
     # All interfaces, like the API (design §9): the satellites fetch from the host's LAN IP.
     playback = PlaybackHttpServer("0.0.0.0", config.playback_http.port)
     vad_session = load_session()
+    study = None if config.stt_capture is None else config.stt_capture.satellite
     sessions = [
         SatelliteSession(
             s,
@@ -239,6 +260,7 @@ async def run_hub(config: HubConfig) -> int:
             api.publish,
             tts=tts,
             speaker=speaker,
+            oneshot=None if oneshot is None or s.id != study else oneshot.bind(s.id),
         )
         for s in config.satellites
     ]
@@ -253,4 +275,6 @@ async def run_hub(config: HubConfig) -> int:
     try:
         return await run_until_signal(stt, api, sessions, names, Watchdog())
     finally:
+        if oneshot is not None:
+            oneshot.close()
         await playback.close()
