@@ -9,6 +9,7 @@ be used for this study.
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -19,7 +20,8 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from piotr_voice_hub.config import STUDY_SATELLITE_ID
-from piotr_voice_hub.stt_oneshot_client import ClientError, write_play_id
+from piotr_voice_hub.stt.capture import ARM_NAME, PLAY_NAME
+from piotr_voice_hub.stt_oneshot_client import ClientError, _preflight_directory, write_play_id
 
 OPEN_TIMEOUT_SECONDS = 3.0
 SEND_TIMEOUT_SECONDS = 10.0
@@ -82,8 +84,21 @@ def on_play_message(message: dict[str, Any], playback_id: str | None, satellite:
     return "ignore"
 
 
+def refuse_leftover_study_files(directory: Path) -> None:
+    """`PLAY` or `ARM` from an earlier run must be gone before any audio is sent."""
+    _preflight_directory(directory)
+    for name in (PLAY_NAME, ARM_NAME):
+        path = directory / name
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        raise ClientError(f"{name} is already present; not sending play")
+
+
 async def run(args: argparse.Namespace) -> int:
     """One `play`, then wait for its `playback_finished`. Transcripts are not answered."""
+    refuse_leftover_study_files(args.directory)
     sent = play_command(args.satellite, args.url)
     try:
         async with connect(

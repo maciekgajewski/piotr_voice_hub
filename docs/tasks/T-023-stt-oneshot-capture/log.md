@@ -45,3 +45,20 @@
   A missing capture directory disarms the feature and leaves the hub up.
 - `make check`: 985 passed, 8 skipped. `at` still absent. Not capture-ready. Not merged.
   Not deployed.
+- Review of `afd73b6` (CHANGES NEEDED): the production compose bind made every
+  `docker compose up` require the capture directory, and `rm -rf` of that directory
+  removed the bind source so the next restart could not start. Carry-forwards, not
+  done here: N2 (`for_playback` stays duck-typed), N3 (`close()` stays a log line).
+  N6 is noted in the runbook (multi-segment `raw_text` can mismatch). N7 is a comment
+  on the synchronous write. Duplicate `_check_ws` stays.
+- Fix on this branch: the bind moved to `docker-compose.stt-oneshot.yml`, used only
+  with an extra `-f`. Production `docker-compose.yml` has no capture volume. Cleanup
+  and teardown are `find -P <directory> -mindepth 1 -delete`: contents only, so the
+  bind source remains for a later start. `atrm` runs only after that command returns
+  0. `_unlink` logs an `OSError` at ERROR and does not cancel the job. The play client
+  refuses an existing `PLAY` or `ARM` before it connects. A session test opens the
+  window with `play` of a URL and checks `for_playback` of that playback id. The
+  runbook requires zero other answering clients and one absolute path for `$DIR`,
+  `HUB_STT_CAPTURE`, and the `at` job.
+- `make check`: 987 passed, 8 skipped. `at` still absent. Not capture-ready. The
+  restart-after-cleanup behaviour is not verified on the host. Not merged. Not deployed.

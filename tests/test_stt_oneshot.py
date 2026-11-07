@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-import shutil
 import stat
 from datetime import datetime
 from pathlib import Path
@@ -46,7 +45,17 @@ from piotr_voice_hub.stt_oneshot_client import (
     verify_cleanup_job,
     write_play_id,
 )
-from piotr_voice_hub.stt_oneshot_play import on_play_message, play_command
+from piotr_voice_hub.stt_oneshot_play import (
+    on_play_message,
+    play_command,
+    refuse_leftover_study_files,
+)
+from piotr_voice_hub.stt_oneshot_play import (
+    parse_args as play_parse,
+)
+from piotr_voice_hub.stt_oneshot_play import (
+    run as play_run,
+)
 
 STUDY = "voice-pe-03"
 PLAYBACK = "pb-1"
@@ -598,18 +607,54 @@ def test_play_client_sends_one_play_and_ignores_transcripts() -> None:
     assert playback_id == "pb-study"
 
 
-def test_runbook_uses_the_container_mount_not_a_host_only_path() -> None:
+def test_a_leftover_play_file_is_refused_before_a_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "cap"
+    directory.mkdir()
+    os.chmod(directory, 0o700)
+    (directory / "PLAY").write_bytes(b"voice-pe-03\npb-old\n")
+
+    def connected(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("play connected")
+
+    monkeypatch.setattr("piotr_voice_hub.stt_oneshot_play.connect", connected)
+    with pytest.raises(ClientError, match="PLAY"):
+        refuse_leftover_study_files(directory)
+    args = play_parse(
+        [
+            "--confirm-one-play",
+            "--satellite",
+            STUDY,
+            "--ws",
+            "ws://127.0.0.1:9/ws",
+            "--directory",
+            str(directory),
+            "--url",
+            "https://example.com/a.wav",
+        ]
+    )
+    with pytest.raises(ClientError, match="PLAY"):
+        asyncio.run(play_run(args))
+
+
+def test_production_compose_does_not_require_the_capture_directory() -> None:
     root = Path(__file__).resolve().parent.parent
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    override = (root / "docker-compose.stt-oneshot.yml").read_text(encoding="utf-8")
     design = (root / "docs" / "design.md").read_text(encoding="utf-8")
     runbook = (root / "docs" / "tasks" / "T-023-stt-oneshot-capture" / "runbook.md").read_text(
         encoding="utf-8"
     )
-    assert "target: /stt-oneshot" in compose
+    assert "target: /stt-oneshot" not in compose
+    assert "HUB_STT_CAPTURE" not in compose
+    assert "target: /stt-oneshot" in override
+    assert "create_host_path: false" in override
     assert "directory: /stt-oneshot" in design
-    assert "directory: /home/maciek/probe" not in design
-    assert "/stt-oneshot" in runbook
+    assert "find -P" in runbook
+    assert "zero clients" in runbook or "no other API client" in runbook
     assert "speak_test" in runbook
+    assert "same absolute directory" in runbook or "same path" in runbook
 
 
 def test_arm_file_names_the_playback_and_disarm_removes_it(tmp_path: Path) -> None:
@@ -675,28 +720,29 @@ def test_cleanup_job_must_match_path_deadline_and_one_rm(tmp_path: Path) -> None
         verify_cleanup_job("7", directory, when, "7\twhenever a user\n", _at_c(directory), now=now)
 
 
-def test_teardown_deletes_the_directory_before_cancelling_the_job(tmp_path: Path) -> None:
+def test_teardown_deletes_contents_before_cancelling_the_job(tmp_path: Path) -> None:
     directory = tmp_path / "cap"
     directory.mkdir()
-    (directory / "stt-oneshot-utt.pcm.partial").write_bytes(b"\x00\x00")
+    partial = directory / "stt-oneshot-utt.pcm.partial"
+    partial.write_bytes(b"\x00\x00")
     calls: list[list[str]] = []
 
     def run(argv: list[str]) -> int:
         calls.append(argv)
-        if argv[0] == "rm":
-            assert (directory / "stt-oneshot-utt.pcm.partial").is_file()
-            shutil.rmtree(directory)
+        if argv[:2] == ["find", "-P"]:
+            assert partial.is_file() and directory.is_dir()
+            partial.unlink()
+            assert directory.is_dir()
             return 0
-        assert not directory.exists()
         return 0
 
     teardown(directory, "7", run)
-    assert calls[0][:3] == ["rm", "-rf", "--"]
-    assert calls[0][3] == str(directory)
+    assert calls[0] == ["find", "-P", str(directory), "-mindepth", "1", "-delete"]
     assert calls[1] == ["atrm", "7"]
+    assert directory.is_dir() and not partial.exists()
 
-    def fail_rm(argv: list[str]) -> int:
+    def fail_delete(_argv: list[str]) -> int:
         return 1
 
     with pytest.raises(ClientError, match="still queued"):
-        teardown(directory, "7", fail_rm)
+        teardown(directory, "7", fail_delete)

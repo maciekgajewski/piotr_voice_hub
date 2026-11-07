@@ -61,9 +61,16 @@ def parse_arm(body: bytes) -> str | None:
     return playback_id
 
 
+def cleanup_argv(directory: Path) -> list[str]:
+    """Delete the directory's contents, including partials, and leave the directory.
+
+    The directory is the compose bind source. Removing it makes the next container start fail.
+    """
+    return ["find", "-P", str(directory), "-mindepth", "1", "-delete"]
+
+
 def cleanup_command(directory: Path) -> str:
-    """The only host command that may delete a capture directory, partials included."""
-    return f"rm -rf -- {directory}"
+    return " ".join(cleanup_argv(directory))
 
 
 class OneShotSttCapture:
@@ -94,7 +101,7 @@ class OneShotSttCapture:
         self._logger.info("one-shot capture ready directory=%s disarmed=true", self._directory)
 
     def close(self) -> None:
-        """The host `at` job deletes the directory. Shutdown does not."""
+        """The host `at` job deletes the contents. Shutdown does not."""
         self._logger.info("one-shot capture closed; host at job owns deletion")
 
     async def observe_final(
@@ -259,6 +266,7 @@ def _payload(
 
 
 def _write_pair(directory: Path, stem: str, pcm: bytes, payload: dict[str, Any]) -> None:
+    """Synchronous: at most 640000 bytes on local disk, on the event loop (review N7)."""
     pcm_tmp = directory / f"{stem}.pcm.partial"
     json_tmp = directory / f"{stem}.json.partial"
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
@@ -296,5 +304,7 @@ def _unlink(path: Path) -> None:
         os.unlink(path)
     except FileNotFoundError:
         return
-    except OSError:
-        return
+    except OSError as error:
+        logging.getLogger(__name__).error(
+            "one-shot capture could not remove %s: %s", path.name, error.strerror
+        )

@@ -36,12 +36,15 @@ A bad path disarms capture and leaves the hub up. `ARM` (mode 0600, age ≤ 120 
 playback id. Only that follow-up final is written: PCM (≤ 640000 bytes), `raw_joined`,
 `cleaned_text`, and ids. No scores. The hub does not delete the directory.
 
-The host `at` job `rm -rf -- <directory>` is the deleter, including partials. The capture
-client checks `at -c` and the `atq` deadline and does not write `ARM` if that check is
-uncertain. `at` is not installed; that prerequisite is unsatisfied. Teardown deletes the
-directory before `atrm`. The play client sends one `play` and ignores transcripts. The
-capture client connects first, then arms, and `release`s an accepted transcript without
-playing. Empty `cleaned_text` has no `transcript_final`.
+The host `at` job `find -P <directory> -mindepth 1 -delete` removes the contents,
+including partials, and leaves the directory. The production compose does not bind it;
+`docker-compose.stt-oneshot.yml` does, and only when that file is passed with `-f`.
+The capture client checks `at -c` and the `atq` deadline and does not write `ARM` if
+that check is uncertain. `at` is not installed; that prerequisite is unsatisfied.
+Teardown runs the same `find` and calls `atrm` only after it returns 0. The play
+client refuses a leftover `PLAY` or `ARM` before it connects, sends one `play`, and
+ignores transcripts. The capture client connects first, then arms, and `release`s an
+accepted transcript without playing. Empty `cleaned_text` has no `transcript_final`.
 
 ## Out of scope
 
@@ -50,7 +53,10 @@ URL, deploying, and reading `~/probe` evidence.
 
 ## Acceptance
 
-- Tests: default-off, wrong satellite, overflow, arm age, repeated finals, cancel, client
-  disconnect, no `speak`/`play`, `release` only.
+- Tests: default-off, production compose has no capture bind, missing directory leaves the
+  hub up, wrong satellite, overflow, arm age, one playback only (including a real `play`
+  URL), `at -c` must match the contents-only cleanup, teardown does not `atrm` if delete
+  fails, play refuses a leftover `PLAY` before sending, empty `cleaned_text`, `release`
+  matches the file, no second `play`.
 - `make check`.
-- Manual checklist in the PR, for a later run Maciej approves. No hardware in this task.
+- Manual checklist in the runbook. No hardware in this task. `at` is still unsatisfied.

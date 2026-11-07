@@ -1,0 +1,15 @@
+# Study-only override for T-023. A normal `docker compose up` does not use this file.
+#
+#   mkdir -m 0700 -p "${HUB_STT_CAPTURE:-$HOME/.cache/piotr_voice_hub/stt-oneshot}"
+#   docker compose -f docker-compose.yml -f docker-compose.stt-oneshot.yml up -d hub
+#
+# create_host_path is false: Docker must not create the directory as root. If the host
+# directory is missing, this override fails at compose start. Drop the -f file to return
+# to the production compose, which has no /stt-oneshot bind.
+services:
+  hub:
+    volumes:
+      - type: bind
+        source: "${HUB_STT_CAPTURE:-${HOME}/.cache/piotr_voice_hub/stt-oneshot}"
+        target: /stt-oneshot
+        bind: {create_host_path: false}

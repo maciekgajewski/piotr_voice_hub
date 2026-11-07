@@ -2,9 +2,10 @@
 
 Connect first. Write `ARM` only after a host `at` job has been verified with `at -c`
 (not `atq` alone) and after `playback_finished` for that playback has
-`listening_for_follow_up` true. The job must be exactly `rm -rf -- <directory>` at the
-deadline the operator names, and that deadline must still be in the future. If `at` is
-missing or any check is uncertain, this process exits before `ARM`.
+`listening_for_follow_up` true. The job must be exactly
+`find -P <directory> -mindepth 1 -delete` at the deadline the operator names, and
+that deadline must still be in the future. If `at` is missing or any check is
+uncertain, this process exits before `ARM`.
 
 `at` is not installed on the preparation host. Nothing here installs it or claims the
 study can be armed.
@@ -14,7 +15,8 @@ capture file's utterance must be the one that was released, unless cleanup left 
 empty: then there is no `transcript_final` and nothing to release.
 
 Deletion is the host job, including after a hub crash, and only when `atd` runs. A reboot
-runs a due job only if `atd` starts. Teardown removes the directory before `atrm`.
+runs a due job only if `atd` starts. Teardown removes the directory contents before
+`atrm`, and only then.
 """
 
 import argparse
@@ -44,6 +46,7 @@ from piotr_voice_hub.stt.capture import (
     FILE_MODE,
     PLAY_NAME,
     arm_body,
+    cleanup_argv,
     cleanup_command,
     parse_arm,
 )
@@ -149,7 +152,7 @@ def verify_cleanup_job(
     *,
     now: datetime,
 ) -> None:
-    """Fail closed unless this job is the one future `rm -rf` of `directory`.
+    """Fail closed unless this job is the one future contents-only cleanup of `directory`.
 
     `atq` only supplies the id and the deadline. The command text comes from `at -c`.
     """
@@ -163,19 +166,23 @@ def verify_cleanup_job(
     if when <= now:
         raise ClientError("at job deadline is not in the future")
     expected = cleanup_command(directory)
-    rm_lines = [line for line in at_c_text.splitlines() if line.startswith("rm ")]
-    if rm_lines != [expected]:
+    cleanup_lines = [line for line in at_c_text.splitlines() if line.startswith(("rm ", "find "))]
+    if cleanup_lines != [expected]:
         raise ClientError("at -c does not show exactly one cleanup of this directory")
 
 
 def teardown(directory: Path, job_id: str, run: Callable[[list[str]], int]) -> None:
-    """Delete the directory first. Cancel the job only after that removal succeeds."""
+    """Delete the directory contents first. Cancel the job only after that succeeds.
+
+    The directory itself stays, so a later container start can still bind it. A failed
+    delete leaves the `at` job queued.
+    """
     if not re.fullmatch(r"[0-9]+", job_id):
         raise ClientError("at job id must be digits")
-    if run(["rm", "-rf", "--", str(directory)]) != 0:
-        raise ClientError("directory was not removed; the at job is still queued")
+    if run(cleanup_argv(directory)) != 0:
+        raise ClientError("capture files were not removed; the at job is still queued")
     if run(["atrm", job_id]) != 0:
-        raise ClientError("directory removed but atrm failed")
+        raise ClientError("files removed but atrm failed")
 
 
 def arm(directory: Path, playback_id: str, *, now: float | None = None) -> None:
@@ -198,7 +205,7 @@ def arm(directory: Path, playback_id: str, *, now: float | None = None) -> None:
 
 
 def disarm(directory: Path) -> None:
-    """Remove `ARM` if it is still there. The host `at` job deletes the directory."""
+    """Remove `ARM` if it is still there. The host `at` job deletes the contents."""
     try:
         os.unlink(directory / ARM_NAME)
     except FileNotFoundError:

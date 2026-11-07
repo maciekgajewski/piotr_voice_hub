@@ -262,9 +262,10 @@ There is no default volume: `speak` changes the satellite's volume only when the
 
 Not part of normal operation. Omit `stt_capture` and the hub never reads or writes a capture
 file. The section is optional; when present every key below is required, and `satellite` must
-be `voice-pe-03`. The directory is the path **inside the hub container**, the bind mount
-`/stt-oneshot` (compose volume from a host directory mode `0700` owned by `HUB_USER`). A host
-path such as `/home/maciek/probe/...` is not that mount: its parent is missing in the
+be `voice-pe-03`. The directory is the path **inside the hub container**, `/stt-oneshot`, from the study-only
+compose file `docker-compose.stt-oneshot.yml` (a host directory mode `0700` owned by
+`HUB_USER`). The production compose file does not mount it. A host path such as
+`/home/maciek/probe/...` is not that mount: its parent is missing in the
 container. A missing or unusable directory leaves capture disarmed and the hub stays up
 (it does not exit, so Docker does not restart-loop). The runbook is
 `docs/tasks/T-023-stt-oneshot-capture/runbook.md`.
@@ -284,11 +285,14 @@ a different playback leaves `ARM`. One pair, mode `0600`, at most 640000 PCM byt
 - `stt-oneshot-<utterance_id>.json` — ids, format, `raw_joined` (the joined text before
   cleanup), and `cleaned_text`. No segment scores.
 
-The hub does not delete the directory. Deletion is one host `at` job, `rm -rf --` that
-directory, including partials, checked with `at -c` before `ARM` is written. `atq` alone is
-not enough. The job runs only if `atd` runs, including a due job after reboot. `at` is not
-installed here; that prerequisite is unsatisfied. The capture client sends `release` and
-never `play` or `speak`. The play-only client sends one `play` and ignores transcripts.
+The hub does not delete the files. Deletion is one host `at` job,
+`find -P <directory> -mindepth 1 -delete`, checked with `at -c` before `ARM` is written.
+It removes the contents, including partials, and leaves the directory so a later container
+start can still bind it. `atq` alone is not enough. The job runs only if `atd` runs,
+including a due job after reboot. The bind is not in the production compose file; it is
+`docker-compose.stt-oneshot.yml`, used only with an extra `-f`. `at` is not installed
+here; that prerequisite is unsatisfied. The capture client sends `release` and never
+`play` or `speak`. The play-only client sends one `play` and ignores transcripts.
 `tools/speak_test.py` answers every transcript and is not used here.
 
 Language is not configurable: Polish is fixed.

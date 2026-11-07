@@ -2384,6 +2384,40 @@ async def _test_oneshot_follow_up_release() -> None:
     assert not any(isinstance(c, tuple) and c[0] == "url" for c in commands)
 
 
+def test_oneshot_follows_the_play_url_that_opened_the_window() -> None:
+    """The study path is `play`, not `speak`. The hook must see that playback id."""
+    asyncio.run(_test_oneshot_follows_play_url())
+
+
+async def _test_oneshot_follows_play_url() -> None:
+    h = Harness(reply_timeout=10)
+
+    class _Hook:
+        def __init__(self) -> None:
+            self.playback_id: str | None = None
+            self.bound = object()
+
+        def for_playback(self, playback_id: str) -> object:
+            self.playback_id = playback_id
+            return self.bound
+
+    hook = _Hook()
+    h.session._oneshot = cast(FinalObserver, hook)
+    h.stt.say("u2", "Tak.", ())
+    await accepted(h)
+    playback_id = h.session.play(URL, listen_after=True)
+    await h.until(lambda: len(h.driver.starts()) == 2 and h.events[-1:] == [LISTENING])
+    h.driver.push(*segments("u2")(h.driver.starts()[1].listen_id))
+    await h.until(lambda: len(h.hub(TranscriptFinal)) == 2)
+    h.session.release()
+    await h.until(lambda: h.events[-1:] == [IDLE])
+    await h.stop()
+    assert hook.playback_id == playback_id
+    assert h.stt.oneshots[-1] == ("u2", hook.bound)
+    assert ("url", URL) in h.driver.without_ids()
+    assert CueType.TIMEOUT not in h.driver.without_ids()
+
+
 def request_partial(said: str) -> str:
     """What the fake STT's one partial (the first word) gives in the window."""
     first = said.split()[0]
