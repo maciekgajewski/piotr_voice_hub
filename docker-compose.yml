@@ -22,7 +22,15 @@ services:
     init: true  # forwards SIGTERM; reaps; `docker compose stop` → clean shutdown, exit 0
     stop_grace_period: 30s  # shutdown is bounded: run() 10 s, sessions 3 s, API 5 s
     network_mode: host  # satellites on the LAN, .local names via zeroconf; API on api.port
-    gpus: all
+    # CDI device nvidia.com/gpu=all (/var/run/cdi/nvidia.yaml, regenerated at boot).
+    # Not `gpus: all`: the nvidia hook's majors 195 and 511 do not survive daemon-reload.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: cdi
+              device_ids: ["nvidia.com/gpu=all"]
+              capabilities: [gpu]
     # The hub checks Piper at startup (T-016). This orders `docker compose up` only: after a
     # reboot or a daemon restart Docker starts both at once, and the hub's check then waits for
     # Piper to listen (WARNING lines meanwhile): new attempts for 120 s, so about 137 s at most
@@ -68,7 +76,14 @@ services:
     restart: unless-stopped
     init: true
     network_mode: host
-    gpus: all
+    # Same CDI reservation as hub (T-024). No `gpus: all`, no nvidia runtime hook.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: cdi
+              device_ids: ["nvidia.com/gpu=all"]
+              capabilities: [gpu]
     command: ["--uri", "tcp://127.0.0.1:10201", "--voice", "pl_PL-bass-high",
               "--data-dir", "/opt/piper/voices"]
     logging:
