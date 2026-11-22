@@ -105,6 +105,7 @@ Task notes (they go into each task's plan.md):
 | --- | --- | --- |
 | T-023 stt-oneshot-capture | One default-off follow-up final on `voice-pe-03`: PCM at the STT boundary and Whisper text before cleanup, plus a client that sends `release` and never `play`/`speak`. No public API change. Not deployed. | in progress |
 | T-024 cdi-gpu | CDI GPU reservation (`nvidia.com/gpu=all`) for `hub` and `piper`, so `systemctl daemon-reload` keeps device majors 195 and 511. Speaker recognition stays CPU-only. Not deployed. | in progress |
+| T-026 play-flac-16bit | Narrow `play` to WAV, MP3 and 16-bit FLAC (design.md §6); log satellite `esphome_version`/`project_version` at connect; add a 16-bit JFK FLAC for E1/E6. No deploy. | in progress |
 
 ## P2 (design.md §11), for reference
 

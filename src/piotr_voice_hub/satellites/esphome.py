@@ -76,6 +76,7 @@ from typing import Any, Protocol, cast
 from aioesphomeapi.client import APIClient
 from aioesphomeapi.core import APIConnectionError
 from aioesphomeapi.model import (
+    DeviceInfo,
     MediaPlayerCommand,
     MediaPlayerEntityState,
     MediaPlayerInfo,
@@ -214,6 +215,8 @@ class EsphomeClient(Protocol):
     async def disconnect(self, force: bool = False) -> None: ...
 
     async def list_entities_services(self) -> tuple[list[Any], list[Any]]: ...
+
+    async def device_info(self) -> DeviceInfo: ...
 
     @property
     def connected_address(self) -> str | None: ...
@@ -484,6 +487,7 @@ class EsphomeSatellite:
                 "player's announcement): %s",
                 no_response,
             )
+        firmware = await self._firmware_summary(client)
         players = [entity for entity in entities if isinstance(entity, MediaPlayerInfo)]
         self._media_player_key = players[0].key if players else None
         if not players:
@@ -509,7 +513,16 @@ class EsphomeSatellite:
         if self._media_player_key is not None:
             client.subscribe_states(partial(self._on_state, client))
         self._client = client  # published before the stray-play check: its states count
-        self._logger.info("connected to %s", self._address())
+        if firmware is None:
+            self._logger.info("connected to %s", self._address())
+        else:
+            self._logger.info(
+                "connected to %s esphome_version=%s project=%s %s",
+                self._address(),
+                firmware.esphome_version,
+                firmware.project_name,
+                firmware.project_version,
+            )
         if self._media_player_key is not None:
             try:
                 await self._stop_stray_player(client, self._media_player_key)
@@ -517,6 +530,15 @@ class EsphomeSatellite:
                 await self._drop_client()  # never leave a half-checked connection behind
                 raise
         self._ready = True  # last: nothing uses the device before the check
+
+    async def _firmware_summary(self, client: EsphomeClient) -> DeviceInfo | None:
+        """Loggable DeviceInfo from a finished login; None if the call fails (connect goes on)."""
+        try:
+            async with asyncio.timeout(SERVICE_TIMEOUT_SECONDS):
+                return await client.device_info()
+        except EXPECTED_ERRORS as error:
+            self._logger.warning("device_info failed: %r", error)
+            return None
 
     async def _stop_stray_player(self, client: EsphomeClient, key: int) -> None:
         """Stop the media player if it is busy at connect, before the first arm (review B): a

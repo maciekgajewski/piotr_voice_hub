@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pytest
 from aioesphomeapi.model import (
+    DeviceInfo,
     MediaPlayerCommand,
     MediaPlayerEntityState,
     MediaPlayerInfo,
@@ -137,6 +138,14 @@ class FakeClient:
         self.response_delay = 0.0
         self.entities: list[Any] = [MEDIA_PLAYER]
         self.connected_address: str | None = "127.0.0.1"
+        self.info = DeviceInfo.from_dict(
+            {
+                "esphome_version": "2025.10.0",
+                "project_name": "esphome.home-assistant-voice-pe",
+                "project_version": "25.10.0",
+            }
+        )
+        self.device_info_error: Exception | None = None
         self.media_commands: list[dict[str, Any]] = []
         self.fetch = True  # the media player GETs an announced URL
         self.fetch_mode = "all"  # "all"; "drop" or "stall" after `fetch_bytes` (review B1)
@@ -188,6 +197,13 @@ class FakeClient:
             for name in self.services
         ]
         return list(self.entities), services
+
+    async def device_info(self) -> DeviceInfo:
+        if "device_info" in self.hang:
+            await asyncio.Event().wait()
+        if self.device_info_error is not None:
+            raise self.device_info_error
+        return self.info
 
     async def execute_service(
         self, service: Any, data: dict[str, Any], **kwargs: Any
@@ -815,6 +831,40 @@ def test_missing_optional_services_are_logged_at_connect_and_skipped(
         assert "firmware has no play_follow_up_ready_cue service" in caplog.text
 
     with caplog.at_level(logging.WARNING):
+        asyncio.run(run())
+
+
+def test_device_info_is_logged_at_connect(caplog: pytest.LogCaptureFixture) -> None:
+    async def run() -> None:
+        mic, _clients = make()
+        await mic.send_output_event(SetVisualState(VisualState.IDLE))
+        assert (
+            "connected to 10.0.0.5:6053 esphome_version=2025.10.0 "
+            "project=esphome.home-assistant-voice-pe 25.10.0"
+        ) in caplog.text
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(run())
+
+
+def test_device_info_failure_does_not_drop_the_connection(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def run() -> None:
+        mic, clients = make()
+
+        def setup(client: FakeClient) -> None:
+            client.device_info_error = TimeoutError("device_info hung")
+
+        clients.setup = setup
+        await mic.send_output_event(SetVisualState(VisualState.IDLE))
+        assert "device_info failed: TimeoutError('device_info hung')" in caplog.text
+        assert "connected to 10.0.0.5:6053" in caplog.text
+        assert "esphome_version=" not in caplog.text
+        assert clients.last.calls == ["set_visual_idle"]
+        assert clients.last.disconnects == 0
+
+    with caplog.at_level(logging.INFO):
         asyncio.run(run())
 
 
