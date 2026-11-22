@@ -36,7 +36,7 @@ refused public port). E5 has a pinned public clip from T-025 (see E5); it was no
 | tool | `https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/c64ebcf50cc9851d230d36e45933aaf3e8c042ce/tools/speak_test.py` | 200 text/plain 11188 |
 | CLIP11 (11.0 s, flac) | `https://raw.githubusercontent.com/openai/whisper/6e3be77e1a105e59086e3e21ff5f609fd6fa89a5/tests/jfk.flac` | 200 audio/flac 1152693 |
 | SPEECH (2.1 s, wav) | `https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/c64ebcf50cc9851d230d36e45933aaf3e8c042ce/tests/data/speech_pl_16k.wav` | 200 audio/wav 67290 |
-| BEEP (0.3 s, wav) | `https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/$SHA/tests/data/beep_16k.wav` | added in T-025; 200 only once `$SHA` is this PR's merge commit or later main. Not present at c64ebcf. |
+| BEEP (0.3 s, wav) | `https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/$BEEP_SHA/tests/data/beep_16k.wav` | added in T-025. `$BEEP_SHA` is the PR #36 merge commit (`beep_16k.wav` is not in c64ebcf); the literal value is filled in by the next PR. |
 | MISSING (404) | `https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/c64ebcf50cc9851d230d36e45933aaf3e8c042ce/tests/data/missing.wav` | 404 text/plain 14 |
 | REFUSED | `http://stream.radioparadise.com:8001/x.wav` | TCP refused (RST) in 24–106 ms, 3 of 3 |
 | RADIO | `http://stream.radioparadise.com/mp3-128` | 200 audio/mpeg, icy-name Radio Paradise |
@@ -48,7 +48,7 @@ Each `ssh piotr '…'` is a new shell: start each call with the setup line, and 
 braces: `<setup line> && { <step>; }`.
 
 ```
-export SHA=c64ebcf50cc9851d230d36e45933aaf3e8c042ce CLIP11=https://raw.githubusercontent.com/openai/whisper/6e3be77e1a105e59086e3e21ff5f609fd6fa89a5/tests/jfk.flac RADIO=http://stream.radioparadise.com/mp3-128 && export SPEECH=https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/$SHA/tests/data/speech_pl_16k.wav BEEP=https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/$SHA/tests/data/beep_16k.wav MISSING=https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/$SHA/tests/data/missing.wav REFUSED=http://stream.radioparadise.com:8001/x.wav && export ST="https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/$SHA/tools/speak_test.py" && curl -fsSI "$ST" >/dev/null && echo "SHA ok: $SHA"
+export SHA=c64ebcf50cc9851d230d36e45933aaf3e8c042ce CLIP11=https://raw.githubusercontent.com/openai/whisper/6e3be77e1a105e59086e3e21ff5f609fd6fa89a5/tests/jfk.flac RADIO=http://stream.radioparadise.com/mp3-128 && export SPEECH=https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/$SHA/tests/data/speech_pl_16k.wav MISSING=https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/$SHA/tests/data/missing.wav REFUSED=http://stream.radioparadise.com:8001/x.wav && export ST="https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/$SHA/tools/speak_test.py" && curl -fsSI "$ST" >/dev/null && echo "SHA ok: $SHA"
 ```
 
 - `docker exec` is always plain (no `-i`/`-t`) with `</dev/null`.
@@ -57,8 +57,10 @@ export SHA=c64ebcf50cc9851d230d36e45933aaf3e8c042ce CLIP11=https://raw.githubuse
 - Sessions are detached `tmux` sessions carrying `$SHA` (`-e`), output `2>&1 | tee ~/probe/…`.
 - One-shots (`--announce`) need no timeout: they exit after `playback_finished`, or after 120 s.
 - Tool commands use `${SHA:?…}` etc., so an unset variable stops them.
-- For E5, set `$SHA` to the T-025 merge commit (or later `main`). The Nov 16/22 session
-  used c64ebcf, which does not contain `beep_16k.wav`. Other steps may keep the production SHA.
+- E5 only: do not reuse `$SHA` (c64ebcf) for the beep, or the BEEP URL 404s.
+  `BEEP_SHA` = the PR #36 merge commit (`beep_16k.wav` is not in c64ebcf); the literal
+  value is filled in by the next PR. Then:
+  `export BEEP=https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${BEEP_SHA:?set BEEP_SHA, see the top}/tests/data/beep_16k.wav`
 
 **Stop line** (ends **every** `timeout` in the hub container; use only to end the current session):
 
@@ -144,6 +146,10 @@ Free check first; no session runs during E. After each case run the play grep an
 lines. Maciej only listens (and, where noted, wakes it once to confirm it is armed).
 
 **E1 (T-021 steps 2 and 5), announcement play, then busy during it.**
+CLIP11 is whisper `jfk.flac`. On 22 Nov it failed fast on the Voice PE (finding F-1:
+the 24-bit file does not play; cause under investigation in its own task). E1b used
+radio as the substitute (stop after 15 s; the Polish clip then got busy). See
+`hw_session_2026-11-22-results.md`.
 
 `{ docker exec piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-03 --play "${CLIP11:?see the top}" </dev/null & sleep 3; docker exec piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-03 --play "${SPEECH:?see the top}" </dev/null; echo "second exit=$?"; wait $!; echo "first exit=$?"; }`
 
@@ -184,8 +190,9 @@ vs LAN host).
 Record which of the two lines it produced. A refused LAN port remains **deferred**.
 
 **E5 (step 8), clip under 0.5 s.** A 0.3 s 880 Hz sine, 16 kHz 16-bit mono WAV
-(`tests/data/beep_16k.wav`, T-025). Pin `$SHA` to the T-025 merge commit or later `main`
-(not c64ebcf). Not run on 16 or 22 Nov.
+(`tests/data/beep_16k.wav`, T-025). Use `$BEEP_SHA` for the BEEP URL, not `$SHA`.
+`BEEP_SHA` = the PR #36 merge commit (`beep_16k.wav` is not in c64ebcf); the literal
+value is filled in by the next PR. Not run on 16 or 22 Nov.
 
 `{ docker exec piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-03 --play "${BEEP:?see the top}" </dev/null; echo "exit=$?"; }`
 
@@ -193,7 +200,8 @@ Record which of the two lines it produced. A refused LAN port remains **deferred
 Record the INFO line (duration).
 
 **E6 (step 9), https.** The same CLIP11 as E1 (E1/E2 already use HTTPS); kept as the Nov 1
-step, run cold on an idle satellite.
+step, run cold on an idle satellite. On 22 Nov this was deferred with F-1 (the 24-bit
+`jfk.flac` does not play on Voice PE; own task). E1b used radio as the long-clip substitute.
 
 `{ docker exec piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-03 --play "${CLIP11:?see the top}" </dev/null; echo "exit=$?"; }`
 
@@ -220,6 +228,7 @@ approved session only). The background tool runs inside the hub container and di
 `{ timeout 240 sh -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" piotr-voice-hub-hub-1)" = healthy ]; do sleep 2; done' && echo healthy; date -u +%FT%TZ; }`
 
 **F1 (T-021 step 11), hub restart while the radio plays.**
+Get a fresh OK from Maciej before rerunning.
 
 `{ docker exec piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-03 --play "${RADIO:?see the top}" </dev/null & sleep 10; date -u +%FT%TZ; docker restart piotr-voice-hub-hub-1 && date -u +%FT%TZ; wait; }`
 
@@ -239,6 +248,7 @@ Wait-for-healthy, then:
 Record which path. Free check: no API line since the restart, or `(0 clients)`.
 
 **F2 (T-021 step 11b), hub killed while the radio plays (connect check alone).**
+Get a fresh OK from Maciej before rerunning.
 
 `{ docker exec piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-03 --play "${RADIO:?see the top}" </dev/null & sleep 5; docker kill piotr-voice-hub-hub-1 && docker start piotr-voice-hub-hub-1 && date -u +%FT%TZ; wait; }`
 

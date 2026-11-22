@@ -104,8 +104,8 @@ Task notes (they go into each task's plan.md):
 | Task | Scope | Status |
 | --- | --- | --- |
 | T-023 stt-oneshot-capture | One default-off follow-up final on `voice-pe-03`: PCM at the STT boundary and Whisper text before cleanup, plus a client that sends `release` and never `play`/`speak`. No public API change. Not deployed. | in progress |
-| T-024 cdi-gpu | CDI GPU reservation (`nvidia.com/gpu=all`) for `hub` and `piper`, so `systemctl daemon-reload` keeps device majors 195 and 511. Speaker recognition stays CPU-only. Not deployed. | in progress |
-| T-025 docs-followup | November hardware session files, a pinned 0.3 s E5 beep in `tests/data`, the three T-024 PR #35 documentation nits, and the T-023 runbook teardown arguments. No hub code. | in review |
+| T-024 cdi-gpu | CDI GPU reservation (`nvidia.com/gpu=all`) for `hub` and `piper`, so `systemctl daemon-reload` keeps device majors 195 and 511. Speaker recognition stays CPU-only. | merged (PR #35, `c64ebcf`); deployed 16 Nov |
+| T-025 docs-followup | November hardware session files, a pinned 0.3 s E5 beep in `tests/data`, the T-024 PR #35 documentation nits, the T-023 runbook teardown arguments, and the PR #36 review nits (`BEEP_SHA`, F-1 pointers, F1/F2 rerun OK). No hub code. | in review (PR #36) |
 
 ## P2 (design.md §11), for reference
 

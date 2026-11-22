@@ -18,3 +18,18 @@
   (earlier "one nit / re-review: clean" line left as history).
 - T-023 runbook teardown now passes `--satellite voice-pe-03` and
   `--ws ws://127.0.0.1:8750/ws`, which `parse_args` requires even for `--teardown`.
+
+## 2026-11-22 (PR #36 review nits)
+
+- Independent review of PR #36: APPROVE, with four documentation nits, all fixed
+  on this branch:
+  1. The shared setup still exports `SHA=c64ebcf`. The beep URL now uses its own
+     `BEEP_SHA`, not `$SHA`, so E5 does not 404. Note in the checklist:
+     `BEEP_SHA` = the PR #36 merge commit (`beep_16k.wav` is not in c64ebcf);
+     the literal value is filled in by the next PR (a file cannot contain its
+     own merge SHA).
+  2. E1 and E6 point at finding F-1 (the 24-bit `jfk.flac` does not play on
+     Voice PE; own task) and at the E1b radio substitute used on 22 Nov.
+  3. F1 and F2 say: get a fresh OK from Maciej before rerunning.
+  4. `docs/tasks/README.md`: T-024 marked merged (`c64ebcf`) and deployed
+     16 Nov; T-025 row refreshed (PR #36).
