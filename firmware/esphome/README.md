@@ -33,9 +33,11 @@ word, no HA timers), adds `play_follow_up_ready_cue`, and makes cue
 actions wait for the announcement to finish before `api.respond`.
 
 Vendored cue WAVs in `sounds/` (`message_end.wav`,
-`follow_up_listening.wav`, `conversation_timeout.wav`) come from the old
-project `~/src/piotr_the_ai_server/firmware/esphome/sounds/` (first
-committed there as `7a046b3`, 2026-05-26). They are short project clips,
-not the Home Assistant Voice PE sound set. No separate third-party
-licence was found for them.
+`follow_up_listening.wav`, `conversation_timeout.wav`) are Maciej
+Gajewski's own work, under this repository's MIT licence (the repo-root
+`LICENSE`). They are not Apache-2.0, and they are not part of the Home
+Assistant Voice PE sound set that the Apache-2.0 NOTICE above covers.
+They were first committed in the old project
+`~/src/piotr_the_ai_server/firmware/esphome/sounds/` as `7a046b3`,
+2026-05-26. Maciej confirmed this on 2026-11-22.
 

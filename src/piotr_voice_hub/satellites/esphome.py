@@ -53,6 +53,12 @@ Every await on the device has a timeout. Failures raise `MicrophoneUnavailable` 
 `wait_for_event()`/`send_output_event()`; the session then calls `close()` and starts again,
 with backoff (T-010). `close()` also wakes a reader blocked in `wait_for_event()`.
 
+While armed and the device stream is running, a bounded idle with no live audio (no frames,
+or only digital silence) is also `MicrophoneUnavailable` (T-029). A quiet room still produces
+a noise floor and is not flagged (MP-TIMEOUT-001). The timer starts once the stream has
+started, resets on every frame whose RMS is at or above `DIGITAL_SILENCE_RMS`, and is
+cancelled on stop, failure, or close.
+
 `ListeningStarted` is sent only after the device has started its voice-assistant stream: a
 service call is fire-and-forget in aioesphomeapi, and a muted or busy device may never start.
 
@@ -65,10 +71,12 @@ import ipaddress
 import logging
 import math
 import socket
+import struct
+import time
 import traceback
 import urllib.parse
 from collections import deque
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Protocol, cast
@@ -121,6 +129,14 @@ CLIENT_INFO = "piotr-voice-hub"
 CONNECT_TIMEOUT_SECONDS = 10.0
 # Longer than the BOX-3 firmware's 5 s wait for its speaker before it starts the stream.
 START_TIMEOUT_SECONDS = 8.0
+# While listening, no live audio for this long is a dead stream, not a quiet room: real mics
+# still produce a noise floor, while all-zero or near-zero RMS does not. 15 s is longer than
+# START_TIMEOUT_SECONDS and ordinary Wi-Fi jitter, and short enough that a stalled satellite
+# is visible in a soak (T-029). Not a config key: design.md does not define one.
+AUDIO_LIVENESS_SECONDS = 15.0
+# 16-bit PCM RMS below this is treated as digital silence (a few LSBs of a stuck ADC), not a
+# quiet room. The T-028 noise fixture (Gaussian, sigma 400) is well above it.
+DIGITAL_SILENCE_RMS = 16.0
 SERVICE_TIMEOUT_SECONDS = 5.0
 DISCONNECT_TIMEOUT_SECONDS = 5.0
 STOP_ACK_TIMEOUT_SECONDS = 2.0
@@ -192,6 +208,21 @@ REQUIRED_SERVICES = (
 OPTIONAL_SERVICES = (RESET_OPEN_MIC_WAKE_CANDIDATE_SERVICE, CUE_SERVICES[CueType.FOLLOW_UP_READY])
 CAPTURE_EVENT_TYPES = (SpeechStarted, AudioChunk, SpeechEnded)
 EXPECTED_ERRORS = (APIConnectionError, OSError, TimeoutError)
+
+
+type Clock = Callable[[], float]
+type Sleep = Callable[[float], Awaitable[None]]
+
+
+def frame_is_live(pcm: bytes, threshold: float = DIGITAL_SILENCE_RMS) -> bool:
+    """True when 16-bit little-endian mono PCM has RMS at or above the digital-silence floor."""
+    if len(pcm) < 2:
+        return False
+    samples = struct.unpack_from(f"<{len(pcm) // 2}h", pcm)
+    if not samples:
+        return False
+    mean_square = sum(sample * sample for sample in samples) / len(samples)
+    return mean_square >= threshold * threshold
 
 
 class Vad(Protocol):
@@ -324,6 +355,8 @@ class EsphomeSatellite:
         client_factory: ClientFactory = create_api_client,
         playback_server: PlaybackHttpServer | None = None,
         local_ip: LocalIpFor = local_ip_for,
+        clock: Clock = time.monotonic,
+        sleep: Sleep = asyncio.sleep,
     ) -> None:
         self.context = MicrophoneContext("esphome", config.id, config.area)
         self.playback_target = PlaybackTarget("esphome", config.id, config.address, config.api_key)
@@ -363,6 +396,10 @@ class EsphomeSatellite:
         self._stream_stopped = asyncio.Event()
         self._stale_stop: asyncio.Task[None] | None = None
         self._dropped_chunks = 0
+        self._clock = clock
+        self._sleep = sleep
+        self._last_live_audio_at: float | None = None
+        self._liveness_task: asyncio.Task[None] | None = None
 
     # Microphone interface
 
@@ -433,10 +470,11 @@ class EsphomeSatellite:
                     "close: stopping playback %s failed: %r", playback.playback_id, error
                 )
         self._release_playback()
+        self._armed = False
+        self._stop_liveness()  # cancel before the disconnect wait, so a late fire cannot race
         await self._drop_client()
         self._unavailable = None
         self._listen_id = None
-        self._armed = False
         self._reset_capture()
         self._run_active = False
         self._drain_events()
@@ -647,6 +685,7 @@ class EsphomeSatellite:
         self._logger.warning("unavailable: %s %s", reason, self._state())
         self._unavailable = reason
         self._armed = False
+        self._stop_liveness()
         self._release_playback()  # no PlaybackFinished for a playback cut short
         self._drain_events()
         self._events.put_nowait(_Wake(reason))
@@ -772,6 +811,7 @@ class EsphomeSatellite:
             raise MicrophoneUnavailable(self._unavailable)
         self._logger.info("listening listen_id=%s", listen_id)
         self._emit(ListeningStarted(listen_id))
+        self._start_liveness()
 
     async def _await_stale_stop(self) -> None:
         """Let a pending stop of a stray device stream finish before the device is used."""
@@ -784,6 +824,7 @@ class EsphomeSatellite:
     async def _stop_listening(self, listen_id: str, reason: str) -> None:
         assert listen_id == self._listen_id, (listen_id, self._listen_id)
         self._armed = False
+        self._stop_liveness()
         self._drop_capture_events()  # MP-STOP-002
         self._reset_capture()
         if self._run_active:  # always true after a confirmed start, unless the driver failed
@@ -1106,6 +1147,8 @@ class EsphomeSatellite:
     # Segmentation
 
     def _process_frame(self, frame: bytes) -> None:
+        if frame_is_live(frame):
+            self._last_live_audio_at = self._clock()
         _, transition = self._vad.process_frame(frame)
         assert self._listen_id is not None
         if self._utterance_id is None:
@@ -1154,6 +1197,36 @@ class EsphomeSatellite:
         self._frame_buffer.clear()
         self._utterance_id = None
         self._segment_frames = 0
+
+    # Liveness (T-029)
+
+    def _start_liveness(self) -> None:
+        self._stop_liveness()
+        self._last_live_audio_at = self._clock()
+        self._liveness_task = asyncio.ensure_future(self._watch_liveness())
+
+    def _stop_liveness(self) -> None:
+        task = self._liveness_task
+        self._liveness_task = None
+        self._last_live_audio_at = None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+
+    async def _watch_liveness(self) -> None:
+        try:
+            while self._armed and self._unavailable is None:
+                last = self._last_live_audio_at
+                assert last is not None
+                remaining = AUDIO_LIVENESS_SECONDS - (self._clock() - last)
+                if remaining <= 0:
+                    self._fail(
+                        f"no live audio for {AUDIO_LIVENESS_SECONDS:g} s while listening "
+                        "(stalled stream or digital silence)"
+                    )
+                    return
+                await self._sleep(remaining)
+        except asyncio.CancelledError:
+            return
 
     # Events
 
