@@ -106,13 +106,23 @@ Task notes (they go into each task's plan.md):
 | T-023 stt-oneshot-capture | One default-off follow-up final on `voice-pe-03`: PCM at the STT boundary and Whisper text before cleanup, plus a client that sends `release` and never `play`/`speak`. No public API change. Not deployed. | in progress |
 | T-024 cdi-gpu | CDI GPU reservation (`nvidia.com/gpu=all`) for `hub` and `piper`, so `systemctl daemon-reload` keeps device majors 195 and 511. Speaker recognition stays CPU-only. | merged (PR #35, `c64ebcf`); deployed 16 Nov |
 | T-025 docs-followup | November hardware session files, a pinned 0.3 s E5 beep in `tests/data`, the T-024 PR #35 documentation nits, the T-023 runbook teardown arguments, and the PR #36 review nits (`BEEP_SHA`, F-1 pointers, F1/F2 rerun OK). No hub code. | merged (PR #36, `43715de`) |
-| T-026 play-flac-16bit | Narrow `play` to WAV, MP3 and 16-bit FLAC (design.md §6); log satellite `esphome_version`/`project_version` at connect; add a 16-bit JFK FLAC for E1/E6. No deploy. | in progress |
+| T-026 play-flac-16bit | Narrow `play` to WAV, MP3 and 16-bit FLAC (design.md §6); log satellite `esphome_version`/`project_version` at connect; add a 16-bit JFK FLAC for E1/E6. No deploy. | merged (PR #37, `25ea8e5`) |
 
-## P2 (design.md §11), for reference
+## P2 (design.md §11)
 
-Not numbered yet: firmware trimmed to continuous mode and reflashed (including the cue
-`api.respond` carry-forward below), recorded-audio fixtures, the audio-liveness check, then the
-72 h soak test, docs.
+Exit criteria: the 72 h soak passes, and firmware conformance asserts that no on-device wake
+word remains. Order is the dependency order. T-027 is first because the follow-up cue, cue
+`api.respond`, and the trim to continuous mode need a reflash with Maciej present. T-028 can
+run in parallel with T-027 (fixtures do not need the new firmware). T-029 must land before
+the soak. T-031 documents the finished work.
+
+| Task | Scope | Depends on | Status |
+| --- | --- | --- | --- |
+| T-027 firmware-continuous | Copy `firmware/esphome/` from the old project and trim it to continuous mode (design.md §8): keep API encryption, `voice_assistant.start_continuous`, the announce media player, mute/volume, server-driven visuals, and the existing listen/visual/cue services; add `play_follow_up_ready_cue` (reuses `sounds/follow_up_listening.wav`); end each cue action with `api.respond` after `script.wait` (status mode, PR #16 B2); remove `micro_wake_word` and its models, the on-device wake path, `start_follow_up_listening`, HA timers, timer-ringing, and cloud-auth error sounds. Conformance tests. No flash in the code PR. | T-014, T-020 | planned |
+| T-028 recorded-audio-fixtures | Replayable WAVs for wake/VAD/STT regression: phrase+command, inflected phrase, no phrase, TV/music, silence, two speakers, per satellite type. Synthesized or consented clips only; no permanent household recording. A tool runs them through VAD, STT and the matcher and counts false accepts/rejects. | — (parallel with T-027) | planned |
+| T-029 audio-liveness | While armed, no audio from the device for a bounded time is `MicrophoneUnavailable`, so a silent stall is not mistaken for a quiet room (PR #9 review B1). | T-007 | planned |
+| T-030 soak-72h | 72 h on all satellites with a TV on: procedure plus a log-summary tool. Count false accepts, reconnects and stuck states; include the T-022 wake-miss/false-wake baseline if T-022 has not already measured them. | T-027 (reflashed), T-029 | planned |
+| T-031 p2-docs | Docs for the finished P2 firmware, fixtures, liveness check and soak (design.md, tasks README, runbooks). | T-027 … T-030 | planned |
 
 ## Carry-forwards
 
@@ -139,13 +149,13 @@ Not numbered yet: firmware trimmed to continuous mode and reflashed (including t
   request at INFO ("connection rejected (200 OK)").
 - **box3-office host (done in T-011):** its real mDNS name is `piotr-box3-01-cbfaA8.local`
   (old config, T-013 live run); `config/hub.example.yaml` and design.md §7 are fixed.
-- **P2 (before the soak):** an audio-liveness check: while armed, no audio from the device
+- **P2 → T-029 (before the soak):** an audio-liveness check: while armed, no audio from the device
   for a bounded time is `MicrophoneUnavailable`, so a silent stall is not mistaken for a quiet
   room (PR #9 review, B1).
 - **T-014 (driver side done in T-014):** a true `CueFinished`. The driver calls a cue service
   with `return_response` when the firmware declares `supports_response`, and is otherwise
   fire-and-forget as before.
-- **P2 (firmware):** make each cue action answer once its cue has played. ESPHome sends a
+- **P2 → T-027 (firmware):** make each cue action answer once its cue has played. ESPHome sends a
   service response only from an explicit `api.respond` action: declaring `supports_response`
   alone makes every cue wait out the driver's 8 s and drop the connection (PR #16 review B2).
   Use status mode, and end the action with `api.respond` after `script.wait`:
@@ -188,7 +198,7 @@ Not numbered yet: firmware trimmed to continuous mode and reflashed (including t
   connect and skips the cue with a warning. **Decided:** the firmware import stays in P2;
   until then T-020 plays no sound and shows only the `LISTENING` visual (T-020 note above).
   **T-020:** done that way; the hub never sends `FOLLOW_UP_READY` (the driver still logs the
-  service as missing at connect). The cue goes in with the P2 firmware.
+  service as missing at connect). The cue goes in with T-027.
 - **P1 → T-017, T-019, T-020, T-021 (from T-010, T-011):** busy handling (T-019), follow-up
   (T-020) and the commands `speak`/`release` (T-017), `stop` (T-019) and `play` (T-021) were
   left out of P0. **T-017:** `speak` and `release` done; `play`, `stop` and `listen_after: true`
@@ -205,9 +215,9 @@ Not numbered yet: firmware trimmed to continuous mode and reflashed (including t
   (`REQUEST_READ_TIMEOUT_SECONDS`, `hub/playback_http.py`) or the driver's 5 s fetch wait
   (`STREAM_REQUEST_TIMEOUT_SECONDS`, `satellites/esphome.py`); neither depends on the rate.
   **Done in T-017:** `max(5 s, 64 KiB / byte rate + 2 s)` per stream (`close_timeout`).
-- **P1 → T-022 (or the P2 soak): measure the wake miss rate.** Maciej's live test on the
+- **P1 → T-022 (or T-030): measure the wake miss rate.** Maciej's live test on the
   deployed hub (main 48b5f70, voice-pe-02 and voice-pe-03, 2026-10-19) passed: most
   "Ryszardzie" utterances woke it and nothing woke it falsely, but the misses were not
   counted (T-010 log). Count them over a fixed set of utterances per satellite (and the false
-  wakes over a quiet period) in T-022's acceptance run, or in the 72 h soak if T-022 has no
-  room.
+  wakes over a quiet period) in T-022's acceptance run, or in the T-030 72 h soak if T-022 has
+  no room.
