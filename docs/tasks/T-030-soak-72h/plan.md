@@ -2,6 +2,9 @@
 
 **Status:** planned. Branch `t-030-soak-72h`. The code PR ships this procedure and the
 log-summary tool. The live run is a separate step, started only on the manager's go.
+Decisions (manager, 22 Nov 2026): option A (no API client, no transcript text stored),
+thresholds below accepted, production frozen for the 72 h; Maciej notes TV times and real
+wakes (Maciej, 20:17).
 
 ## Goal
 
@@ -22,26 +25,25 @@ states, and measure memory/VRAM drift (design.md §10–§11, P2 exit criterion)
 
 ## Scope
 
-1. `tools/soak_summary.py`: stdlib only, read-only on a saved hub log file. For each
-   satellite and each hour it counts:
-   - segments, wake candidates, accepts (`wake=True`), cancels, `no request within`,
-     reply timeouts;
-   - `unavailable:` warnings, split into liveness (`stalled stream or digital silence`)
-     and other reasons;
-   - `connected to`, `connect to … failed`, firmware version lines, `lacks optional
-     services`;
-   - cue/playback bound warnings (`still busy`, `no change within`);
-   - every ERROR/CRITICAL line, tracebacks, `event loop stalled`, `hub running`
-     (restarts);
-   - accept latency: segment end (the `segment … wake=True` line) to `played cue
-     utterance_accepted`.
+1. `tools/soak_summary.py`: stdlib only, offline, read-only on a saved hub log. Per
+   satellite, and per hour (CET; the log is UTC), it counts:
+   - segments, accepts (`wake=True`), candidates not accepted, wake word alone,
+     `no request within`, reply timeouts;
+   - session `unavailable: …; re-arming` lines, split into liveness (`stalled stream or
+     digital silence`), connect failures and other; reconnects (`connected to` after the
+     first) and `esphome_version`;
+   - `still busy` / `no change within` bound warnings, `lacks optional services`;
+   - stuck `processing` (an accept with no reply timeout, release or speak within 35 s);
+   - accept latency: the `segment … wake=True` line to `played cue utterance_accepted`;
+   - hub-wide: `hub running` (starts), ERROR/CRITICAL lines, tracebacks.
 
-   Times are converted from the log's UTC to CET. The output is a text table plus JSON.
-   The tool exits non-zero on a missing or malformed file and never connects to anything.
-2. A procedure (below) and the shell snippets for the monitors. These live in this
-   directory, not in `hub/`.
-3. Tests: a synthetic log fixture, with no IPs, no transcripts and no household data,
-   gives the expected counts. A malformed path gives a non-zero exit.
+   With `--notes notes.csv` (Maciej's notes, below) it also gives TV hours, false accepts
+   by TV state (on, off, unknown) and per TV-hour, and the real-wake hit rate and latency.
+   Text output plus `--json`. Exit 2 on a missing or malformed file. It never connects to
+   anything.
+2. `tools/soak_monitor.sh`: the two read-only monitors, `log` and `sample` (below).
+3. Tests: a synthetic log and notes fixture (`tests/data/soak/`, no IPs, no transcripts)
+   give the expected counts; missing or malformed files give exit 2.
 
 ## Out of scope
 
@@ -51,58 +53,66 @@ states, and measure memory/VRAM drift (design.md §10–§11, P2 exit criterion)
 - Sending any API command (`speak`/`play`/`stop`/`release`), and volume changes.
 - Cross-satellite arbitration (Maciej, 22 Nov 15:30: no change).
 
+## Production freeze
+
+For the 72 h production stays at `833650c`: no deploy, no config or firmware change, no
+flash, no restart, and no other live session or API client (no `speak_test.py`). Anything
+that needs production ends the soak first (see Abort).
+
 ## Monitors (unattended, read-only)
 
-Everything runs in tmux session `t030` as grok-developer, with output in
-`~/probe/t030-YYYYMMDD/` (mode 700, outside git). Each window is wrapped in
-`timeout 73h`, so nothing outlives the soak.
+Run from the worktree in tmux session `t030` as grok-developer, with output in
+`~/probe/t030-YYYYMMDD/` (mode 700, outside git). Each window runs under `timeout 73h`:
 
-| Window | What | Interval | Output |
+```sh
+D=~/probe/t030-$(date +%Y%m%d); START=$(date -u +%FT%TZ)
+tmux new-session -d -s t030 -n log "timeout 73h tools/soak_monitor.sh log $D $START"
+tmux new-window -t t030 -n sample "timeout 73h tools/soak_monitor.sh sample $D"
+```
+
+| Mode | What | Interval | Output |
 |---|---|---|---|
-| `log` | `docker logs -f --since $START piotr-voice-hub-hub-1 > hub.log`, in a loop with a 10 s pause. It re-runs from `$START` after a container restart, so nothing is duplicated or lost. Rotation is 5 × 10 MB; today's rate is about 3–10 MB/day, so 72 h fits. | continuous | `hub.log` |
+| `log` | `docker logs -f --since $START piotr-voice-hub-hub-1`, rerun after 10 s if it ends (a container restart); each rerun rewrites the file from `$START`, so nothing is duplicated. Rotation is 5 × 10 MB, about 3–10 MB/day today, so 72 h fits. | continuous | `hub.log` |
 | `sample` | `curl -m5 /healthz` (connected and state per satellite) | 30 s | `health.jsonl` |
-| `sample` | `docker inspect` StartedAt, RestartCount and Health for hub, piper and speaker; `docker stats --no-stream` memory and CPU; `nvidia-smi` total and per-process MiB for the hub and Piper PIDs (mapped through `/proc/PID/cgroup`); `du -sh` of the probe dir; `df /` | 5 min | `res.csv` |
-| `events` (optional, manager decides; see Privacy) | A passive WS client (`tools/soak_events.py`, via `uv run` from the worktree) that only reads, reconnects with 1–30 s backoff, and writes one line per event | live | `events.jsonl` |
+| `sample` | `docker inspect` (StartedAt, RestartCount, Health) and `docker stats --no-stream` for hub, Piper and speaker; `nvidia-smi` MiB per process with its container (from `/proc/PID/cgroup`); probe dir size; `df /` | 5 min | `res.csv` |
 
-- **Size guard.** The sampler stops every window and writes `ABORT disk` if the probe dir
-  goes over 200 MB or `/` is over 90 %.
-- **Effect of the passive client.** It uses one of the 16 client slots, and the hub
-  broadcasts to it. If it falls behind, only the client is dropped (1008); the hub is not
-  blocked. It never sends a command, so the busy policy never applies to it, and sessions
-  behave exactly as with 0 clients. A wake still times out at 30 s. No other client
-  connects during the soak (no test sessions).
-- **Production is not touched.** There is no exec into containers (`/healthz` and docker
-  read-only calls only), no restart and no prune.
+- **Size guard:** if the probe dir passes 200 MB or `/` 90 %, the sampler writes
+  `ABORT` and kills the `t030` tmux session (our monitors only).
+- **No API client.** Nothing connects to the WebSocket API, so the hub runs exactly as
+  with 0 clients and the busy policy never comes into play. There is no exec into
+  containers, no restart and no prune.
 
-## Privacy (manager or Maciej decides)
+## Privacy
 
-- The hub log has no transcript text, only counts, IDs, durations and speaker hints. The
-  API carries text only for wake candidates: `transcript_partial` only when it matches,
-  and `transcript_final` only on an accept. With no consumer there are no follow-up
-  windows, so non-wake TV or room speech never reaches a client.
-- An accepted false wake can still carry a few words of TV or household speech. Options:
-  - **A (minimal):** no WS client; only logs and samples. False accepts are classified
-    from the speaker hint and Maciej's notes.
-  - **B (proposed):** the WS client stores event type, satellite, time, `utterance_id`,
-    `follow_up`, speaker and `audio_ms`, and the text of `transcript_final` only. It keeps
-    no partials and no `raw_text`. The file stays on piotr (mode 600) and is deleted after
-    the report. The report gives counts and categories (TV, room, Maciej), never the text
-    itself.
-- Nothing from the soak goes into git except the counts in the results file.
+The hub log has no transcript text, only counts, IDs, durations and speaker hints. No API
+client runs, so no transcript is stored anywhere. False accepts are classified only from
+the log (time, satellite, speaker hint) and Maciej's notes. Nothing from the soak goes into
+git except the counts in the results file.
 
 ## Maciej's part
 
-- Normal life. The TV in the living room is on as usual (ideally ≥ 4 h/day), with rough
-  on/off times in a note.
-- Optionally, 3–5 real wakes per day per room ("Ryszardzie, która godzina?"), with the
-  time and room noted. He hears the accepted cue, then the timeout cue 30 s later (no
-  consumer).
-- He notes any cue he did not ask for (time and room) and any ring light left on.
-- He does not change the volume, mute or flash anything. If he must, he notes the time.
-- The study stays quiet at night. That is the quiet-room check: no liveness trips on
-  voice-pe-03.
+- Normal life. He notes the living-room TV on/off times.
+- 3–5 real wakes per room per day ("Ryszardzie, która godzina?"), each with the time and
+  room. He hears the accepted cue, then the timeout cue 30 s later (no consumer).
+- He notes any cue he did not ask for (time, room) and any ring light left on.
+- He does not change the volume, mute or flash anything; if he must, he notes the time.
+- The study stays quiet at night: the quiet-room check (no liveness trips on voice-pe-03).
 
-## Pass criteria (thresholds proposed; manager or Maciej confirm)
+The manager forwards the notes; they become `notes.csv` in the probe dir (local times):
+
+```csv
+time,event,satellite
+2026-11-23 18:00,tv_on,
+2026-11-23 18:05,wake,voice-pe-02
+2026-11-23 22:30,tv_off,
+```
+
+A noted wake is a hit if that satellite accepted within 120 s of the noted time; every
+other accept is a false accept. Safety line: for a day with no notes, the TV state is
+unknown (false accepts reported per hour) and the real-wake criterion is N/A for that day,
+not FAIL.
+
+## Pass criteria (accepted by the manager, 22 Nov 2026)
 
 1. The hub ran all 72 h, with RestartCount and StartedAt unchanged. There are no CRITICAL
    lines, no `event loop stalled` and no tracebacks. Piper and speaker did not restart.
@@ -117,9 +127,9 @@ Everything runs in tmux session `t030` as grok-developer, with output in
    24 h; more is a finding even if it recovers.
 4. Liveness: 0 trips on voice-pe-03 during quiet hours (the T-029 quiet-room check). Any
    trip is followed by a recovery within 60 s.
-5. False accepts on voice-pe-02 with the TV on: ≤ 1 per 24 h (reported per TV-hour).
-   Wake candidates that were cancelled are reported but are not a fail.
-6. Real wakes (Maciej's notes): ≥ 90 % accepted. Accept latency (segment end to accepted
+5. False accepts on voice-pe-02 with the TV on: ≤ 1 per 24 h, also reported per TV-hour
+   (from the notes). Candidates that were not accepted are reported but are not a fail.
+6. Real wakes (from the notes): ≥ 90 % accepted. Accept latency (segment line to accepted
    cue) has a median ≤ 1.0 s and a max ≤ 2.0 s. The T-022 B2 baseline is 0.51–0.76 s.
 7. Drift: the hub's RAM growth from hour 1 to hour 72 is ≤ 10 % and not monotonic. Hub +
    Piper VRAM stays within 4471 ± 100 MiB per process sum (Ollama varies and is excluded).
@@ -132,7 +142,7 @@ Everything runs in tmux session `t030` as grok-developer, with output in
 - A satellite is offline for more than 30 min. Report it; Maciej may check its power or
   Wi-Fi. The soak goes on and the gap is excluded.
 - Maciej asks to stop (for example false-accept cues are annoying), the disk guard trips,
-  or another task needs production. Any deploy during the soak ends it.
+  or another task needs production (the freeze). Any deploy during the soak ends it.
 
 ## Report
 
@@ -144,16 +154,17 @@ Everything runs in tmux session `t030` as grok-developer, with output in
 - latencies, restarts and reconnects with times, drift (first, last and max);
 - findings, and any deviations (Maciej's notes summarised).
 
-There are no transcripts, no IPs and no config contents. Raw probe files stay on piotr and
-`events.jsonl` is deleted.
+There are no transcripts, no IPs and no config contents. Raw probe files stay on piotr.
 
 ## Manual test checklist
 
-- [ ] `make check` green; `soak_summary.py` gives the expected counts on the fixture.
-- [ ] Before the start: production at `833650c`, both satellites `connected/idle` with
-      2026.4.0, capture off, 0 API clients, no other session scheduled, Maciej's go
-      relayed.
-- [ ] Start the tmux monitors and record `$START`; the first samples look right.
-- [ ] 72 h; daily glance at `health.jsonl`/`res.csv` (counts only).
-- [ ] At the end: stop tmux, run `soak_summary.py hub.log`, and fill in the results.
-- [ ] Delete `events.jsonl`, if present. Confirm production is unchanged.
+- [ ] `make check` green; `python3 tools/soak_summary.py tests/data/soak/hub.log --notes
+      tests/data/soak/notes.csv` prints the expected counts.
+- [ ] Before the start: production at `833650c`, both satellites `connected`/`idle` with
+      2026.4.0, capture off, 0 API clients, freeze agreed, Maciej's go relayed.
+- [ ] Start the two monitors and record `$START`; the first `health.jsonl` and `res.csv`
+      lines look right.
+- [ ] 72 h; a daily glance at `health.jsonl`, `res.csv` and `ABORT` (counts only).
+- [ ] At the end: kill tmux `t030`, write `notes.csv`, run `soak_summary.py hub.log --notes
+      notes.csv --json summary.json`, and fill in the results file.
+- [ ] Confirm production is unchanged (SHA, StartedAt, RestartCount).
