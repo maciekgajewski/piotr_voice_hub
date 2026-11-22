@@ -18,3 +18,11 @@ htmlcov/
 config.yaml
 secrets.yaml
 .env
+
+# Firmware binaries and flash dumps. A 16 MB read_flash backup holds Wi-Fi and
+# API keys; never commit one. Keep backups on a Maciej-only path (see T-027
+# checklist). firmware-backups/ is a local name for the same defence.
+*.bin
+*.elf
+*flash*.bin
+firmware-backups/

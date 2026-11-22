@@ -64,3 +64,14 @@
   secrets and the running ESPHome version is the fallback only. No flash in this PR.
 
 - Rechecked compile after the review fixes, image `piotr-voice-hub-esphome-t027:2026.4.0`, dummy secrets, cache under `~/probe/piotr-voice-hub-esphome`, 4 CPUs. voice-pe-03 compiled in 290 s, box3-satellite in 150 s (Europe/Warsaw 13:58–14:06). Disk stayed above 10 GB (646 GB free at start, 641 GB at the low point). Build dirs removed after the compile. No flash.
+
+## 2026-11-22 (PR #39 approve nits)
+
+- `.gitignore` (repo root and `firmware/esphome/`): ignore `*.bin`, `*.elf`,
+  `*flash*.bin`, and `firmware-backups/`, so a 16 MB `read_flash` backup (it
+  holds Wi-Fi and API keys) cannot be committed by accident. `git ls-files
+  -ci --exclude-standard` is empty: no already-tracked file is ignored.
+- Driver test `test_failed_cue_service_response_still_emits_cue_finished`: a
+  status-mode `execute_service` response with `success=False` still emits
+  `CueFinished` and logs `cue service ... failed: ...`.
+
