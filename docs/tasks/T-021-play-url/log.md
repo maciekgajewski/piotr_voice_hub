@@ -68,3 +68,17 @@
 - The T-021 hardware run is in the 2026-11-01 session (with T-020), voice-pe-03 only, at
   Maciej's request; its voice-pe-02 parts are deferred. Checklist on piotr:
   `~/probe/hw_session_2026-11-01.md` (not in the repo, as for the other PR checklists).
+
+## 2026-11-22
+
+- Hardware on production c64ebcf, voice-pe-03 (study). Checklist and results are in
+  `docs/tasks/T-025-docs-followup/` (`hw_session_2026-11-16.md`,
+  `hw_session_2026-11-22-results.md`; 7 Nov: `hw_session_2026-11-07-results.md`).
+  E1 failed as written (test data: whisper `jfk.flac` failed fast); E1b (radio) and
+  E2–E4, E7 PASS. E5 was deferred pending a pinned 0.3 s clip; T-025 adds
+  `tests/data/beep_16k.wav` and points the checklist E5 step at it (not yet run).
+  E6 deferred with F-1. F1 (restart) and F2 (kill) PASS. F-1 is open in its own
+  task (likely 24-bit FLAC vs the firmware's 16-bit-only player). F-2 (accepted cue
+  not heard on the first wake after the F1 restart) is closed, not reproduced.
+  Process lesson: wait for an explicit go after each step's confirmation before
+  starting the next step.

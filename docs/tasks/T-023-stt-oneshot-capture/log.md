@@ -62,3 +62,10 @@
   `HUB_STT_CAPTURE`, and the `at` job.
 - `make check`: 987 passed, 8 skipped. `at` still absent. Not capture-ready. The
   restart-after-cleanup behaviour is not verified on the host. Not merged. Not deployed.
+
+## 2026-11-22
+
+- T-025: the runbook teardown command now passes `--satellite voice-pe-03` and
+  `--ws ws://127.0.0.1:8750/ws`. `parse_args` requires both even for `--teardown`
+  (`--satellite` must be `voice-pe-03`; `--ws` is checked). The previous command
+  (`--teardown --directory --at-job` only) would not parse.

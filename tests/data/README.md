@@ -17,6 +17,31 @@
   `audio/playback/timer_finished.flac` @ `a299643`, which is byte-identical to the upstream
   file at tag 26.4.0 (sha256 `e9ddba38c4a993fd5a218ec7d04d7a2824b995a9dbb6cb0d8599d7a0ac6a56ee`).
 
+- `beep_16k.wav`: 0.3 s 880 Hz sine tone, 16 kHz 16-bit mono, peak 0.5 of full scale, with a
+  5 ms linear fade in and out (9644 bytes). Generated for the T-021 hardware checklist E5
+  (clip under 0.5 s). Recreate from the repo root:
+
+```sh
+python3 - <<'PY'
+import math, struct, wave
+rate, dur, freq, amp, fade_s = 16000, 0.3, 880.0, 0.5, 0.005
+n, fade = int(round(rate * dur)), int(rate * fade_s)
+samples = []
+for i in range(n):
+    s = amp * math.sin(2 * math.pi * freq * i / rate)
+    if i < fade:
+        s *= i / fade
+    elif i >= n - fade:
+        s *= (n - 1 - i) / fade
+    samples.append(int(round(s * 32767)))
+with wave.open("tests/data/beep_16k.wav", "w") as w:
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(rate)
+    w.writeframes(b"".join(struct.pack("<h", x) for x in samples))
+PY
+```
+
 - `jfk_44100_stereo_s16.flac`: 11.000 s, 44.1 kHz stereo 16-bit native FLAC (485,100 samples,
   block size 4608, 488,897 bytes, sha256
   `3745bf960c00b0579ccc30e8ec5abe74337b957872ed8ac3ed19d330560653d6`). A 16-bit re-encode of
