@@ -34,3 +34,33 @@
   - Plenty of headroom in both app slots. No YAML compile errors to fix.
 - Dummy secrets were deleted from the probe copy after the compile. The probe build dir can be removed; it is not in git.
 
+
+## 2026-11-22 (PR #39 review: B1, N1–N6)
+
+- B1: Voice PE cue scripts (`play_message_end_cue`, `play_conversation_timeout_cue`,
+  `play_follow_up_ready_cue`) now wait until `external_media_player` is announcing and
+  then until it is not, with a 2 s start / 4 s finish timeout (under the hub's 8 s cue
+  response bound). A timeout sets `cue_played_ok` false and the shared API action
+  responds with `success: false` and `error_message: "cue announcement did not finish"`;
+  the hub logs a warning and still emits CueFinished (design.md §4.1). `play_sound`
+  stays fire-and-forget for button sounds. `start_open_mic_listening` on PE now waits
+  up to 5 s for the media player to be idle, like box3. Box3 cue scripts got the same
+  success:false timeout path (finish wait raised from 2 s to 4 s). Conformance test
+  `test_cue_scripts_wait_for_the_announcement_to_finish` fails if a PE or box3 cue
+  script can return (and therefore `api.respond`) before those waits.
+- N1: `test_follow_up_window_without_ready_cue_service_still_listens` — old firmware
+  with no ready-cue service logs the skip warning, still emits CueFinished, and the
+  follow-up listen proceeds.
+- N2: `firmware/esphome/LICENSE` (Apache-2.0) and `NOTICE`, with README attribution
+  for HA Voice PE (tag 26.4.0, `e99cb51`), the ESP32-S3-BOX-3 / casita yaml from
+  esphome/wake-word-voice-assistants, and the vendored cue WAVs (from the old project,
+  first committed as `7a046b3`; not the HA Voice PE sound set).
+- N3: removed unused `server_controlled_follow_up_starting` from both packages.
+- N4: box3 `voice_assistant` now has `use_wake_word: false`.
+- N5: plan.md status is in review (PR #39).
+- N6: a USB `esptool read_flash` of the full 16 MB, stored on a Maciej-only path
+  (e.g. `~/piotr-firmware-backups/`), is a required pre-flash step. ESPHome OTA
+  cannot read firmware back. A rebuild from `~/src/piotr_the_ai_server` with his
+  secrets and the running ESPHome version is the fallback only. No flash in this PR.
+
+- Rechecked compile after the review fixes, image `piotr-voice-hub-esphome-t027:2026.4.0`, dummy secrets, cache under `~/probe/piotr-voice-hub-esphome`, 4 CPUs. voice-pe-03 compiled in 290 s, box3-satellite in 150 s (Europe/Warsaw 13:58–14:06). Disk stayed above 10 GB (646 GB free at start, 641 GB at the low point). Build dirs removed after the compile. No flash.

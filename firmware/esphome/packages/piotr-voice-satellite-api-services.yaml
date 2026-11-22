@@ -1,29 +1,64 @@
 # Shared API actions for Piotr Voice PE and BOX-3 satellites.
-# Cue actions answer with api.respond once the sound has played (status mode).
-# Listen and visual actions stay fire-and-forget.
+# Cue actions answer with api.respond once the announcement has started and
+# finished (status mode). A bounded wait that times out responds with
+# success: false; the hub logs a warning and still emits CueFinished (design.md
+# §4.1). Listen and visual actions stay fire-and-forget.
+globals:
+  - id: cue_played_ok
+    type: bool
+    restore_value: no
+    initial_value: "true"
+
 api:
   actions:
     - action: play_message_end_cue
       supports_response: status
       then:
+        - lambda: id(cue_played_ok) = true;
         - script.execute: play_message_end_cue
         - script.wait: play_message_end_cue
-        - api.respond:
-            success: true
+        - if:
+            condition:
+              lambda: return id(cue_played_ok);
+            then:
+              - api.respond:
+                  success: true
+            else:
+              - api.respond:
+                  success: false
+                  error_message: "cue announcement did not finish"
     - action: play_conversation_timeout_cue
       supports_response: status
       then:
+        - lambda: id(cue_played_ok) = true;
         - script.execute: play_conversation_timeout_cue
         - script.wait: play_conversation_timeout_cue
-        - api.respond:
-            success: true
+        - if:
+            condition:
+              lambda: return id(cue_played_ok);
+            then:
+              - api.respond:
+                  success: true
+            else:
+              - api.respond:
+                  success: false
+                  error_message: "cue announcement did not finish"
     - action: play_follow_up_ready_cue
       supports_response: status
       then:
+        - lambda: id(cue_played_ok) = true;
         - script.execute: play_follow_up_ready_cue
         - script.wait: play_follow_up_ready_cue
-        - api.respond:
-            success: true
+        - if:
+            condition:
+              lambda: return id(cue_played_ok);
+            then:
+              - api.respond:
+                  success: true
+            else:
+              - api.respond:
+                  success: false
+                  error_message: "cue announcement did not finish"
     - action: start_open_mic_listening
       then:
         - script.execute: start_open_mic_listening

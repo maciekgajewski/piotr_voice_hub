@@ -1,0 +1,25 @@
+Piotr Voice Hub satellite firmware (firmware/esphome/)
+
+This directory includes configuration derived from Apache License 2.0 works.
+See LICENSE in this directory for the licence text.
+
+  1. Home Assistant Voice PE
+     https://github.com/esphome/home-assistant-voice-pe
+     Tag 26.4.0 (commit e99cb5147ea4c6f2896772f61fc8bd29612026a7)
+     Copyright the ESPHome / Nabu Casa contributors
+
+  2. ESP32-S3-BOX-3 wake-word voice assistant configuration and casita
+     illustrations
+     https://github.com/esphome/wake-word-voice-assistants
+     Copyright the ESPHome contributors
+
+Modifications for Piotr Voice Hub (continuous-mode listening, cue
+api.respond, play_follow_up_ready_cue, removal of on-device wake word and
+Home Assistant timers) are part of this project.
+
+The vendored WAV files in sounds/ (message_end.wav, follow_up_listening.wav,
+conversation_timeout.wav) were copied from piotr_the_ai_server
+firmware/esphome/sounds/ (first committed there as 7a046b3, 2026-05-26).
+They are short project cue clips, not from the Home Assistant Voice PE
+sound set (those remain referenced from the 26.4.0 tag). No separate
+third-party licence was found for the WAV files.

@@ -232,6 +232,7 @@ class FakeDriver:
         self.silent: set[type] = set()  # command types the driver never answers
         self.fail_on: set[type] = set()  # command types that fail (once each) as a disconnect
         self.slow: dict[type, float] = {}  # command type -> seconds its send takes
+        self.missing_cue_services: set[CueType] = set()  # like optional firmware cues
         self.closes = 0
         self.in_flight = False
         self.overlapped = False
@@ -275,6 +276,11 @@ class FakeDriver:
                 self._drop_capture_events()
                 self.push(ListeningStopped(event.listen_id, event.reason))
             elif isinstance(event, PlayCue):
+                if event.cue_type in self.missing_cue_services:
+                    logging.getLogger("piotr_voice_hub.satellites.esphome").warning(
+                        "firmware has no %s service; skipped",
+                        esphome.CUE_SERVICES[event.cue_type],
+                    )
                 self.push(CueFinished(event.cue_id))
             elif isinstance(event, PlaybackEnd | PlaybackUrl):
                 self.push(DriverPlaybackFinished(event.playback_id))
@@ -2347,6 +2353,36 @@ async def _test_listen_after(said: str, text: str) -> None:
     commands = h.driver.without_ids()
     assert CueType.FOLLOW_UP_READY in commands and CueType.TIMEOUT not in commands
     assert h.speaker.requests[-1] == (CHUNK * 2, "u2")
+
+
+def test_follow_up_window_without_ready_cue_service_still_listens(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Old firmware: no play_follow_up_ready_cue — warn, skip, CueFinished, listen."""
+    asyncio.run(_test_follow_up_window_without_ready_cue_service(caplog))
+
+
+async def _test_follow_up_window_without_ready_cue_service(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    h = Harness(reply_timeout=10)
+    h.stt.say("u2", "Tak.", ())
+    h.driver.missing_cue_services.add(CueType.FOLLOW_UP_READY)
+    with caplog.at_level(logging.WARNING):
+        playback_id = await follow_up_window(h)
+    assert "firmware has no play_follow_up_ready_cue service" in caplog.text
+    # The session still sends the cue; the driver skips it and still finishes it.
+    assert after_processing(h) == FOLLOW_UP
+    assert h.events[h.events.index(PROCESSING) + 2 :] == [
+        SPEAKING,
+        PlaybackFinished("kitchen", playback_id, True),
+        LISTENING,
+    ]
+    h.driver.push(*segments("u2")(h.driver.starts()[1].listen_id))
+    await h.until(lambda: len(h.hub(TranscriptFinal)) == 2)
+    await h.stop()
+    assert h.hub(TranscriptFinal)[-1] == follow_up_final("Tak", "Tak.")
+    assert CueType.FOLLOW_UP_READY in h.driver.without_ids()
 
 
 def test_oneshot_is_offered_only_on_the_follow_up_and_release_plays_no_cue() -> None:

@@ -211,6 +211,7 @@ voice_assistant:
   id: va
   microphone: box_mic
   media_player: speaker_media_player
+  use_wake_word: false
   noise_suppression_level: 2
   auto_gain: 31dBFS
   volume_multiplier: 2.0
@@ -270,14 +271,34 @@ script:
           condition:
             media_player.is_announcing:
           timeout: 2s
-      - wait_until:
+      - if:
           condition:
-            and:
-              - not:
-                  media_player.is_announcing:
-              - not:
-                  speaker.is_playing:
-          timeout: 2s
+            not:
+              media_player.is_announcing:
+          then:
+            - lambda: id(cue_played_ok) = false;
+            - logger.log:
+                level: WARN
+                format: "play_message_end_cue did not start announcing"
+          else:
+            - wait_until:
+                condition:
+                  and:
+                    - not:
+                        media_player.is_announcing:
+                    - not:
+                        speaker.is_playing:
+                timeout: 4s
+            - if:
+                condition:
+                  or:
+                    - media_player.is_announcing:
+                    - speaker.is_playing:
+                then:
+                  - lambda: id(cue_played_ok) = false;
+                  - logger.log:
+                      level: WARN
+                      format: "play_message_end_cue still announcing after timeout"
 
   - id: set_visual_idle
     mode: restart
@@ -318,14 +339,34 @@ script:
           condition:
             media_player.is_announcing:
           timeout: 2s
-      - wait_until:
+      - if:
           condition:
-            and:
-              - not:
-                  media_player.is_announcing:
-              - not:
-                  speaker.is_playing:
-          timeout: 2s
+            not:
+              media_player.is_announcing:
+          then:
+            - lambda: id(cue_played_ok) = false;
+            - logger.log:
+                level: WARN
+                format: "play_conversation_timeout_cue did not start announcing"
+          else:
+            - wait_until:
+                condition:
+                  and:
+                    - not:
+                        media_player.is_announcing:
+                    - not:
+                        speaker.is_playing:
+                timeout: 4s
+            - if:
+                condition:
+                  or:
+                    - media_player.is_announcing:
+                    - speaker.is_playing:
+                then:
+                  - lambda: id(cue_played_ok) = false;
+                  - logger.log:
+                      level: WARN
+                      format: "play_conversation_timeout_cue still announcing after timeout"
   - id: start_open_mic_listening
     mode: restart
     then:
@@ -355,7 +396,6 @@ script:
     mode: restart
     then:
       - lambda: id(server_controlled_open_mic_active) = false;
-      - lambda: id(server_controlled_follow_up_starting) = false;
       - voice_assistant.stop:
       - wait_until:
           condition:
@@ -373,14 +413,34 @@ script:
           condition:
             media_player.is_announcing:
           timeout: 2s
-      - wait_until:
+      - if:
           condition:
-            and:
-              - not:
-                  media_player.is_announcing:
-              - not:
-                  speaker.is_playing:
-          timeout: 2s
+            not:
+              media_player.is_announcing:
+          then:
+            - lambda: id(cue_played_ok) = false;
+            - logger.log:
+                level: WARN
+                format: "play_follow_up_ready_cue did not start announcing"
+          else:
+            - wait_until:
+                condition:
+                  and:
+                    - not:
+                        media_player.is_announcing:
+                    - not:
+                        speaker.is_playing:
+                timeout: 4s
+            - if:
+                condition:
+                  or:
+                    - media_player.is_announcing:
+                    - speaker.is_playing:
+                then:
+                  - lambda: id(cue_played_ok) = false;
+                  - logger.log:
+                      level: WARN
+                      format: "play_follow_up_ready_cue still announcing after timeout"
 
   - id: draw_display
     then:
@@ -464,10 +524,6 @@ globals:
     restore_value: false
     initial_value: ${voice_assist_not_ready_phase_id}
   - id: server_visual_received
-    type: bool
-    restore_value: false
-    initial_value: "false"
-  - id: server_controlled_follow_up_starting
     type: bool
     restore_value: false
     initial_value: "false"

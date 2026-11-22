@@ -1,6 +1,6 @@
 # T-027: firmware trimmed to continuous mode
 
-**Status:** implementation on `t-027-firmware-continuous` (draft PR). Based on `p2-task-breakdown`. No flash.
+**Status:** in review (PR #39). Based on main after #38 (`3b46f75`). No flash.
 
 ## Goal
 

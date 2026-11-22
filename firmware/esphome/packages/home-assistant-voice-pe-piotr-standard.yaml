@@ -182,10 +182,6 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
-  - id: server_controlled_follow_up_starting
-    type: bool
-    restore_value: no
-    initial_value: 'false'
   - id: server_controlled_open_mic_active
     type: bool
     restore_value: no
@@ -1268,6 +1264,37 @@ script:
           id: play_sound
           priority: true
           sound_file: "message_end_sound"
+      - wait_until:
+          condition:
+            media_player.is_announcing:
+              id: external_media_player
+          timeout: 2s
+      - if:
+          condition:
+            not:
+              media_player.is_announcing:
+                id: external_media_player
+          then:
+            - lambda: id(cue_played_ok) = false;
+            - logger.log:
+                level: WARN
+                format: "play_message_end_cue did not start announcing"
+          else:
+            - wait_until:
+                condition:
+                  not:
+                    media_player.is_announcing:
+                      id: external_media_player
+                timeout: 4s
+            - if:
+                condition:
+                  media_player.is_announcing:
+                    id: external_media_player
+                then:
+                  - lambda: id(cue_played_ok) = false;
+                  - logger.log:
+                      level: WARN
+                      format: "play_message_end_cue still announcing after timeout"
 
   - id: set_visual_idle
     mode: restart
@@ -1305,6 +1332,37 @@ script:
           id: play_sound
           priority: true
           sound_file: "conversation_timeout_sound"
+      - wait_until:
+          condition:
+            media_player.is_announcing:
+              id: external_media_player
+          timeout: 2s
+      - if:
+          condition:
+            not:
+              media_player.is_announcing:
+                id: external_media_player
+          then:
+            - lambda: id(cue_played_ok) = false;
+            - logger.log:
+                level: WARN
+                format: "play_conversation_timeout_cue did not start announcing"
+          else:
+            - wait_until:
+                condition:
+                  not:
+                    media_player.is_announcing:
+                      id: external_media_player
+                timeout: 4s
+            - if:
+                condition:
+                  media_player.is_announcing:
+                    id: external_media_player
+                then:
+                  - lambda: id(cue_played_ok) = false;
+                  - logger.log:
+                      level: WARN
+                      format: "play_conversation_timeout_cue still announcing after timeout"
   - id: play_follow_up_ready_cue
     mode: restart
     then:
@@ -1312,6 +1370,37 @@ script:
           id: play_sound
           priority: true
           sound_file: "follow_up_listening_sound"
+      - wait_until:
+          condition:
+            media_player.is_announcing:
+              id: external_media_player
+          timeout: 2s
+      - if:
+          condition:
+            not:
+              media_player.is_announcing:
+                id: external_media_player
+          then:
+            - lambda: id(cue_played_ok) = false;
+            - logger.log:
+                level: WARN
+                format: "play_follow_up_ready_cue did not start announcing"
+          else:
+            - wait_until:
+                condition:
+                  not:
+                    media_player.is_announcing:
+                      id: external_media_player
+                timeout: 4s
+            - if:
+                condition:
+                  media_player.is_announcing:
+                    id: external_media_player
+                then:
+                  - lambda: id(cue_played_ok) = false;
+                  - logger.log:
+                      level: WARN
+                      format: "play_follow_up_ready_cue still announcing after timeout"
 
   - id: start_open_mic_listening
     mode: restart
@@ -1323,6 +1412,12 @@ script:
           then:
             - voice_assistant.stop:
             - delay: 200ms
+      - wait_until:
+          condition:
+            not:
+              media_player.is_announcing:
+                id: external_media_player
+          timeout: 5s
       - if:
           condition:
             switch.is_off: master_mute_switch
@@ -1334,7 +1429,6 @@ script:
     mode: restart
     then:
       - lambda: id(server_controlled_open_mic_active) = false;
-      - lambda: id(server_controlled_follow_up_starting) = false;
       - voice_assistant.stop:
       - wait_until:
           condition:

@@ -156,3 +156,75 @@ def test_device_yaml_uses_secrets_and_gitignore_excludes_them() -> None:
         assert "password: !secret " in source
         # No literal secret values in the repo files.
         assert re.search(r"key:\s+[\"'](?!\$\{)[^!]", source) is None
+
+
+def _script_body(source: str, script_id: str) -> str:
+    match = re.search(
+        rf"  - id: {script_id}\n(?P<body>.*?)(?=\n  - id: |\n[a-z_]+:\n|\Z)",
+        source,
+        re.DOTALL,
+    )
+    assert match is not None, script_id
+    return match.group("body")
+
+
+def _wait_until_blocks(body: str) -> list[str]:
+    """Top-level `wait_until:` blocks in a script (not nested under a later if)."""
+    blocks: list[str] = []
+    pattern = re.compile(r"^      - wait_until:\n(?P<body>(?:^        .*\n)*)", re.MULTILINE)
+    for match in pattern.finditer(body):
+        blocks.append(match.group("body"))
+    return blocks
+
+
+@pytest.mark.parametrize("package_path", FIRMWARE_PACKAGES, ids=lambda path: path.stem)
+def test_cue_scripts_wait_for_the_announcement_to_finish(package_path: Path) -> None:
+    """api.respond is after script.wait; the cue script must not return until the
+    announcement has started and then finished (else StartListening overlaps it)."""
+    source = package_path.read_text(encoding="utf-8")
+    api = API_SERVICES.read_text(encoding="utf-8")
+    for name in CUE_ACTIONS:
+        action = re.search(
+            rf"    - action: {name}\n(?P<body>.*?)(?=\n    - action: |\Z)",
+            api,
+            re.DOTALL,
+        )
+        assert action is not None, name
+        action_body = action.group("body")
+        wait_at = action_body.find(f"script.wait: {name}")
+        respond_at = action_body.find("api.respond:")
+        assert wait_at != -1 and respond_at != -1 and wait_at < respond_at, name
+        assert "error_message:" in action_body, name
+
+        body = _script_body(source, name)
+        assert "api.respond:" not in body, name
+        waits = _wait_until_blocks(body)
+        # The first top-level wait is "has started announcing". A timeout then
+        # falls into an if/else; the "has finished" wait is nested in the else,
+        # so look at the whole script body after the first start wait.
+        assert waits, name
+        first = waits[0]
+        assert "media_player.is_announcing" in first, name
+        assert re.search(r"^\s+not:\s*$", first, re.MULTILINE) is None, name
+        after = body.split("wait_until:", 1)[1]
+        assert re.search(
+            r"not:\s*\n\s+(?:-\s+)?media_player.is_announcing",
+            after,
+        ), name
+        assert "timeout:" in body, name
+        assert "id(cue_played_ok) = false" in body, name
+
+    # Button / jack sounds must stay fire-and-forget (PE only).
+    if package_path.name.startswith("home-assistant"):
+        play_sound = _script_body(source, "play_sound")
+        assert "wait_until:" not in play_sound
+        assert "script.wait:" not in play_sound
+
+
+@pytest.mark.parametrize("package_path", FIRMWARE_PACKAGES, ids=lambda path: path.stem)
+def test_start_open_mic_listening_waits_for_idle_before_arming(package_path: Path) -> None:
+    body = _script_body(package_path.read_text(encoding="utf-8"), "start_open_mic_listening")
+    wait_at = body.find("wait_until:")
+    start_at = body.find("voice_assistant.start_continuous:")
+    assert wait_at != -1 and start_at != -1 and wait_at < start_at
+    assert "media_player.is_announcing" in body

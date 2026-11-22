@@ -21,26 +21,47 @@ flash, OTA, or connect to any satellite.
       it himself and restores it. Restore anything that was changed at the
       end, including after a rollback.
 - [ ] D-capture stays off.
+- [ ] Current firmware backup for this satellite is on the Maciej-only path
+      (required; see below). Prefer a USB `read_flash` of the full 16 MB.
+      Do not flash until that backup exists.
 
-## Current firmware (rollback source)
+## Current firmware backup (required before the first flash of each device)
 
-The satellites today run the old project's firmware from
-`~/src/piotr_the_ai_server/firmware/esphome` (read only; do not modify that
-tree). Real `secrets.yaml` lives only on Maciej's machine / his copy of that
-tree, never in this repo.
+ESPHome OTA cannot read firmware back off the device. Before flashing a
+satellite, take a full 16 MB flash image over USB, with Maciej present and
+after he has identified the serial device:
 
-Rollback is a reflash of that old tree, with his secrets, over OTA or USB:
+```sh
+# 16 MB = 0x1000000. Store only on a Maciej-only path, never in this repo.
+esptool --chip esp32s3 --port /dev/ttyACM0 read_flash 0x0 0x1000000 \
+  ~/piotr-firmware-backups/voice-pe-03-YYYYMMDD-current.bin
+```
+
+Use a directory Maciej owns, for example `~/piotr-firmware-backups/` on his
+machine. Do not copy the image into this repository, a shared checkout, or
+chat logs.
+
+If a USB backup cannot be taken, the fallback is to compile the current
+firmware from `~/src/piotr_the_ai_server/firmware/esphome` (read only) with
+Maciej's secrets and the ESPHome version the device is already running
+(from hub connect logs after T-026), and keep that `.bin` plus a note of
+the ESPHome version in the same Maciej-only path. A rebuild is only as
+good as the tree and version used; prefer the USB `read_flash` image, and
+only use the rebuilt `.bin` if Maciej has accepted that fallback.
+
+Rollback is a reflash of that backup (USB `write_flash` of the
+`read_flash` image), or of the old project tree with his secrets over OTA
+or USB:
 
 ```sh
 # From a work directory that already has his secrets.yaml (not committed):
 # use the old project YAML, not this repo.
 esphome upload /path/to/piotr_the_ai_server/firmware/esphome/voice-pe-03.yaml
 # USB fallback, if OTA fails: esphome upload --device /dev/ttyACM0 ...
+# Or restore the read_flash image:
+# esptool --chip esp32s3 --port /dev/ttyACM0 write_flash 0x0 \
+#   ~/piotr-firmware-backups/voice-pe-03-YYYYMMDD-current.bin
 ```
-
-Optional but recommended, before the first new flash: compile and keep a
-`.bin` of the current (old) firmware in a Maciej-only path, not in git, so a
-rollback does not depend on rebuilding.
 
 ## Flash (OTA, USB if OTA fails)
 
