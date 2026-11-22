@@ -1,0 +1,18 @@
+substitutions:
+  name: piotr-box3-01
+  friendly_name: Piotr Box 3 01
+
+packages:
+  esphome.voice-assistant: !include packages/esp32-s3-box-3-ryszardzie.yaml
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  encryption:
+    key: !secret box3_01_api_key
+
+ota:
+  - platform: esphome
+    password: !secret box3_01_ota_password

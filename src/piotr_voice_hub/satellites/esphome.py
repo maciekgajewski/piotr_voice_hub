@@ -179,7 +179,7 @@ VISUAL_STATE_SERVICES = {
 CUE_SERVICES = {
     CueType.UTTERANCE_ACCEPTED: "play_message_end_cue",
     CueType.TIMEOUT: "play_conversation_timeout_cue",
-    CueType.FOLLOW_UP_READY: "play_follow_up_ready_cue",  # added by the P1 firmware work
+    CueType.FOLLOW_UP_READY: "play_follow_up_ready_cue",  # T-027 firmware; optional until reflashed
 }
 REQUIRED_SERVICES = (
     START_OPEN_MIC_LISTENING_SERVICE,

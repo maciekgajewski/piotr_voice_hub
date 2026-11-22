@@ -1,0 +1,18 @@
+substitutions:
+  name: piotr-voice-pe-bedroom-01
+  friendly_name: Piotr Voice PE Bedroom 01
+
+packages:
+  piotr.voice-pe-standard: !include packages/home-assistant-voice-pe-piotr-standard.yaml
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  encryption:
+    key: !secret voice_pe_bedroom_01_api_key
+
+ota:
+  - platform: esphome
+    password: !secret voice_pe_bedroom_01_ota_password

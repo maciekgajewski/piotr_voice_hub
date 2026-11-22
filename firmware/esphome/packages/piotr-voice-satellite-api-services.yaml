@@ -1,0 +1,47 @@
+# Shared API actions for Piotr Voice PE and BOX-3 satellites.
+# Cue actions answer with api.respond once the sound has played (status mode).
+# Listen and visual actions stay fire-and-forget.
+api:
+  actions:
+    - action: play_message_end_cue
+      supports_response: status
+      then:
+        - script.execute: play_message_end_cue
+        - script.wait: play_message_end_cue
+        - api.respond:
+            success: true
+    - action: play_conversation_timeout_cue
+      supports_response: status
+      then:
+        - script.execute: play_conversation_timeout_cue
+        - script.wait: play_conversation_timeout_cue
+        - api.respond:
+            success: true
+    - action: play_follow_up_ready_cue
+      supports_response: status
+      then:
+        - script.execute: play_follow_up_ready_cue
+        - script.wait: play_follow_up_ready_cue
+        - api.respond:
+            success: true
+    - action: start_open_mic_listening
+      then:
+        - script.execute: start_open_mic_listening
+        - script.wait: start_open_mic_listening
+    - action: stop_listening
+      then:
+        - script.execute: stop_listening
+        - script.wait: stop_listening
+    - action: reset_open_mic_wake_candidate
+      then:
+        - script.execute: reset_open_mic_wake_candidate
+        - script.wait: reset_open_mic_wake_candidate
+    - action: set_visual_idle
+      then:
+        - script.execute: set_visual_idle
+    - action: set_visual_listening
+      then:
+        - script.execute: set_visual_listening
+    - action: set_visual_processing
+      then:
+        - script.execute: set_visual_processing
