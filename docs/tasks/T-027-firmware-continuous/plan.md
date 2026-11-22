@@ -1,6 +1,8 @@
 # T-027: firmware trimmed to continuous mode
 
-**Status:** in review (PR #39). Based on main after #38 (`3b46f75`). No flash.
+**Status:** merged (PR #39, `42ed871`). Flashed OTA to voice-pe-03 and voice-pe-02 on
+22 Nov 2026, both PASS (`ota-2026-11-22-results.md`). The bedroom Voice PE and the BOX-3 are
+not flashed.
 
 ## Goal
 
@@ -35,8 +37,9 @@ listening (design.md §8). Cue actions answer with `api.respond` once the sound 
 
 ## Out of scope
 
-- Flashing or OTA of any real satellite (a later live session, Maciej present, manager told
-  first). The flash and rollback procedure lives in the task checklist only.
+- Flashing or OTA of any real satellite in the code PR. The flash happened later in a live
+  session (OTA only, on Maciej's go via the manager; gates changed 22 Nov 2026, see the
+  checklist). The procedure lives in the task checklist.
 - Changing production containers, firewall, or recording.
 - T-028 fixtures, T-029 liveness, T-030 soak, T-031 docs beyond this task's firmware notes.
 
