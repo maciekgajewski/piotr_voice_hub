@@ -69,8 +69,8 @@ Everything runs in tmux session `t030` as grok-developer, with output in
 - **Effect of the passive client.** It uses one of the 16 client slots, and the hub
   broadcasts to it. If it falls behind, only the client is dropped (1008); the hub is not
   blocked. It never sends a command, so the busy policy never applies to it, and sessions
-  behave exactly as with 0 clients. A wake still times out at 30 s. Only one other client
-  may connect during the soak, and it may not speak: Maciej's note sessions use no client.
+  behave exactly as with 0 clients. A wake still times out at 30 s. No other client
+  connects during the soak (no test sessions).
 - **Production is not touched.** There is no exec into containers (`/healthz` and docker
   read-only calls only), no restart and no prune.
 
