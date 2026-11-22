@@ -15,3 +15,22 @@
 - `tools/check_firmware.sh` runs `esphome config` in `piotr-voice-hub-esphome-t027:2026.4.0` (never `:latest`) with a throwaway copy of `secrets.example.yaml`. Compile was not required for this PR if config validates; a full compile can wait for the flash session.
 - Flash and rollback procedure: `docs/tasks/T-027-firmware-continuous/checklist.md`. Nothing was flashed or connected to a satellite. Production containers were not touched.
 - `tools/check_firmware.sh` on piotr (ESPHome 2026.4.0, image `piotr-voice-hub-esphome-t027:2026.4.0`, dummy keys only): `esphome config` OK for voice-pe-02, voice-pe-03, voice-pe-bedroom and box3-satellite. A first run failed because the Voice PE `i2s_audio:` header had been dropped with the timer scripts; it was restored. Compile was not run (config is enough for this PR; compile belongs in the flash session).
+
+## 2026-11-22 (rebase after #38, compile, mute/volume nit)
+
+- PR #38 squash-merged to main as `3b46f75` (`docs: P2 task breakdown (T-027–T-031) (#38)`). This branch was rebased onto that commit (`git rebase --onto origin/main c7d7a9e`).
+- Live mute/volume checklist (and the matching plan outline): never change the volume. Read the reported mute and volume first and write them down; confirm the controls exist or are reported. If a real check needs a change, Maciej does it himself and restores it. Restore anything that was changed, including after a rollback.
+- `esphome compile` of all four device YAMLs on piotr, image `piotr-voice-hub-esphome-t027:2026.4.0`, throwaway dummy secrets, build dir under `~/probe/t027-esphome-compile` (not the repo). Limited to 4 CPUs. Disk stayed well above 10 GB (646 GB free at start, 640 GB at end). No flash, no OTA, no production or device change, no Docker prune.
+- Times (wall clock, including config and container start; PlatformIO link time in parentheses), Europe/Warsaw 13:22–13:36:
+  - voice-pe-02: 305 s (246 s) — first, cold cache
+  - voice-pe-03: 167 s (145 s)
+  - voice-pe-bedroom: 174 s (150 s)
+  - box3-satellite: 148 s (126 s)
+  - Total: 794 s (~13 min). Too slow for CI; `tools/check_firmware.sh` stays config-only by default. `--compile` is optional and is not wired into CI or `make check`.
+- Firmware sizes vs the 16 MB flash app slots (`app0`/`app1` = 0x7C0000 = 8,126,464 bytes each). `firmware.bin` / `firmware.ota.bin` are the same size; factory is a merged image.
+  - voice-pe-02 and voice-pe-03: firmware.bin 2,237,008 bytes (27.5% of app0). IDF: Flash 27.5% (2,236,611 / 8,126,464), RAM 17.9% (58,592 / 327,680).
+  - voice-pe-bedroom: firmware.bin 2,237,136 bytes (27.5% of app0). IDF: Flash 27.5% (2,236,739 / 8,126,464), RAM 17.9% (58,592 / 327,680).
+  - box3-satellite: firmware.bin 3,699,632 bytes (45.5% of app0). IDF: Flash 45.5% (3,699,235 / 8,126,464), RAM 14.4% (47,248 / 327,680).
+  - Plenty of headroom in both app slots. No YAML compile errors to fix.
+- Dummy secrets were deleted from the probe copy after the compile. The probe build dir can be removed; it is not in git.
+

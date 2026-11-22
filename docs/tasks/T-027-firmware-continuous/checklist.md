@@ -9,13 +9,17 @@ flash, OTA, or connect to any satellite.
 - [ ] This PR is merged (or the reviewed head is the one being flashed).
 - [ ] `make check` is green.
 - [ ] `tools/check_firmware.sh` is green on piotr (`esphome config` for all four
-      device YAML files, using only `secrets.example.yaml`).
+      device YAML files, using only `secrets.example.yaml`). Optional:
+      `tools/check_firmware.sh --compile` on piotr (not in CI; several minutes
+      per device).
 - [ ] The manager has told Maciej the plan and has an explicit go.
 - [ ] Maciej is present. One satellite at a time, starting with voice-pe-03
       (the usual test box), then voice-pe-02, then voice-pe-bedroom and
       box3-satellite if they are in service.
-- [ ] Read each device's current volume and mute, and write them down. Restore
-      both at the end, including after a rollback.
+- [ ] Read each device's current volume and mute first, and write them down.
+      Do not change the volume. If a later check needs a change, Maciej does
+      it himself and restores it. Restore anything that was changed at the
+      end, including after a rollback.
 - [ ] D-capture stays off.
 
 ## Current firmware (rollback source)
@@ -63,8 +67,10 @@ checks below pass on the first.
       plays the follow-up ready cue, then a follow-up without the wake phrase
       is accepted.
 - [ ] Continuous listening still works (wake phrase accepted while idle).
-- [ ] Hardware mute and volume still work. Restore the written-down volume and
-      mute.
+- [ ] Hardware mute and volume: confirm the mute control exists and a volume
+      level is reported. Do not change the volume. If a real check needs a
+      change, Maciej does it himself and restores it. Restore anything that
+      was changed, including after a rollback.
 - [ ] The device does not react to an on-device wake word of its own (there is
       no `micro_wake_word`).
 
