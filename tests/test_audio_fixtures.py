@@ -5,8 +5,6 @@ from __future__ import annotations
 import hashlib
 
 import pytest
-
-from piotr_voice_hub.hub.wake import match_wake_phrase
 from recorded_fixtures import (
     RecordedFixture,
     load_fixtures,
@@ -14,6 +12,8 @@ from recorded_fixtures import (
     segment_clip,
     vad_start_seconds,
 )
+
+from piotr_voice_hub.hub.wake import match_wake_phrase
 
 FIXTURES = load_fixtures()
 MANIFEST = load_manifest()
