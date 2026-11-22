@@ -26,3 +26,8 @@
   (still `c64ebcf`, detached).
 
 - Local `make check` on this worktree: ruff and pyright clean; 992 tests passed, 8 skipped (GPU). No production or container changes.
+
+- Follow-up: a pytest on `tests/data/jfk_44100_stereo_s16.flac` now asserts native 16-bit
+  44.1 kHz stereo FLAC and the documented sha256, so a 24-bit replacement fails CI rather
+  than only a checklist note. No hub-side URL format validator (the hub does not fetch
+  or decode consumer URLs).
