@@ -146,6 +146,7 @@ class FakeClient:
             }
         )
         self.device_info_error: Exception | None = None
+        self.device_info_started = asyncio.Event()
         self.media_commands: list[dict[str, Any]] = []
         self.fetch = True  # the media player GETs an announced URL
         self.fetch_mode = "all"  # "all"; "drop" or "stall" after `fetch_bytes` (review B1)
@@ -199,6 +200,7 @@ class FakeClient:
         return list(self.entities), services
 
     async def device_info(self) -> DeviceInfo:
+        self.device_info_started.set()
         if "device_info" in self.hang:
             await asyncio.Event().wait()
         if self.device_info_error is not None:
@@ -866,6 +868,25 @@ def test_device_info_failure_does_not_drop_the_connection(
 
     with caplog.at_level(logging.INFO):
         asyncio.run(run())
+
+
+def test_cancelling_device_info_at_connect_closes_the_connection() -> None:
+    async def run() -> None:
+        mic, clients = make()
+        clients.setup = lambda client: client.hang.add("device_info")
+        reader = asyncio.create_task(mic.driver.wait_for_event())
+        while not (clients.made and clients.last.connected):
+            await asyncio.sleep(0.001)
+        await asyncio.wait_for(clients.last.device_info_started.wait(), TIMEOUT)
+        reader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reader
+        assert clients.last.disconnects == 1 and not clients.last.connected
+        clients.setup = lambda _client: None
+        await arm(mic)  # the next call connects afresh
+        assert len(clients.made) == 2
+
+    asyncio.run(run())
 
 
 def test_context_and_playback_target_come_from_config() -> None:

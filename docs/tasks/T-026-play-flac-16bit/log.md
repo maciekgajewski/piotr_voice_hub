@@ -31,3 +31,14 @@
   44.1 kHz stereo FLAC and the documented sha256, so a 24-bit replacement fails CI rather
   than only a checklist note. No hub-side URL format validator (the hub does not fetch
   or decode consumer URLs).
+
+- Maciej accepted the design.md §6 narrowing (`play` = WAV, MP3, 16-bit FLAC; no
+  transcoding) on 22 Nov 2026 at 12:46 CET (Europe/Warsaw), relayed by the manager.
+- Merged `origin/main` (PR #36, `43715de1376b6948a8b6e060968fe222cd142f9c`) into this
+  branch, leaving the reviewed `f893ed4` intact. Replaced the `BEEP_SHA` placeholder in
+  `docs/tasks/T-025-docs-followup/hw_session_2026-11-16.md` with that SHA; the beep URL
+  is 200 and 9644 B.
+- Review nits on the approved `f893ed4`: add the MIT notice `Copyright (c) 2022 OpenAI`
+  for the JFK clip; wrap `device_info()` at connect like `_stop_stray_player` so a
+  cancel disconnects the client; soften the design.md §6 26.5+ wording.
+- Local `make check` on this worktree after the follow-up: ruff and pyright clean; 994 tests passed, 8 skipped (GPU). No production or container changes.

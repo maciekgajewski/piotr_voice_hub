@@ -47,6 +47,7 @@ PY
   `3745bf960c00b0579ccc30e8ec5abe74337b957872ed8ac3ed19d330560653d6`). A 16-bit re-encode of
   OpenAI Whisper's test clip, used as the pinned 11 s FLAC for hardware play checks (E1/E6).
   **Source (MIT):**
+  Copyright (c) 2022 OpenAI
   https://raw.githubusercontent.com/openai/whisper/6e3be77e1a105e59086e3e21ff5f609fd6fa89a5/tests/jfk.flac
   (OpenAI Whisper, MIT,
   https://github.com/openai/whisper/blob/6e3be77e1a105e59086e3e21ff5f609fd6fa89a5/LICENSE).

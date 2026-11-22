@@ -487,7 +487,11 @@ class EsphomeSatellite:
                 "player's announcement): %s",
                 no_response,
             )
-        firmware = await self._firmware_summary(client)
+        try:
+            firmware = await self._firmware_summary(client)
+        except asyncio.CancelledError:
+            await self._disconnect(client)  # never leave a half-open connection behind
+            raise
         players = [entity for entity in entities if isinstance(entity, MediaPlayerInfo)]
         self._media_player_key = players[0].key if players else None
         if not players:
