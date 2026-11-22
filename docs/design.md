@@ -371,7 +371,7 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
   - Wake matcher (vocative only, other case forms rejected, repeats, phrase late in the sentence, partial-then-cancel).
   - Session state machine with fake driver, STT and TTS (accept, cancel, reply timeout, follow-up window, busy, announcement while idle).
   - API schema and broadcast tests.
-- **Recorded-audio fixtures:** WAVs captured from each satellite type (`capture_voice_samples.py`): phrase + command, inflected phrase, no phrase, TV/music, silence, two speakers.
+- **Recorded-audio fixtures:** one synthesized 16 kHz set (T-028) covering phrase + command, inflected phrase, no phrase, TV/music, silence and two speakers. The set is synthesized only: this repo is public, so Maciej's voice must never be committed. If real clips are ever wanted, they stay on piotr outside git and need Maciej's explicit yes. There is no recording in a box session, and `capture_voice_samples.py` is not used.
   - Run them through VAD, STT and the matcher, and track false accepts and false rejects. Check the counts on the GPU before each release.
 - **Soak test:** 72 h on all satellites with a TV on. Count false accepts, reconnects and stuck states.
 

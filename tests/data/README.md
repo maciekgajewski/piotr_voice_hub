@@ -123,16 +123,9 @@ the WAVs and the manifest, then removes only that container and tag. It does not
 generator refuses a Piper URI that is not loopback (`127.0.0.1`, `localhost`, or `::1`) and
 refuses port 10201.
 
-### Adding a consented clip
+### Real clips stay out of git
 
-Do not record from a satellite or a room mic unless Maciej has approved the phrases and the
-output path first. Then:
-
-1. Write 16 kHz 16-bit mono WAV files into a path he approved (outside git).
-2. Copy only the consented files into `tests/data/fixtures/`.
-3. Add a manifest entry with the text, expected wake / transcript, source, and a sha256.
-4. Run `tests/test_audio_fixtures.py` and, on piotr, `tools/fixtures-gpu-test.sh`.
-
-This set is one acoustic family (synthesized). A Voice PE vs BOX-3 recapture is a question
-for Maciej in `docs/tasks/T-028-recorded-audio-fixtures/plan.md`, not something to do
-without his words.
+This fixture set is synthesized only. The repo is public, so Maciej's voice must never be
+committed. If real clips are ever wanted, they stay on piotr outside git and need Maciej's
+explicit yes. There is no recording in a box session, and there is no capture tool in this
+repo.

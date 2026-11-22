@@ -1,6 +1,6 @@
 # T-028: recorded-audio fixtures
 
-**Status:** review approved on d361fb0 (PR #40); nits landing on this branch. Branch `t-028-recorded-audio-fixtures`.
+**Status:** merged (PR #40, 362ffe0). Branch `t-028-recorded-audio-fixtures`.
 
 ## Goal
 
@@ -20,15 +20,17 @@ without a live household recording session (design.md §10).
   CPU tests run in CI. The STT pass is GPU-marked (skipped in CI) and run on piotr in a
   privately tagged container.
 - A manifest records text, expected wake, expected transcript, source, generator command and
-  seed. `tests/data/README.md` and `tests/data/fixtures/manifest.json` document how to add a
-  consented clip.
+  seed. `tests/data/README.md` and `tests/data/fixtures/manifest.json` document the
+  synthesized set.
 
 ## Out of scope
 
 - Permanent or always-on capture, any change to production containers, or satellite flashing.
 - Replacing T-022 or T-030 live hardware counts; this task is the offline regression set.
-- Per-device (Voice PE vs BOX-3) acoustic recapture. That needs Maciej's approval first; see
-  the question below.
+- Per-device (Voice PE vs BOX-3) acoustic recapture into git. Maciej decided (2026-11-22)
+  that the real-box recapture is off: the repo is public, so his voice must never be
+  committed. If real clips are ever wanted, they stay on piotr outside git and need his
+  explicit yes.
 
 ## Approach
 
@@ -44,8 +46,8 @@ never production piper on 10201). The runner is a pytest target; the STT pass is
   wake.
 - Two-speaker and TV/music transcripts are soft (the mixer can confuse STT); a wake accept
   is still a hard fail. VAD on TV/music may open a segment because of the speech-like layers.
-- No capture tool is added. Adding a consented clip is a manual copy into `tests/data/fixtures/`
-  plus a manifest entry; there is no default household output path.
+- No capture tool is added. Real clips are not copied into `tests/data/fixtures/` or
+  committed; they stay on piotr outside git if they are ever wanted.
 
 ## Manual (hardware) checklist outline
 
@@ -53,8 +55,8 @@ never production piper on 10201). The runner is a pytest target; the STT pass is
 - [ ] Optional GPU pass on piotr: `tools/fixtures-gpu-test.sh` (image
       `piotr-voice-hub-fixtures-test:t028`, no production ports). Counts go in the task log.
       No standing recording.
-- [ ] If a consented recapture is wanted, Maciej approves the phrases and the output path
-      first; files are added only with consent.
+- [ ] No recapture into git. If real clips are ever wanted, they stay on piotr outside git
+      and need Maciej's explicit yes; there is no recording in a box session.
 
 ## Risks
 
@@ -70,15 +72,9 @@ never production piper on 10201). The runner is a pytest target; the STT pass is
 - None in P2 (parallel with T-027). Uses T-006, T-008, T-009.
 - Useful before T-030, not a hard gate.
 
-## Question for Maciej (not done in this task)
+## Decision (Maciej, 2026-11-22)
 
-design.md §10 asks for one set per satellite type (Voice PE and ESP32-S3-BOX-3). This PR
-ships one synthesized set, because a recapture from the real boxes needs your approval of
-the phrases and the output path first. Proposed, if you want it later:
-
-- Phrases: the same ten cases as `tests/data/fixtures/manifest.json` (wake + question,
-  question only, "Rysiek, włącz światło", "Ryszarda nie ma w domu", silence, room/TV noise,
-  wake after a pause, "Ustaw minutnik na pięć minut", TV or music in the room, two speakers).
-- Output path: `~/probe/t028-consented/` on piotr (outside git). Selected clips would be
-  copied into `tests/data/fixtures/` only after you agree.
-- No recording will be started until you say yes to both the phrases and that path.
+The real-box voice recapture is off. The repo is public, so Maciej's voice must never go
+into it. The per-satellite fixture set is synthesized only. If real clips are ever wanted,
+they stay on piotr outside git and need Maciej's explicit yes. There is no recording in a
+box session.
