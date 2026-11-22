@@ -1,0 +1,314 @@
+{
+  "format": {
+    "sample_rate": 16000,
+    "sample_width": 2,
+    "channels": 1,
+    "encoding": "pcm_s16le"
+  },
+  "wake_phrase": "Ryszardzie",
+  "seed": 28,
+  "runner_end_pad_seconds": 1.2,
+  "notes": "Replayable synthesized fixtures for VAD, STT and the wake matcher (T-028, design.md §10). No household recording. One acoustic set at the 16 kHz mono PCM the satellites send; per-device (Voice PE vs BOX-3) recapture needs Maciej's approval of the phrases and the output path first. Piper-derived speech is not bit-reproducible on regeneration; silence, seeded noise, the wake_pl_16k.wav copy and concatenations of those are. See tests/data/README.md for the pl_PL-bass-high lineage (test use only).",
+  "fixtures": [
+    {
+      "id": "wake_question",
+      "path": "wake_question.wav",
+      "text": "Ryszardzie, jaka będzie jutro pogoda?",
+      "expected_wake": true,
+      "expected_remainder": "jaka będzie jutro pogoda",
+      "expected_transcript_words": [
+        "ryszardzie",
+        "jaka",
+        "będzie",
+        "jutro",
+        "pogoda"
+      ],
+      "expected_vad_segments": 1,
+      "vad_mode": "exact",
+      "soft_transcript": false,
+      "min_speech_start_seconds": null,
+      "source": "repo tests/data/wake_pl_16k.wav (Piper pl_PL-bass-high on piotr; see tests/data/README.md)",
+      "license": "Apache-2.0, rhasspy/piper-voices pl_PL-bass-high (c10ece1aade47bb51c153c893d14e5bf8e5b7117)",
+      "generator": {
+        "kind": "copied",
+        "from": "tests/data/wake_pl_16k.wav",
+        "command": "cp tests/data/wake_pl_16k.wav tests/data/fixtures/wake_question.wav",
+        "seed": null
+      },
+      "notes": "Phrase + command. The original clip is kept as tests/data/wake_pl_16k.wav; this file is a byte-identical copy.",
+      "sha256": "0cec54e9a3de7d2e7bde8298bcb9ec5db98cb3fa0b943865df4934e4be3ff210",
+      "bytes": 83300,
+      "duration_seconds": 2.601
+    },
+    {
+      "id": "question_no_wake",
+      "path": "question_no_wake.wav",
+      "text": "Jaka będzie jutro pogoda?",
+      "expected_wake": false,
+      "expected_remainder": null,
+      "expected_transcript_words": [
+        "jaka",
+        "będzie",
+        "jutro",
+        "pogoda"
+      ],
+      "expected_vad_segments": 1,
+      "vad_mode": "exact",
+      "soft_transcript": false,
+      "min_speech_start_seconds": null,
+      "source": "synthesized: throwaway Piper pl_PL-bass-high (tools/generate_audio_fixtures.sh)",
+      "license": "Apache-2.0, rhasspy/piper-voices pl_PL-bass-high (c10ece1aade47bb51c153c893d14e5bf8e5b7117)",
+      "generator": {
+        "kind": "piper",
+        "voice": "pl_PL-bass-high",
+        "text": "Jaka będzie jutro pogoda?",
+        "piper_uri_port": 10228,
+        "command": "tools/generate_audio_fixtures.sh (image piotr-voice-hub-piper:t028, uri tcp://127.0.0.1:10228)",
+        "seed": null
+      },
+      "notes": "The same question as the wake clip, without the wake word.",
+      "sha256": "7e83ca08bfe0fa77bde712279b38e01615fb66992b0068c8d6128e2d76b618a1",
+      "bytes": 69148,
+      "duration_seconds": 2.159
+    },
+    {
+      "id": "near_miss",
+      "path": "near_miss.wav",
+      "text": "Rysiek, włącz światło",
+      "expected_wake": false,
+      "expected_remainder": null,
+      "expected_transcript_words": [
+        "rysiek",
+        "włącz",
+        "światło"
+      ],
+      "expected_vad_segments": 1,
+      "vad_mode": "exact",
+      "soft_transcript": false,
+      "min_speech_start_seconds": null,
+      "source": "synthesized: throwaway Piper pl_PL-bass-high (tools/generate_audio_fixtures.sh)",
+      "license": "Apache-2.0, rhasspy/piper-voices pl_PL-bass-high (c10ece1aade47bb51c153c893d14e5bf8e5b7117)",
+      "generator": {
+        "kind": "piper",
+        "voice": "pl_PL-bass-high",
+        "text": "Rysiek, włącz światło",
+        "piper_uri_port": 10228,
+        "command": "tools/generate_audio_fixtures.sh (image piotr-voice-hub-piper:t028, uri tcp://127.0.0.1:10228)",
+        "seed": null
+      },
+      "notes": "A familiar diminutive, not the vocative 'Ryszardzie'.",
+      "sha256": "5a5f142d05a2a88889ac7b79fcd5296cbe3d3683c68885b5c95815b9f9ce30c7",
+      "bytes": 66546,
+      "duration_seconds": 2.078
+    },
+    {
+      "id": "inflected",
+      "path": "inflected.wav",
+      "text": "Ryszarda nie ma w domu",
+      "expected_wake": false,
+      "expected_remainder": null,
+      "expected_transcript_words": [
+        "ryszarda",
+        "nie",
+        "ma",
+        "w",
+        "domu"
+      ],
+      "expected_vad_segments": 1,
+      "vad_mode": "exact",
+      "soft_transcript": false,
+      "min_speech_start_seconds": null,
+      "source": "synthesized: throwaway Piper pl_PL-bass-high (tools/generate_audio_fixtures.sh)",
+      "license": "Apache-2.0, rhasspy/piper-voices pl_PL-bass-high (c10ece1aade47bb51c153c893d14e5bf8e5b7117)",
+      "generator": {
+        "kind": "piper",
+        "voice": "pl_PL-bass-high",
+        "text": "Ryszarda nie ma w domu",
+        "piper_uri_port": 10228,
+        "command": "tools/generate_audio_fixtures.sh (image piotr-voice-hub-piper:t028, uri tcp://127.0.0.1:10228)",
+        "seed": null
+      },
+      "notes": "Genitive 'Ryszarda', not the vocative. Must not wake (design.md §4.1).",
+      "sha256": "7c298fb8411555f74fc8d121946e374e5ee54d640156ec392ce9cd084eca79cb",
+      "bytes": 50200,
+      "duration_seconds": 1.567
+    },
+    {
+      "id": "follow_up",
+      "path": "follow_up.wav",
+      "text": "Ustaw minutnik na pięć minut",
+      "expected_wake": false,
+      "expected_remainder": null,
+      "expected_transcript_words": [
+        "ustaw",
+        "minutnik",
+        "na",
+        "pięć",
+        "minut"
+      ],
+      "expected_vad_segments": 1,
+      "vad_mode": "exact",
+      "soft_transcript": false,
+      "min_speech_start_seconds": null,
+      "source": "synthesized: throwaway Piper pl_PL-bass-high (tools/generate_audio_fixtures.sh)",
+      "license": "Apache-2.0, rhasspy/piper-voices pl_PL-bass-high (c10ece1aade47bb51c153c893d14e5bf8e5b7117)",
+      "generator": {
+        "kind": "piper",
+        "voice": "pl_PL-bass-high",
+        "text": "Ustaw minutnik na pięć minut",
+        "piper_uri_port": 10228,
+        "command": "tools/generate_audio_fixtures.sh (image piotr-voice-hub-piper:t028, uri tcp://127.0.0.1:10228)",
+        "seed": null
+      },
+      "notes": "A request without the wake word. The matcher must not accept it; the session follow-up window (already tested in test_session.py) would.",
+      "sha256": "ef453ab78ddfaf96d642eab27a0518ac4e751b40eb7909eae82db068952e49e6",
+      "bytes": 82894,
+      "duration_seconds": 2.589
+    },
+    {
+      "id": "silence",
+      "path": "silence.wav",
+      "text": "",
+      "expected_wake": false,
+      "expected_remainder": null,
+      "expected_transcript_words": [],
+      "expected_vad_segments": 0,
+      "vad_mode": "exact",
+      "soft_transcript": false,
+      "min_speech_start_seconds": null,
+      "source": "generated in-repo (zeros)",
+      "license": "generated in-repo (zeros)",
+      "generator": {
+        "kind": "silence",
+        "command": "tools/generate_audio_fixtures.py (3.0 s of zeros at 16 kHz)",
+        "seed": null,
+        "duration_seconds": 3.0
+      },
+      "notes": "Quiet room. VAD must open no segment.",
+      "sha256": "d303811b8c84619667cd0501342f84ec6cbe69f7aa3856dcf52fabda374c92b8",
+      "bytes": 96044,
+      "duration_seconds": 3.0
+    },
+    {
+      "id": "noise_only",
+      "path": "noise_only.wav",
+      "text": "",
+      "expected_wake": false,
+      "expected_remainder": null,
+      "expected_transcript_words": [],
+      "expected_vad_segments": 0,
+      "vad_mode": "exact",
+      "soft_transcript": false,
+      "min_speech_start_seconds": null,
+      "source": "generated in-repo (Gaussian noise)",
+      "license": "generated in-repo (PRNG, seed 28)",
+      "generator": {
+        "kind": "noise",
+        "command": "tools/generate_audio_fixtures.py (3.0 s Gaussian, sigma=400, seed=28)",
+        "seed": 28,
+        "sigma": 400,
+        "duration_seconds": 3.0
+      },
+      "notes": "Noise only, similar level to tests/test_vad.py. VAD must open no segment.",
+      "sha256": "e1add14186f20ed6eab669f3a05edd1444ea2c00d3458dfb2c453c8ccb272cfb",
+      "bytes": 96044,
+      "duration_seconds": 3.0
+    },
+    {
+      "id": "speech_after_silence",
+      "path": "speech_after_silence.wav",
+      "text": "Ryszardzie, jaka będzie jutro pogoda?",
+      "expected_wake": true,
+      "expected_remainder": "jaka będzie jutro pogoda",
+      "expected_transcript_words": [
+        "ryszardzie",
+        "jaka",
+        "będzie",
+        "jutro",
+        "pogoda"
+      ],
+      "expected_vad_segments": 1,
+      "vad_mode": "exact",
+      "soft_transcript": false,
+      "min_speech_start_seconds": 4.0,
+      "source": "4.0 s of zeros plus the wake_question clip",
+      "license": "Apache-2.0, rhasspy/piper-voices pl_PL-bass-high (c10ece1aade47bb51c153c893d14e5bf8e5b7117); leading silence generated in-repo",
+      "generator": {
+        "kind": "concat",
+        "command": "silence(4.0) + tests/data/fixtures/wake_question.wav",
+        "seed": null,
+        "lead_silence_seconds": 4.0
+      },
+      "notes": "A wake after a long quiet stretch. VAD start must be at or after 4 s (plus the 250 ms start run).",
+      "sha256": "5de5d0d7033df74c46c0268218694ae26049ac15d6004eda918e59d98432923e",
+      "bytes": 211266,
+      "duration_seconds": 6.601
+    },
+    {
+      "id": "two_speakers",
+      "path": "two_speakers.wav",
+      "text": "Która jest godzina? / Włącz radio w kuchni",
+      "expected_wake": false,
+      "expected_remainder": null,
+      "expected_transcript_words": null,
+      "expected_vad_segments": 1,
+      "vad_mode": "at_least",
+      "soft_transcript": true,
+      "min_speech_start_seconds": null,
+      "source": "synthesized two Piper phrases, one pitch-shifted, mixed",
+      "license": "Piper pl_PL-bass-high (Apache-2.0); second speaker is a pitch-shifted overlay",
+      "generator": {
+        "kind": "mix",
+        "voice": "pl_PL-bass-high",
+        "texts": [
+          "Która jest godzina?",
+          "Włącz radio w kuchni"
+        ],
+        "pitch_shift_ratio_b": 1.18,
+        "offset_seconds_b": 0.35,
+        "command": "tools/generate_audio_fixtures.sh (two_speakers mix)",
+        "seed": null
+      },
+      "notes": "Two overlapping non-wake phrases. VAD may open one or two segments. The wake matcher must not accept (hard). The transcript may be messy (soft).",
+      "sha256": "6a00252a943b562e0b115b61fc488f26de49cecdfd1200b28e6edc2f7d1f611d",
+      "bytes": 55324,
+      "duration_seconds": 1.728
+    },
+    {
+      "id": "tv_music",
+      "path": "tv_music.wav",
+      "text": "",
+      "expected_wake": false,
+      "expected_remainder": null,
+      "expected_transcript_words": null,
+      "expected_vad_segments": 0,
+      "vad_mode": "any",
+      "soft_transcript": true,
+      "min_speech_start_seconds": null,
+      "source": "synthesized stand-in for TV/music: tones, noise, layered non-wake Polish phrases",
+      "license": "generated in-repo: Piper phrases (Apache-2.0 pl_PL-bass-high) layered with tones",
+      "generator": {
+        "kind": "mix",
+        "voice": "pl_PL-bass-high",
+        "texts": [
+          "Dzisiaj wieczorem mecz zaczyna się o dwudziestej",
+          "Wiadomości z kraju i ze świata po przerwie",
+          "Przepis na ciasto znajdziecie na naszej stronie"
+        ],
+        "tone_hz": [
+          220.0,
+          277.2,
+          329.6,
+          440.0
+        ],
+        "noise_sigma": 180,
+        "seed": 29,
+        "command": "tools/generate_audio_fixtures.sh (tv_music mix)"
+      },
+      "notes": "Stand-in for TV/music until a consented device capture exists. VAD may open a segment (speech-like layers). Accepting a wake is a hard fail. Transcript is soft.",
+      "sha256": "7ad8de716eb86a16d8c40d0f055e81a5a4d055fe3877478cbd866cbf27fe2c5b",
+      "bytes": 192044,
+      "duration_seconds": 6.0
+    }
+  ]
+}
