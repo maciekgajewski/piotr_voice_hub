@@ -201,9 +201,25 @@ Proposed package layout in `piotr_voice_hub/`:
 | Type | Data | Effect |
 |---|---|---|
 | `speak` | `text`, `listen_after?` (default false), `volume?` | Synthesize and play; `ack` carries `playback_id`. |
-| `play` | `url`, `listen_after?` (default false) | Play a WAV/FLAC/MP3 URL the satellite can fetch (`http` or `https`, at most 2048 characters; it must be reachable from the satellite, §4.1 step 6); `ack` carries `playback_id`. Reply or announcement like `speak`. (T-021) |
+| `play` | `url`, `listen_after?` (default false) | Play a WAV, MP3 or **16-bit** FLAC URL the satellite can fetch (`http` or `https`, at most 2048 characters; it must be reachable from the satellite, §4.1 step 6); `ack` carries `playback_id`. Reply or announcement like `speak`. (T-021, T-026) |
 | `stop` | none | Stop the current `speak` or `play` (reply or announcement) from its `ack` to its `playback_finished`; re-arm. The `ack` is the reply; the `speak` or `play` still ends with its one `playback_finished`. Otherwise `busy`. (T-019, T-021) |
 | `release` | none | End `PROCESSING` without speaking (e.g. nothing to say); re-arm. |
+
+**`play` formats (T-026).** The hub sends the URL to the satellite with no transcode or
+proxy (§4.1 step 6). WAV, MP3 and 16-bit FLAC (1 or 2 channels) are the formats we will
+send (accepted 2026-11-22, T-026). 24-bit FLAC is not reliable on these satellites:
+Home Assistant Voice PE firmware 25.10 and earlier uses ESPHome's `speaker` media
+player, which rejects any stream that is not 16 bits per sample
+([`audio_pipeline.cpp` in ESPHome 2025.10.0](https://github.com/esphome/esphome/blob/9a29dec6d9c7ad8defc03caacb69e00314c86c16/esphome/components/speaker/media_player/audio_pipeline.cpp#L526-L530);
+the device log is "Incompatible bits per sample. Only 16 bits per sample is supported").
+On 2026-11-22 a 24-bit 44.1 kHz stereo FLAC (OpenAI Whisper `tests/jfk.flac` @ `6e3be77`,
+1,152,693 bytes, 11 s) sent as an announcement to voice-pe-03 finished in 0.9 s with
+nothing heard. A 16-bit re-encode of that clip is `tests/data/jfk_44100_stereo_s16.flac`.
+The satellites' firmware version was not in the hub logs then; the driver now logs
+`esphome_version`, `project_name` and `project_version` once at connect. Newer
+firmware (26.5+) may resample 24-bit; unconfirmed on our boxes. If a later connect
+log shows 26.5+, a 24-bit failure needs device-side logs, and this limit can be
+revisited.
 
 Errors are `busy`, `unknown_satellite`, `satellite_offline` and `bad_request`. An error reply is `{"type":"error","reply_to":"c7","satellite":"voice-pe-02","data":{"code":"busy","message":"…"}}` (`reply_to` and `satellite` are `null` when the command did not carry valid ones). Every `ack`ed `speak` or `play` ends with one `playback_finished` while the hub runs (shutdown emits none), also when the playback failed (T-017) or the satellite could not fetch or play the URL (T-021). If TTS fails before any audio for a reply, the timeout cue plays first, so the person does not hear only silence after the accepted cue.
 

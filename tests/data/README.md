@@ -41,3 +41,20 @@ with wave.open("tests/data/beep_16k.wav", "w") as w:
     w.writeframes(b"".join(struct.pack("<h", x) for x in samples))
 PY
 ```
+
+- `jfk_44100_stereo_s16.flac`: 11.000 s, 44.1 kHz stereo 16-bit native FLAC (485,100 samples,
+  block size 4608, 488,897 bytes, sha256
+  `3745bf960c00b0579ccc30e8ec5abe74337b957872ed8ac3ed19d330560653d6`). A 16-bit re-encode of
+  OpenAI Whisper's test clip, used as the pinned 11 s FLAC for hardware play checks (E1/E6).
+  **Source (MIT):**
+  Copyright (c) 2022 OpenAI
+  https://raw.githubusercontent.com/openai/whisper/6e3be77e1a105e59086e3e21ff5f609fd6fa89a5/tests/jfk.flac
+  (OpenAI Whisper, MIT,
+  https://github.com/openai/whisper/blob/6e3be77e1a105e59086e3e21ff5f609fd6fa89a5/LICENSE).
+  The speech is the public-domain JFK inaugural-address excerpt that file carries. The
+  original is 24-bit 44.1 kHz stereo; Voice PE firmware 25.10 and earlier rejects non-16-bit
+  FLAC, and that original finished in 0.9 s with nothing heard on voice-pe-03 on 2026-11-22.
+  **Command:**
+  ```
+  ffmpeg -i jfk.flac -c:a flac -sample_fmt s16 tests/data/jfk_44100_stereo_s16.flac
+  ```

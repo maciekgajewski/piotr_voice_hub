@@ -36,7 +36,7 @@ refused public port). E5 has a pinned public clip from T-025 (see E5); it was no
 | tool | `https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/c64ebcf50cc9851d230d36e45933aaf3e8c042ce/tools/speak_test.py` | 200 text/plain 11188 |
 | CLIP11 (11.0 s, flac) | `https://raw.githubusercontent.com/openai/whisper/6e3be77e1a105e59086e3e21ff5f609fd6fa89a5/tests/jfk.flac` | 200 audio/flac 1152693 |
 | SPEECH (2.1 s, wav) | `https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/c64ebcf50cc9851d230d36e45933aaf3e8c042ce/tests/data/speech_pl_16k.wav` | 200 audio/wav 67290 |
-| BEEP (0.3 s, wav) | `https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/$BEEP_SHA/tests/data/beep_16k.wav` | added in T-025. `$BEEP_SHA` is the PR #36 merge commit (`beep_16k.wav` is not in c64ebcf); the literal value is filled in by the next PR. |
+| BEEP (0.3 s, wav) | `https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/43715de1376b6948a8b6e060968fe222cd142f9c/tests/data/beep_16k.wav` | 200 audio/wav 9644 |
 | MISSING (404) | `https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/c64ebcf50cc9851d230d36e45933aaf3e8c042ce/tests/data/missing.wav` | 404 text/plain 14 |
 | REFUSED | `http://stream.radioparadise.com:8001/x.wav` | TCP refused (RST) in 24–106 ms, 3 of 3 |
 | RADIO | `http://stream.radioparadise.com/mp3-128` | 200 audio/mpeg, icy-name Radio Paradise |
@@ -58,9 +58,7 @@ export SHA=c64ebcf50cc9851d230d36e45933aaf3e8c042ce CLIP11=https://raw.githubuse
 - One-shots (`--announce`) need no timeout: they exit after `playback_finished`, or after 120 s.
 - Tool commands use `${SHA:?…}` etc., so an unset variable stops them.
 - E5 only: do not reuse `$SHA` (c64ebcf) for the beep, or the BEEP URL 404s.
-  `BEEP_SHA` = the PR #36 merge commit (`beep_16k.wav` is not in c64ebcf); the literal
-  value is filled in by the next PR. Then:
-  `export BEEP=https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${BEEP_SHA:?set BEEP_SHA, see the top}/tests/data/beep_16k.wav`
+  `export BEEP=https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/43715de1376b6948a8b6e060968fe222cd142f9c/tests/data/beep_16k.wav`
 
 **Stop line** (ends **every** `timeout` in the hub container; use only to end the current session):
 
@@ -190,9 +188,8 @@ vs LAN host).
 Record which of the two lines it produced. A refused LAN port remains **deferred**.
 
 **E5 (step 8), clip under 0.5 s.** A 0.3 s 880 Hz sine, 16 kHz 16-bit mono WAV
-(`tests/data/beep_16k.wav`, T-025). Use `$BEEP_SHA` for the BEEP URL, not `$SHA`.
-`BEEP_SHA` = the PR #36 merge commit (`beep_16k.wav` is not in c64ebcf); the literal
-value is filled in by the next PR. Not run on 16 or 22 Nov.
+(`tests/data/beep_16k.wav`, T-025). Use `$BEEP` (PR #36 merge
+`43715de1376b6948a8b6e060968fe222cd142f9c`, not `$SHA`). Not run on 16 or 22 Nov.
 
 `{ docker exec piotr-voice-hub-hub-1 python -c "$(curl -fsSL https://raw.githubusercontent.com/maciekgajewski/piotr_voice_hub/${SHA:?set SHA, see the top}/tools/speak_test.py)" --announce voice-pe-03 --play "${BEEP:?see the top}" </dev/null; echo "exit=$?"; }`
 
