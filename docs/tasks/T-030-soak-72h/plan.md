@@ -37,6 +37,8 @@ states, and measure memory/VRAM drift (design.md §10–§11, P2 exit criterion)
    - accept latency: the `segment … wake=True` line to `played cue utterance_accepted`;
    - hub-wide: `hub running` (starts), ERROR/CRITICAL lines, tracebacks.
 
+   With `--health health.jsonl` it adds connected % and the longest non-idle run per
+   satellite, and counts lines that are not JSON (an HTML error page, no answer).
    With `--notes notes.csv` (Maciej's notes, below) it also gives TV hours, false accepts
    by TV state (on, off, unknown) and per TV-hour, and the real-wake hit rate and latency.
    Text output plus `--json`. Exit 2 on a missing or malformed file. It never connects to
@@ -76,6 +78,9 @@ tmux new-window -t t030 -n sample "timeout 73h tools/soak_monitor.sh sample $D"
 | `sample` | `curl -m5 /healthz` (connected and state per satellite) | 30 s | `health.jsonl` |
 | `sample` | `docker inspect` (StartedAt, RestartCount, Health) and `docker stats --no-stream` for hub, Piper and speaker; `nvidia-smi` MiB per process with its container (from `/proc/PID/cgroup`); probe dir size; `df /` | 5 min | `res.csv` |
 
+- **No `set -e` in the sampler:** a failed step (docker, curl, nvidia-smi, du, df) is
+  logged and the loop goes on; a missing guard value counts as 0 and is logged as `missing`
+  on every iteration, so the guard is never skipped silently.
 - **Size guard:** if the probe dir passes 200 MB or `/` 90 %, the sampler writes
   `ABORT` and kills the `t030` tmux session (our monitors only).
 - **No API client.** Nothing connects to the WebSocket API, so the hub runs exactly as
@@ -166,5 +171,5 @@ There are no transcripts, no IPs and no config contents. Raw probe files stay on
       lines look right.
 - [ ] 72 h; a daily glance at `health.jsonl`, `res.csv` and `ABORT` (counts only).
 - [ ] At the end: kill tmux `t030`, write `notes.csv`, run `soak_summary.py hub.log --notes
-      notes.csv --json summary.json`, and fill in the results file.
+      notes.csv --health health.jsonl --json summary.json`, and fill in the results file.
 - [ ] Confirm production is unchanged (SHA, StartedAt, RestartCount).

@@ -98,3 +98,16 @@ def test_fixture_is_synthetic() -> None:
     text = (DATA / "hub.log").read_text()
     assert re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", text) is None
     assert "Ryszard" not in text and "raw_text" not in text
+
+
+def test_health_tolerates_bad_lines(tmp_path: Path) -> None:
+    code, result = run(tmp_path, "--health", str(DATA / "health.jsonl"))
+    assert code == 0
+    assert result["health"] == {
+        "samples": 6,
+        "bad_lines": 2,  # an HTML error body and a sample where curl got no answer
+        "satellites": {
+            "voice-pe-02": {"samples": 4, "connected_pct": 100.0, "longest_not_idle_samples": 2},
+            "voice-pe-03": {"samples": 4, "connected_pct": 75.0, "longest_not_idle_samples": 1},
+        },
+    }

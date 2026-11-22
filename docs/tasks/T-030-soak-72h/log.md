@@ -27,3 +27,16 @@
 - Added `tools/soak_summary.py` (stdlib, offline; optional `--notes` CSV for TV-hours,
   real-wake hit rate and latency), `tools/soak_monitor.sh` (`log` and `sample` modes,
   read-only, size guard), and tests on a synthetic fixture in `tests/data/soak/`.
+
+## 2026-11-22 (review 1)
+
+- PR #45 review at 4d5177d: REQUEST CHANGES. B1: under `set -euo pipefail` a failed
+  cgroup grep (host process or exited pid) or a transient nvidia-smi/du/df/docker/curl
+  failure would end the sampler and its disk guard. Fixed: no `set -e`, each step is
+  non-fatal, a missing du/df value counts as 0 and is logged (`missing`) on every
+  iteration, and the guard still trips. `tests/test_soak_monitor.py` runs the real script
+  with failing stubs (two iterations survive; the guard still aborts and kills only the
+  tmux session) plus `bash -n` and shellcheck when installed. Test knobs SOAK_INTERVAL,
+  SOAK_RES_EVERY, SOAK_ITERATIONS.
+- Nit: `soak_summary.py --health health.jsonl` tolerates and counts bad lines (HTML
+  body, no answer); fixture and test added.

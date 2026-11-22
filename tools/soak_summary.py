@@ -1,6 +1,7 @@
 """T-030: summarize a saved hub log from the 72 h soak. Offline and read-only; stdlib only.
 
-    python3 tools/soak_summary.py hub.log [--notes notes.csv] [--json out.json]
+    python3 tools/soak_summary.py hub.log [--notes notes.csv] [--health health.jsonl]
+        [--json out.json]
 
 `hub.log` is `docker logs piotr-voice-hub-hub-1` output (the hub's LOG_FORMAT, times in UTC).
 Everything is reported in Europe/Warsaw time. The optional notes file is Maciej's CSV, with
@@ -16,6 +17,11 @@ log). A `wake` is a real wake phrase Maciej said. It is a hit when that satellit
 within WAKE_MATCH_SECONDS of the noted time. Every accept that matches no noted wake counts as
 a false accept. A day (local date) with no notes at all has TV state unknown and no real-wake
 figures. Without a notes file every accept is a false-accept candidate.
+
+The optional health file is `tools/soak_monitor.sh sample` output, one `/healthz` sample per
+line. Per satellite it gives the share of samples with the satellite connected and the
+longest run of consecutive samples not `idle`. A line that is not JSON (for example an HTML
+error page from curl) or has no `healthz` object is counted as bad and skipped.
 
 Exit 0 after printing the summary; 2 if the log is missing or has no hub log lines.
 """
@@ -329,6 +335,12 @@ def render(result: dict[str, Any]) -> str:
         f"missed {wakes['missed']}"
     )
     out.extend(f"  {line}" for line in result["errors"])
+    health = result.get("health")
+    if health is not None:
+        out.append(
+            f"health samples: {health['samples']}, bad lines: {health['bad_lines']}, "
+            f"per satellite {health['satellites']}"
+        )
     for name, sat in result["satellites"].items():
         out.append(f"\n{name}: versions {sat['esphome_versions']}, reconnects {sat['reconnects']}")
         out.append(f"  counts {sat['counts']}")
@@ -349,10 +361,48 @@ def render(result: dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+def parse_health(path: Path) -> dict[str, Any]:
+    lines = bad = 0
+    seen: Counter[str] = Counter()
+    connected: Counter[str] = Counter()
+    run: Counter[str] = Counter()
+    longest: Counter[str] = Counter()
+    with path.open(encoding="utf-8", errors="replace") as file:
+        for raw in file:
+            if not raw.strip():
+                continue
+            lines += 1
+            try:
+                satellites = json.loads(raw)["healthz"]["satellites"]
+            except (ValueError, KeyError, TypeError):  # not JSON, or curl got no answer
+                satellites = None
+            if not isinstance(satellites, dict):
+                bad += 1
+                continue
+            for name, state in satellites.items():
+                seen[name] += 1
+                connected[name] += bool(state.get("connected"))
+                run[name] = 0 if state.get("state") == "idle" else run[name] + 1
+                longest[name] = max(longest[name], run[name])
+    return {
+        "samples": lines,
+        "bad_lines": bad,
+        "satellites": {
+            name: {
+                "samples": seen[name],
+                "connected_pct": round(100 * connected[name] / seen[name], 2),
+                "longest_not_idle_samples": longest[name],
+            }
+            for name in sorted(seen)
+        },
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="T-030: summarize a saved hub soak log.")
     parser.add_argument("log", type=Path, help="saved hub log (docker logs output)")
     parser.add_argument("--notes", type=Path, help="Maciej's notes CSV (time,event,satellite)")
+    parser.add_argument("--health", type=Path, help="soak_monitor.sh health.jsonl")
     parser.add_argument("--json", type=Path, help="also write the summary as JSON here")
     args = parser.parse_args(argv)
     if not args.log.is_file():
@@ -362,11 +412,13 @@ def main(argv: list[str] | None = None) -> int:
     if summary.first is None or summary.last is None:
         print(f"no hub log lines in {args.log}", file=sys.stderr)
         return 2
-    if args.notes is not None and not args.notes.is_file():
-        print(f"no such notes file: {args.notes}", file=sys.stderr)
-        return 2
+    for option, path in (("notes", args.notes), ("health", args.health)):
+        if path is not None and not path.is_file():
+            print(f"no such {option} file: {path}", file=sys.stderr)
+            return 2
     notes = None if args.notes is None else parse_notes(args.notes, local(summary.last))
     result = report(summary, classify(summary, notes))
+    result["health"] = None if args.health is None else parse_health(args.health)
     print(render(result))
     if args.json is not None:
         args.json.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
