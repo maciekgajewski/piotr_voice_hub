@@ -15,6 +15,9 @@ accepts, reconnects and stuck states are counted (design.md §10–§11).
   phrase), reconnects, `MicrophoneUnavailable`, stuck states (armed with no audio, session
   states that never leave PROCESSING, cue or playback waits that hit their bound), and
   reply/timeout events.
+- Quiet-room check on a Voice PE with `auto_gain` at 0 dBFS: during the soak, a quiet room
+  with no speech must not trip the T-029 audio-liveness check (15 s with RMS < 16 is digital
+  silence and becomes `MicrophoneUnavailable`). Count any liveness trips in the logs.
 - If T-022 has not already measured them, include the wake-miss rate and false-wake count
   over a fixed utterance set and a quiet period (README carry-forward).
 - The tool is read-only on logs. It does not connect to satellites or change production.
@@ -46,6 +49,8 @@ audio). The live 72 h run and the recorded counts go in the task log after the s
       off, production deploy (if any) was approved in Maciej's own words.
 - [ ] Start: note SHA, container IDs, volume, TV state; restore anything changed at the end.
 - [ ] 72 h with the TV on; abort path documented.
+- [ ] Quiet-room check on Voice PE with auto_gain at 0 dBFS: a quiet room with no speech
+      must not trip T-029 liveness (15 s, RMS < 16); count any liveness trips in the logs.
 - [ ] After: run the summary tool, record counts, compare to the T-022 baseline if it exists.
 
 ## Risks
