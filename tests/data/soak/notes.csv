@@ -1,0 +1,5 @@
+time,event,satellite
+2026-11-23 18:00,tv_on,
+2026-11-23 18:05,wake,voice-pe-02
+2026-11-23 22:30,tv_off,
+2026-11-24 10:00,wake,voice-pe-03
