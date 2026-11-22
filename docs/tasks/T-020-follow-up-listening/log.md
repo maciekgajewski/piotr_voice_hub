@@ -50,3 +50,11 @@
   session on cd8c36a, voice-pe-03 only (Maciej's request); step 4 is deferred. The session
   checklist is on piotr at `~/probe/hw_session_2026-11-01.md` (not in the repo: hardware
   checklists live in the PR bodies, except T-022's).
+
+## 2026-11-22
+
+- Hardware on production c64ebcf, voice-pe-03 (study): A1, A2 and A3 PASS. Full
+  results: `docs/tasks/T-025-docs-followup/hw_session_2026-11-22-results.md`.
+  Checklist: `hw_session_2026-11-16.md`. 7 Nov results (A4, A5, B, C PASS; D FAIL):
+  `hw_session_2026-11-07-results.md`. Process lesson from the 22 Nov session: wait
+  for an explicit go after each step's confirmation before starting the next step.

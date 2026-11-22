@@ -80,7 +80,10 @@ Delete the contents first. `atrm` runs only after that command succeeds. If the 
 fails, the job stays queued.
 
 ```sh
-python -m piotr_voice_hub.stt_oneshot_client --teardown --directory "$DIR" --at-job JOB
+python -m piotr_voice_hub.stt_oneshot_client \
+  --teardown --satellite voice-pe-03 \
+  --ws ws://127.0.0.1:8750/ws \
+  --directory "$DIR" --at-job JOB
 ```
 
 Then set `enabled: false` or remove the section, and stop using the override file.

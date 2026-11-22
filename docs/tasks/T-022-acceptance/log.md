@@ -119,3 +119,10 @@
   `tmux has-session -t t022-2-1` fails; a "Sessions" note after the stop line: on
   `duplicate session` (any of the four sessions), stop line first, wait until
   `has-session` fails, then retry.
+
+## 2026-11-22
+
+- Further T-020/T-021 hardware on production c64ebcf (voice-pe-03 only) is recorded
+  in `docs/tasks/T-025-docs-followup/` (checklist `hw_session_2026-11-16.md`,
+  results `hw_session_2026-11-22-results.md` and `hw_session_2026-11-07-results.md`).
+  voice-pe-02 and the remaining T-022 checklist items are still pending.
