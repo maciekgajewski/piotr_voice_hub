@@ -24,11 +24,15 @@ Expect a CDI spec directory list that includes `/var/run/cdi`, and a line that m
 `nvidia.com/gpu=all`. design.md §3 already recorded both on 2026-10-18 (Docker 29.1.3).
 If both are present, CDI is enabled. Do not add `"features": {"cdi": true}`.
 
-If the spec directories are absent, stop. Enabling CDI is root work for Piotr Sysadmin
+If either expect fails, stop. Do not continue to `up --force-recreate`: a missing
+`nvidia.com/gpu=all` can start GPU-less containers.
+
+If the spec directories are absent, enabling CDI is root work for Piotr Sysadmin
 only, and only with Maciej's OK, because it means a Docker restart (every container):
 add `"features": {"cdi": true}` to `/etc/docker/daemon.json` and restart `docker`. That is
-not this checklist. The spec file itself is `/var/run/cdi/nvidia.yaml`, regenerated at
-boot; do not generate it from this task.
+not this checklist. If the directories are listed but `nvidia.com/gpu=all` is missing,
+also stop (that is not solved by adding `features.cdi` here). The spec file itself is
+`/var/run/cdi/nvidia.yaml`, regenerated at boot; do not generate it from this task.
 
 ## 1. Production is healthy, then pin the images
 
@@ -212,6 +216,9 @@ docker tag "piotr-voice-hub-piper:rollback-${PROD7}" piotr-voice-hub-piper:lates
 docker compose up -d --wait --wait-timeout 300 --force-recreate --no-deps --no-build piper
 docker compose up -d --wait --wait-timeout 300 --force-recreate --no-deps --no-build hub
 ```
+
+If this compose rejects `--wait`, drop `--wait --wait-timeout 300` and poll
+`docker compose ps` every 5 s, at most 5 minutes per service, until it says `healthy`.
 
 No `--build`. Then the step 3 hand commands (the helper script is not on **PROD**), plus
 `/healthz`, `ss`, and restart counts as in step 5. The old allowlist is the pre-CDI one:
