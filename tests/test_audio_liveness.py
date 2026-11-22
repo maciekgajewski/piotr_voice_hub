@@ -224,3 +224,23 @@ def test_nothing_triggers_when_disarmed() -> None:
         await arm(mic, "listen-2")
 
     asyncio.run(run())
+
+
+def test_close_cancels_an_in_flight_liveness_watch() -> None:
+    async def run() -> None:
+        mic, _clients, clock = _driver()
+        await arm(mic)
+        watch = mic.driver._liveness_task
+        assert watch is not None and not watch.done()
+        await mic.close()
+        await _tick()
+        assert watch.done()
+        assert mic.driver._liveness_task is None
+        clock.advance(AUDIO_LIVENESS_SECONDS + 1.0)
+        await _tick()
+        mic.protocol = MicrophoneProtocolState()  # the session recreates its boundary
+        await arm(mic)
+        await mic.send_output_event(StopListening("listen-1", "done"))
+        assert await mic.wait_for_event() == ListeningStopped("listen-1", "done")
+
+    asyncio.run(run())

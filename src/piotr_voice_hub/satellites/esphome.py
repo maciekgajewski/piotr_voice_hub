@@ -66,12 +66,12 @@ service call is fire-and-forget in aioesphomeapi, and a muted or busy device may
 (the segment reached `max_segment_seconds`, counted including the ~1 s pre-roll).
 """
 
-import array
 import asyncio
 import ipaddress
 import logging
 import math
 import socket
+import struct
 import time
 import traceback
 import urllib.parse
@@ -218,8 +218,7 @@ def frame_is_live(pcm: bytes, threshold: float = DIGITAL_SILENCE_RMS) -> bool:
     """True when 16-bit little-endian mono PCM has RMS at or above the digital-silence floor."""
     if len(pcm) < 2:
         return False
-    samples = array.array("h")
-    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    samples = struct.unpack_from(f"<{len(pcm) // 2}h", pcm)
     if not samples:
         return False
     mean_square = sum(sample * sample for sample in samples) / len(samples)
@@ -471,11 +470,11 @@ class EsphomeSatellite:
                     "close: stopping playback %s failed: %r", playback.playback_id, error
                 )
         self._release_playback()
+        self._armed = False
+        self._stop_liveness()  # cancel before the disconnect wait, so a late fire cannot race
         await self._drop_client()
         self._unavailable = None
         self._listen_id = None
-        self._armed = False
-        self._stop_liveness()
         self._reset_capture()
         self._run_active = False
         self._drain_events()

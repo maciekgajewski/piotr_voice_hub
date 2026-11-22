@@ -17,3 +17,10 @@
 
 - Branched from `origin/main` at `362ffe0` (T-028 merged). The quiet-room and all-zero
   tests use the T-028 `noise_only` and `silence` fixtures.
+
+- PR #41 review on 35b875d: APPROVE, no blockers. Nits addressed: `close()` now cancels the
+  liveness watch before `await _drop_client()` (with a test); `frame_is_live` decodes samples
+  as explicit little-endian `struct` `'<h'`; the P2 intro in `docs/tasks/README.md` matches
+  the merged T-027 / T-028 statuses; design.md notes that a muted zeroed stream trips
+  liveness after 15 s and then backs off up to 30 s, and that telling mute apart from a
+  dead mic is out of scope. The T-030 plan was not edited.

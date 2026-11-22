@@ -111,10 +111,9 @@ Task notes (they go into each task's plan.md):
 ## P2 (design.md §11)
 
 Exit criteria: the 72 h soak passes, and firmware conformance asserts that no on-device wake
-word remains. Order is the dependency order. T-027 is first because the follow-up cue, cue
-`api.respond`, and the trim to continuous mode need a reflash with Maciej present. T-028 can
-run in parallel with T-027 (fixtures do not need the new firmware). T-029 must land before
-the soak. T-031 documents the finished work.
+word remains. Order is the dependency order. T-027 (firmware, PR #39, `42ed871`) and T-028
+(fixtures, PR #40, `362ffe0`) are merged; flashing the new firmware still needs Maciej
+present. T-029 (this PR) must land before the soak. T-031 documents the finished work.
 
 | Task | Scope | Depends on | Status |
 | --- | --- | --- | --- |

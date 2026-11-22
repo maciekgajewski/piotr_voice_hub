@@ -81,7 +81,7 @@ flowchart LR
 ```
 
 ### 4.1 Pipeline per satellite
-1. **Arm.** On connect, the hub sets the `IDLE` visual and calls the `start_open_mic_listening` service. The firmware runs `voice_assistant.start_continuous`. This is the only listening mode. While the satellite is armed and streaming, no live audio for 15 s (`AUDIO_LIVENESS_SECONDS`) — no frames, or only digital silence (all-zero or near-zero RMS) — is `MicrophoneUnavailable`; a quiet room has a real noise floor and is not flagged (T-029, `MP-TIMEOUT-001`).
+1. **Arm.** On connect, the hub sets the `IDLE` visual and calls the `start_open_mic_listening` service. The firmware runs `voice_assistant.start_continuous`. This is the only listening mode. While the satellite is armed and streaming, no live audio for 15 s (`AUDIO_LIVENESS_SECONDS`) — no frames, or only digital silence (all-zero or near-zero RMS) — is `MicrophoneUnavailable`; a quiet room has a real noise floor and is not flagged (T-029, `MP-TIMEOUT-001`). A muted satellite that sends a zeroed stream trips the same way after 15 s, and the session then backs off (up to 30 s) until live audio resumes; telling mute apart from a dead mic is out of scope.
 2. **Segment with Silero VAD.** It replaces the peak-loudness gate (`_observe_audio_level`, `speech_peak_threshold` in `drivers/box3_esphome.py`). The peak gate needed calibrating per device (`tools/mic-silence-calibrate.sh`), fired on TV and clatter, and fed Whisper non-speech, which is where Whisper hallucinates. Silero is small, runs on the CPU per 32 ms frame, and needs no tuning per device, so this is a reliability win.
    - Keep it simple: one ONNX model on onnxruntime CPU (already a faster-whisper dependency), one recurrent state per satellite.
    - Fixed hysteresis: start when p ≥ 0.5 for 250 ms; end after 0.8 s with p < 0.35.
@@ -352,7 +352,7 @@ The firmware is part of this repo and is built and flashed from it. Copy `firmwa
 - **Reliability:**
   - One supervised task per satellite, with the existing reconnect and boundary recovery.
   - A timeout on every await (audio start/event timeouts carry over).
-  - While a satellite is armed and streaming, no live audio (no frames, or only digital silence) for 15 s is `MicrophoneUnavailable`; the session then closes, backs off and re-arms (T-029). A quiet room is not flagged. `/healthz` already reports the satellite as `error` while it recovers, and still returns 200.
+  - While a satellite is armed and streaming, no live audio (no frames, or only digital silence) for 15 s is `MicrophoneUnavailable`; the session then closes, backs off and re-arms (T-029). A quiet room is not flagged. A muted satellite that sends a zeroed stream trips the same way after 15 s, then backs off (up to 30 s) until unmute; telling mute apart from a dead mic is out of scope. `/healthz` already reports the satellite as `error` while it recovers, and still returns 200.
   - Bounded queues; a slow API client is disconnected rather than buffered.
   - STT warm-up before arming.
   - Process exit on invariant failure (the existing assert policy), so Docker restarts it.
