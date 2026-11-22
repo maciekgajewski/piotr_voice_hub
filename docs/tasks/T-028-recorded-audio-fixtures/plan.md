@@ -1,6 +1,6 @@
 # T-028: recorded-audio fixtures
 
-**Status:** in progress. Branch `t-028-recorded-audio-fixtures`.
+**Status:** review approved on d361fb0 (PR #40); nits landing on this branch. Branch `t-028-recorded-audio-fixtures`.
 
 ## Goal
 

@@ -1,9 +1,17 @@
 """Generate T-028 recorded-audio fixtures (synthesized only; never records).
 
 Silence, noise, tones and mixes are made here with a fixed seed. Speech is
-synthesized by a throwaway Piper service (see tools/generate_audio_fixtures.sh),
-never the production piper on 10201. Committed WAVs and tests/data/fixtures/
-manifest.json are the CI source; this script is the provenance.
+synthesized by a throwaway Piper service (see tools/generate_audio_fixtures.sh)
+on a loopback URI, never the production piper on 10201. Committed WAVs and
+tests/data/fixtures/manifest.json are the CI source; this script is the
+provenance.
+
+Piper-derived speech is not bit-reproducible on regeneration: the same text
+and voice can yield different PCM across model or runtime versions. Silence
+(zeros), noise_only (seeded PRNG), the byte-identical copy of
+tests/data/wake_pl_16k.wav, and concatenations of those are bit-reproducible.
+The two_speakers and tv_music mixes are deterministic given the same input
+PCM and seed, but their Piper layers are not.
 
 Usage, from the repo root, after the throwaway Piper is listening:
 
@@ -24,7 +32,7 @@ from typing import Any
 
 import numpy as np
 
-from piotr_voice_hub.config import TtsConfig
+from piotr_voice_hub.config import TtsConfig, parse_tcp_uri
 from piotr_voice_hub.tts.wyoming_piper import WyomingPiperTts
 
 RATE = 16000
@@ -37,6 +45,8 @@ FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "data" / "fixt
 EXISTING_WAKE = Path(__file__).resolve().parent.parent / "tests" / "data" / "wake_pl_16k.wav"
 MANIFEST_PATH = FIXTURES_DIR / "manifest.json"
 VOICE = "pl_PL-bass-high"
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+PRODUCTION_PIPER_PORT = 10201
 VOICE_LICENSE = (
     "Apache-2.0, rhasspy/piper-voices pl_PL-bass-high (c10ece1aade47bb51c153c893d14e5bf8e5b7117)"
 )
@@ -534,7 +544,10 @@ async def build(piper_uri: str) -> None:
             "Replayable synthesized fixtures for VAD, STT and the wake matcher (T-028, "
             "design.md §10). No household recording. One acoustic set at the 16 kHz mono "
             "PCM the satellites send; per-device (Voice PE vs BOX-3) recapture needs "
-            "Maciej's approval of the phrases and the output path first."
+            "Maciej's approval of the phrases and the output path first. "
+            "Piper-derived speech is not bit-reproducible on regeneration; silence, "
+            "seeded noise, the wake_pl_16k.wav copy and concatenations of those are. "
+            "See tests/data/README.md for the pl_PL-bass-high lineage (test use only)."
         ),
         "fixtures": fixtures,
     }
@@ -543,17 +556,31 @@ async def build(piper_uri: str) -> None:
     print(f"wrote {len(fixtures)} fixtures, {total} bytes, manifest {MANIFEST_PATH}")
 
 
+def check_piper_uri(uri: str) -> tuple[str, int]:
+    """A loopback Wyoming URI, not the production piper on 10201."""
+    host, port = parse_tcp_uri(uri)
+    if host.casefold() not in LOOPBACK_HOSTS:
+        raise ValueError(f"{uri!r}: piper must listen on localhost, 127.0.0.1 or ::1, not {host}")
+    if port == PRODUCTION_PIPER_PORT:
+        raise ValueError(f"{uri!r}: port {PRODUCTION_PIPER_PORT} is the production piper")
+    return host, port
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--piper-uri",
         required=True,
-        help="Wyoming URI of a throwaway Piper (e.g. tcp://127.0.0.1:10228). Not 10201.",
+        help=(
+            "Wyoming URI of a throwaway Piper (e.g. tcp://127.0.0.1:10228). "
+            "Loopback only; not port 10201."
+        ),
     )
     args = parser.parse_args(argv)
-    hostport = args.piper_uri.rsplit(":", 1)[-1]
-    if hostport == "10201":
-        print("refusing to use port 10201 (production piper)", file=sys.stderr)
+    try:
+        check_piper_uri(args.piper_uri)
+    except ValueError as error:
+        print(error, file=sys.stderr)
         return 2
     asyncio.run(build(args.piper_uri))
     return 0

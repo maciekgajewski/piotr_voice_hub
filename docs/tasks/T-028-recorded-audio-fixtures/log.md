@@ -24,3 +24,13 @@
   rejected); two_speakers STT heard only speaker A; tv_music was messy and did not wake.
   The GPU word check for non-wake clips requires only the first expected word, because
   STT may inflect a later word.
+
+- PR #40 review APPROVE on d361fb0. Nits: document that Piper-derived clips are not
+  bit-reproducible on regeneration (silence, seeded noise, the wake_pl_16k.wav copy and
+  concatenations of those are); reject a Piper URI whose host is not localhost /
+  127.0.0.1 / ::1, and still reject port 10201, with a unit test; add a lineage note
+  that pl_PL-bass-high's MODEL_CARD says Apache 2.0 for its own Polish dataset but it
+  was fine-tuned from en_US-lessac-high (Lessac Blizzard 2013, research licence that
+  excludes commercial voice synthesis), so the clips are for test use only. Verified
+  against the MODEL_CARDs at piper-voices c10ece1aade47bb51c153c893d14e5bf8e5b7117
+  and the Blizzard 2013 licence page. Matcher/GPU-counter nits skipped (not trivial).

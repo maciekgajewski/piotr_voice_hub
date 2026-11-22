@@ -8,7 +8,7 @@
   "wake_phrase": "Ryszardzie",
   "seed": 28,
   "runner_end_pad_seconds": 1.2,
-  "notes": "Replayable synthesized fixtures for VAD, STT and the wake matcher (T-028, design.md §10). No household recording. One acoustic set at the 16 kHz mono PCM the satellites send; per-device (Voice PE vs BOX-3) recapture needs Maciej's approval of the phrases and the output path first.",
+  "notes": "Replayable synthesized fixtures for VAD, STT and the wake matcher (T-028, design.md §10). No household recording. One acoustic set at the 16 kHz mono PCM the satellites send; per-device (Voice PE vs BOX-3) recapture needs Maciej's approval of the phrases and the output path first. Piper-derived speech is not bit-reproducible on regeneration; silence, seeded noise, the wake_pl_16k.wav copy and concatenations of those are. See tests/data/README.md for the pl_PL-bass-high lineage (test use only).",
   "fixtures": [
     {
       "id": "wake_question",
