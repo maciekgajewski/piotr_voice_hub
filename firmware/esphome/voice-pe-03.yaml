@@ -1,0 +1,18 @@
+substitutions:
+  name: piotr-voice-pe-03
+  friendly_name: Piotr Voice PE 03
+
+packages:
+  piotr.voice-pe-standard: !include packages/home-assistant-voice-pe-piotr-standard.yaml
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  encryption:
+    key: !secret voice_pe_03_api_key
+
+ota:
+  - platform: esphome
+    password: !secret voice_pe_03_ota_password

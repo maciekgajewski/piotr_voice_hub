@@ -1,6 +1,6 @@
 # T-027: firmware trimmed to continuous mode
 
-**Status:** planned. Branch `t-027-firmware-continuous`.
+**Status:** in review (PR #39). Based on main after #38 (`3b46f75`). No flash.
 
 ## Goal
 
@@ -66,7 +66,9 @@ shared package (the hub must never call it). Keep Wi-Fi, API keys and OTA passwo
 - [ ] Flash and rollback procedure written (current firmware backup, USB/OTA order, how to
       restore, one device at a time, volume and state restored).
 - [ ] Live flash, only later, with Maciej present: one satellite, then accepted / timeout /
-      follow-up-ready cues, continuous listen, mute/volume, and rollback once.
+      follow-up-ready cues, continuous listen, and a mute/volume check that only confirms
+      the controls exist or are reported (never change the volume; if a change is needed,
+      Maciej does it himself and restores it), and rollback once.
 
 ## Risks
 

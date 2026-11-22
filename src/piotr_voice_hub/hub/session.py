@@ -350,14 +350,17 @@ class SatelliteSession:
     # Steps
 
     async def _arm(self) -> None:
-        """Arm idle, or, after a `listen_after` speak, open the follow-up window: `LISTENING`
-        and no cue (T-020: no follow-up sound until the P2 firmware)."""
+        """Arm idle, or, after a `listen_after` speak, open the follow-up window:
+        `LISTENING`, the ready cue (while still disarmed), then re-arm. The driver
+        skips the cue with a warning if the firmware does not yet offer it."""
         follow_up, self._follow_up_next = self._follow_up_next, False
         playback_id, self._follow_up_playback_id = self._follow_up_playback_id, None
         self._window_playback_id = playback_id if follow_up else None
         listen_id = new_id("listen")
         visual = VisualState.LISTENING if follow_up else VisualState.IDLE
         await self._command(SetVisualState(visual))
+        if follow_up:
+            await self._play_cue(CueType.FOLLOW_UP_READY)
         await self._command(StartListening(listen_id))
         self._listen_id = listen_id
         await self._expect(ListeningStarted(listen_id))

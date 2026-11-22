@@ -836,6 +836,33 @@ def test_missing_optional_services_are_logged_at_connect_and_skipped(
         asyncio.run(run())
 
 
+def test_failed_cue_service_response_still_emits_cue_finished(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A status-mode cue that returns success=False still finishes (design.md §4.1)."""
+
+    async def run() -> None:
+        mic, clients = make()
+
+        def setup(client: FakeClient) -> None:
+            client.responding["play_message_end_cue"] = SupportsResponseType.STATUS
+            client.response = Response(
+                success=False, error_message="cue announcement did not finish"
+            )
+
+        clients.setup = setup
+        await mic.send_output_event(PlayCue("cue-1", CueType.UTTERANCE_ACCEPTED))
+        assert await mic.wait_for_event() == CueFinished("cue-1")
+        assert clients.last.calls == ["play_message_end_cue"]
+        assert (
+            "cue service play_message_end_cue failed: cue announcement did not finish"
+            in caplog.text
+        )
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(run())
+
+
 def test_device_info_is_logged_at_connect(caplog: pytest.LogCaptureFixture) -> None:
     async def run() -> None:
         mic, _clients = make()
