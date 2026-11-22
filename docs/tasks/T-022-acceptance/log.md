@@ -126,3 +126,25 @@
   in `docs/tasks/T-025-docs-followup/` (checklist `hw_session_2026-11-16.md`,
   results `hw_session_2026-11-22-results.md` and `hw_session_2026-11-07-results.md`).
   voice-pe-02 and the remaining T-022 checklist items are still pending.
+
+## 2026-11-22 (B2, voice-pe-03)
+
+- Standalone B2 (checklist 2.2) on production `c64ebcf`, 15:22:14–15:28:33 CET
+  (Europe/Warsaw). Capture OFF, nothing recorded, volume unchanged. Full numbers
+  in `b2-2026-11-22-results.md`.
+- Result: PASS. 20/20 answered, 0 misses; N1–N5 0 false wakes (one cancelled
+  candidate consistent with N4; one unexplained cancelled candidate at
+  15:25:09 CET, no cue). Latency min 0.613 / median 0.685 / max 1.128 s (n=20).
+  Cue 0.505–0.758 s. Speaker 20/20 Maciek, 0.54–0.73. 0 errors, 0 restarts.
+- Observation (P2 baseline, no fix proposed): line 19 merged as designed, but
+  Whisper transcribed the request as "Ryszardzie! KUTTURA GODZINA?" (meaning
+  lost).
+- B2-F1, known behaviour, decided no change: line 3, spoken in the study, was
+  also accepted by voice-pe-02 in the living room (garbled transcript, speaker
+  hint Maciek 0.58), which played its cue and reply there. The hub has no
+  cross-satellite arbitration; every satellite that hears the wake phrase
+  answers. Maciej decided 22 Nov at 15:30 CET: no cross-satellite arbitration
+  for now; leave the behaviour as is. One line added to design.md §1 (Not in
+  scope).
+- The rest of T-022 (the voice-pe-02 parts 0, A–F, I, J, and the remaining
+  checklist items) is still pending a session slot.

@@ -1,8 +1,11 @@
 # T-022: acceptance: plan
 
-**Status:** plan merged (PR #31, fed8b07, 2026-10-31; nits in `t-022-nits`); the hardware run
-is pending. Branch `t-022-acceptance`, from `origin/main` (cd8c36a, T-021 merged as PR #30).
-Planning and docs only; the hardware run is Maciej's.
+**Status:** plan merged (PR #31, fed8b07, 2026-10-31; nits in `t-022-nits`); B2
+(checklist 2.2, voice-pe-03) PASS 22 Nov 2026 (`b2-2026-11-22-results.md`); the
+rest of the hardware run (voice-pe-02 parts 0, A–F, I, J, and remaining
+checklist items) is still pending. Branch `t-022-acceptance`, from `origin/main`
+(cd8c36a, T-021 merged as PR #30). Planning and docs only; the hardware run is
+Maciej's.
 
 ## Goal
 
