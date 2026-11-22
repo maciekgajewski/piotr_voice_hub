@@ -36,6 +36,7 @@ It exposes **one simple WebSocket API** to whatever consumer connects.
 - Languages other than Polish.
 - Barge-in.
 - Hub-side conversation policy.
+- Cross-satellite arbitration: every satellite that hears the wake phrase answers (T-022 B2-F1; decided 22 Nov 2026, no change).
 
 ## 2. Why build
 
