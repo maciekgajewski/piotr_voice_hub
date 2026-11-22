@@ -34,3 +34,9 @@
   excludes commercial voice synthesis), so the clips are for test use only. Verified
   against the MODEL_CARDs at piper-voices c10ece1aade47bb51c153c893d14e5bf8e5b7117
   and the Blizzard 2013 licence page. Matcher/GPU-counter nits skipped (not trivial).
+
+- Maciej (22 Nov): the real-box voice recapture is off. The repo is public, so his voice
+  must never go into it. The fixture set is synthesized only. If real clips are ever
+  wanted, they stay on piotr outside git and need his explicit yes. There is no recording
+  in a box session. design.md §10, this plan, and `tests/data/README.md` updated accordingly
+  (no new task directory).
