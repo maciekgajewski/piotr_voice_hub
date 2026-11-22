@@ -118,9 +118,9 @@ the soak. T-031 documents the finished work.
 
 | Task | Scope | Depends on | Status |
 | --- | --- | --- | --- |
-| T-027 firmware-continuous | Copy `firmware/esphome/` from the old project and trim it to continuous mode (design.md §8): keep API encryption, `voice_assistant.start_continuous`, the announce media player, mute/volume, server-driven visuals, and the existing listen/visual/cue services; add `play_follow_up_ready_cue` (reuses `sounds/follow_up_listening.wav`); end each cue action with `api.respond` after `script.wait` (status mode, PR #16 B2); remove `micro_wake_word` and its models, the on-device wake path, `start_follow_up_listening`, HA timers, timer-ringing, and cloud-auth error sounds. Conformance tests. No flash in the code PR. | T-014, T-020 | planned |
-| T-028 recorded-audio-fixtures | Replayable WAVs for wake/VAD/STT regression: phrase+command, inflected phrase, no phrase, TV/music, silence, two speakers, per satellite type. Synthesized or consented clips only; no permanent household recording. A tool runs them through VAD, STT and the matcher and counts false accepts/rejects. | — (parallel with T-027) | planned |
-| T-029 audio-liveness | While armed, no audio from the device for a bounded time is `MicrophoneUnavailable`, so a silent stall is not mistaken for a quiet room (PR #9 review B1). | T-007 | planned |
+| T-027 firmware-continuous | Copy `firmware/esphome/` from the old project and trim it to continuous mode (design.md §8): keep API encryption, `voice_assistant.start_continuous`, the announce media player, mute/volume, server-driven visuals, and the existing listen/visual/cue services; add `play_follow_up_ready_cue` (reuses `sounds/follow_up_listening.wav`); end each cue action with `api.respond` after `script.wait` (status mode, PR #16 B2); remove `micro_wake_word` and its models, the on-device wake path, `start_follow_up_listening`, HA timers, timer-ringing, and cloud-auth error sounds. Conformance tests. No flash in the code PR. | T-014, T-020 | merged (PR #39, 42ed871) |
+| T-028 recorded-audio-fixtures | Replayable WAVs for wake/VAD/STT regression: phrase+command, inflected phrase, no phrase, TV/music, silence, two speakers, per satellite type. Synthesized or consented clips only; no permanent household recording. A tool runs them through VAD, STT and the matcher and counts false accepts/rejects. | — (parallel with T-027) | merged (PR #40, 362ffe0) |
+| T-029 audio-liveness | While armed, no audio from the device for a bounded time is `MicrophoneUnavailable`, so a silent stall is not mistaken for a quiet room (PR #9 review B1). | T-007 | in review |
 | T-030 soak-72h | 72 h on all satellites with a TV on: procedure plus a log-summary tool. Count false accepts, reconnects and stuck states; include the T-022 wake-miss/false-wake baseline if T-022 has not already measured them. | T-027 (reflashed), T-029 | planned |
 | T-031 p2-docs | Docs for the finished P2 firmware, fixtures, liveness check and soak (design.md, tasks README, runbooks). | T-027 … T-030 | planned |
 
@@ -149,9 +149,9 @@ the soak. T-031 documents the finished work.
   request at INFO ("connection rejected (200 OK)").
 - **box3-office host (done in T-011):** its real mDNS name is `piotr-box3-01-cbfaA8.local`
   (old config, T-013 live run); `config/hub.example.yaml` and design.md §7 are fixed.
-- **P2 → T-029 (before the soak):** an audio-liveness check: while armed, no audio from the device
-  for a bounded time is `MicrophoneUnavailable`, so a silent stall is not mistaken for a quiet
-  room (PR #9 review, B1).
+- **P2 → T-029 (before the soak, done in T-029):** an audio-liveness check: while armed, no
+  audio from the device for a bounded time is `MicrophoneUnavailable`, so a silent stall is not
+  mistaken for a quiet room (PR #9 review, B1).
 - **T-014 (driver side done in T-014):** a true `CueFinished`. The driver calls a cue service
   with `return_response` when the firmware declares `supports_response`, and is otherwise
   fire-and-forget as before.

@@ -281,6 +281,7 @@ After `SpeechEnded`, the final transcript determines acceptance.
 | Follow-up speech start | follow-up ready cue finished (none until the P2 firmware) and listening re-armed | `SpeechStarted` within `follow_up_seconds` | User did not begin follow-up | Manager |
 | Reply | `transcript_final` emitted | consumer `speak`/`play`/`release` within `reply_timeout_seconds` | Consumer did not answer | Manager |
 | Segment liveness | `SpeechStarted` or last segment event | next `AudioChunk`, `AudioProgress`, or `SpeechEnded` | Active capture stalled | Manager |
+| Armed stream liveness | `ListeningStarted` or last live audio frame | next live frame (RMS at or above the digital-silence floor) | Stalled or all-zero capture stream: `MicrophoneUnavailable` | Driver (T-029) |
 | Cue completion | `PlayCue` | `CueFinished` | Cue operation stalled | Manager |
 | Playback completion | `PlaybackBegin` or last playback activity | `PlaybackFinished` | Playback stalled | Manager |
 | URL playback start | `PlaybackUrl` sent to the device | a media player change within 5 s | Device did not start the URL: WARNING, `PlaybackFinished` | Driver |
@@ -288,7 +289,7 @@ After `SpeechEnded`, the final transcript determines acceptance.
 | URL playback (session) | `PlaybackUrl` | `PlaybackFinished` within 720 s | Driver stalled: treated as a satellite failure | Manager |
 | Connection watchdog | last valid server connectivity evidence | server connectivity restored | Server unavailable | Firmware |
 
-- Idle open-mic `LISTENING` has no speech-segment liveness timeout. (`MP-TIMEOUT-001`)
+- Idle open-mic `LISTENING` has no speech-segment liveness timeout. (`MP-TIMEOUT-001`) A stalled or all-zero capture stream is a device failure, not idle silence (T-029).
 - A timeout MUST name the active operation and correlation identifier in logs.
 - Timeout recovery MUST stop or discard the failed generation before creating another identifier.
 

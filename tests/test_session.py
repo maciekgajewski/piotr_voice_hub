@@ -878,7 +878,13 @@ async def _test_unavailable_backs_off(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.WARNING)
     h = Harness()
     h.driver.fail_starts = 3
-    h.driver.after_arm[0] = lambda _listen_id: [MicrophoneUnavailable("connection lost")]
+    # A liveness failure (T-029) uses the same close / backoff / re-arm path as any other
+    # MicrophoneUnavailable; the driver raises, the session does not special-case it.
+    h.driver.after_arm[0] = lambda _listen_id: [
+        MicrophoneUnavailable(
+            "no live audio for 15 s while listening (stalled stream or digital silence)"
+        )
+    ]
     h.start()
     await h.until(lambda: len(h.driver.starts()) == 5)
     await h.until(lambda: h.events[-1:] == [IDLE])
@@ -891,7 +897,8 @@ async def _test_unavailable_backs_off(caplog: pytest.LogCaptureFixture) -> None:
         "unavailable: connection refused; re-arming in 1 s",
         "unavailable: connection refused; re-arming in 2 s",
         "unavailable: connection refused; re-arming in 4 s",
-        "unavailable: connection lost; re-arming in 1 s",
+        "unavailable: no live audio for 15 s while listening "
+        "(stalled stream or digital silence); re-arming in 1 s",
     ]
     listen_ids = [c.listen_id for c in h.driver.starts()]
     assert len(set(listen_ids)) == 5 and all(i.startswith("listen-") for i in listen_ids)

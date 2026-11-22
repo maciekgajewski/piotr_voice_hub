@@ -1,6 +1,6 @@
 # T-029: audio-liveness check
 
-**Status:** planned. Branch `t-029-audio-liveness`.
+**Status:** in review. Branch `t-029-audio-liveness`.
 
 ## Goal
 

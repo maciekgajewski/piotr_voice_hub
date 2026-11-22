@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 import wave
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -357,6 +358,8 @@ def make(
     cfg: SatelliteConfig | None = None,
     playback_server: PlaybackHttpServer | None = None,
     local_ip: esphome.LocalIpFor = esphome.local_ip_for,
+    clock: esphome.Clock = time.monotonic,
+    sleep: esphome.Sleep = asyncio.sleep,
 ) -> tuple[Checked, Clients]:
     clients = Clients()
     cfg = cfg or config()
@@ -366,6 +369,8 @@ def make(
         clients,
         playback_server=playback_server,
         local_ip=local_ip,
+        clock=clock,
+        sleep=sleep,
     )
     return Checked(driver), clients
 
