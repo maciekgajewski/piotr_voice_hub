@@ -1,109 +1,77 @@
-# T-027 hardware checklist (flash and rollback)
+# T-027 hardware checklist (OTA flash and rollback)
 
-Nothing in this file is a go to flash. Flashing or OTA of a real satellite waits
-for Maciej to be present and for the manager to say so first. This PR does not
-flash, OTA, or connect to any satellite.
+Gates changed on 22 Nov 2026 (Maciej, 15:33: "why do we need to back them up? there is
+no data on the boxes, just flash them OTA"): OTA only, no USB backup, Maciej need not be
+present at the box. Each flash still waits for Maciej's go, relayed by the manager.
+The session that used this checklist is in `ota-2026-11-22-results.md`.
 
 ## Before a flash session
 
-- [ ] This PR is merged (or the reviewed head is the one being flashed).
-- [ ] `make check` is green.
-- [ ] `tools/check_firmware.sh` is green on piotr (`esphome config` for all four
-      device YAML files, using only `secrets.example.yaml`). Optional:
-      `tools/check_firmware.sh --compile` on piotr (not in CI; several minutes
-      per device).
-- [ ] The manager has told Maciej the plan and has an explicit go.
-- [ ] Maciej is present. One satellite at a time, starting with voice-pe-03
-      (the usual test box), then voice-pe-02, then voice-pe-bedroom and
-      box3-satellite if they are in service.
-- [ ] Read each device's current volume and mute first, and write them down.
-      Do not change the volume. If a later check needs a change, Maciej does
-      it himself and restores it. Restore anything that was changed at the
-      end, including after a rollback.
-- [ ] D-capture stays off.
-- [ ] Current firmware backup for this satellite is on the Maciej-only path
-      (required; see below). Prefer a USB `read_flash` of the full 16 MB.
-      Do not flash until that backup exists.
+- [ ] `make check` is green on the ref being flashed; `tools/check_firmware.sh` is green.
+- [ ] The manager has relayed Maciej's go for this box. One satellite at a time,
+      voice-pe-03 first, then voice-pe-02 only after voice-pe-03 passes.
+- [ ] Never change the volume. Capture/recording stays off.
+- [ ] Rollback build compiled in advance for this box: the old project's YAML
+      (`~maciek/piotr/firmware/esphome`, tree `a299643`) on ESPHome 2026.4.5, with the
+      same secrets file. Without the current API key and OTA password in a rollback
+      build, the hub cannot reconnect and OTA cannot authenticate.
+- [ ] Both satellites idle on the hub's `/healthz`.
 
-## Current firmware backup (required before the first flash of each device)
+## Secrets
 
-ESPHome OTA cannot read firmware back off the device. Before flashing a
-satellite, take a full 16 MB flash image over USB, with Maciej present and
-after he has identified the serial device:
+Use the existing file `/home/maciek/piotr/firmware/esphome/secrets.yaml` in place,
+mounted read-only into the container over the build dir's `secrets.yaml`. Never copy,
+print, log or commit it, and never create a `secrets.yaml` in a checkout. Check key
+names only. Its per-box API keys must match the hub config (compare, never print).
+
+## Build and flash (OTA)
+
+Build in a private scratch dir outside git (mode 700), with a private cache dir, from
+a clean export of the ref being flashed:
 
 ```sh
-# 16 MB = 0x1000000. Store only on a Maciej-only path, never in this repo.
-esptool --chip esp32s3 --port /dev/ttyACM0 read_flash 0x0 0x1000000 \
-  ~/piotr-firmware-backups/voice-pe-03-YYYYMMDD-current.bin
+W=~/fw-t027-prep   # scratch, not the repo; build/ holds a copy of firmware/esphome
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$W/build:/config" \
+  -v /home/maciek/piotr/firmware/esphome/secrets.yaml:/config/secrets.yaml:ro \
+  -v "$W/cache:/cache" -e ESPHOME_CACHE_DIR=/cache -e HOME=/cache \
+  -e PLATFORMIO_CORE_DIR=/cache/.platformio \
+  ghcr.io/esphome/esphome:2026.4.0 compile /config/voice-pe-03.yaml
+getent hosts piotr-voice-pe-03.local      # re-resolve right before the upload
+# same docker run, but: upload --device <IP> /config/voice-pe-03.yaml
 ```
 
-Use a directory Maciej owns, for example `~/piotr-firmware-backups/` on his
-machine. Do not copy the image into this repository, a shared checkout, or
-chat logs.
-
-If a USB backup cannot be taken, the fallback is to compile the current
-firmware from `~/src/piotr_the_ai_server/firmware/esphome` (read only) with
-Maciej's secrets and the ESPHome version the device is already running
-(from hub connect logs after T-026), and keep that `.bin` plus a note of
-the ESPHome version in the same Maciej-only path. A rebuild is only as
-good as the tree and version used; prefer the USB `read_flash` image, and
-only use the rebuilt `.bin` if Maciej has accepted that fallback.
-
-Rollback is a reflash of that backup (USB `write_flash` of the
-`read_flash` image), or of the old project tree with his secrets over OTA
-or USB:
-
-```sh
-# From a work directory that already has his secrets.yaml (not committed):
-# use the old project YAML, not this repo.
-esphome upload /path/to/piotr_the_ai_server/firmware/esphome/voice-pe-03.yaml
-# USB fallback, if OTA fails: esphome upload --device /dev/ttyACM0 ...
-# Or restore the read_flash image:
-# esptool --chip esp32s3 --port /dev/ttyACM0 write_flash 0x0 \
-#   ~/piotr-firmware-backups/voice-pe-03-YYYYMMDD-current.bin
-```
-
-## Flash (OTA, USB if OTA fails)
-
-Secrets stay in a local `firmware/esphome/secrets.yaml` copied from
-`secrets.example.yaml` and filled by Maciej. That file is gitignored and must
-not be printed, logged, or copied off the machine.
-
-```sh
-# After tools/check_firmware.sh has passed, with his secrets.yaml in place:
-esphome upload firmware/esphome/voice-pe-03.yaml
-```
-
-Do not use `--device` against a production host path until Maciej has
-identified the serial device. Do not flash more than one satellite until the
-checks below pass on the first.
+Bridge network (mDNS does not resolve inside the container). The hub keeps running:
+the box drops off (liveness warning, forced disconnect) and the hub re-arms with
+backoff (1 s doubling, capped at 30 s). An interrupted OTA keeps the old app slot.
 
 ## After each satellite
 
-- [ ] The hub reconnects (no production compose change is required if the
-      running hub already treats `play_follow_up_ready_cue` as optional).
-- [ ] Connect logs show the new firmware and that `play_follow_up_ready_cue` is
-      present (after T-026, `esphome_version` / `project_version` too).
-- [ ] Accepted cue is heard, a timeout cue is heard, and a `listen_after` reply
-      plays the follow-up ready cue, then a follow-up without the wake phrase
-      is accepted.
-- [ ] Continuous listening still works (wake phrase accepted while idle).
-- [ ] Hardware mute and volume: confirm the mute control exists and a volume
-      level is reported. Do not change the volume. If a real check needs a
-      change, Maciej does it himself and restores it. Restore anything that
-      was changed, including after a rollback.
-- [ ] The device does not react to an on-device wake word of its own (there is
-      no `micro_wake_word`).
+- [ ] Hub log: the reconnect for this box shows `esphome_version=2026.4.0`.
+- [ ] Hub log: no `firmware lacks optional services` warning for this box.
+- [ ] Hub log: no liveness warnings after the reconnect.
+- [ ] Live test with `tools/speak_test.py --listen-after`: wake accepted, accepted cue,
+      reply, follow-up ready chime, a follow-up without the wake word accepted, window
+      closes cleanly. (The chime needs a hub that calls `FOLLOW_UP_READY`, i.e. main
+      after PR #39.)
+- [ ] The device does not react to an on-device wake word (there is no
+      `micro_wake_word`).
 
 ## If something is wrong
 
-Roll back that one satellite from the old project tree as above, restore
-volume and mute, and stop. Do not flash the next satellite. Tell the manager
-what failed.
+Before rolling back, confirm the test was actually spoken during the window (on
+22 Nov the first pe-03 window looked like a fail because nobody spoke). Then OTA the
+pre-built 2026.4.5 rollback build to that one box (`upload --device <IP>` from its
+build dir), and stop. Do not flash the next satellite. Tell the manager. Safe mode
+(after repeated boot failures the box comes up with Wi-Fi and OTA only) accepts the
+same OTA. USB is the last resort and needs Maciej at the box.
+
+## After the session
+
+- [ ] Delete the build dirs (generated code and binaries contain the keys) and our
+      private image tags, by name only. No Docker prune.
 
 ## Hub deploy
 
-`play_follow_up_ready_cue` stays optional in the driver until every in-service
-satellite has the new firmware, so an unflashed device still connects and the
-driver skips the ready cue with a warning. A production hub deploy still needs
-Maciej's own words, asked via the manager, and is not part of this PR.
+A production hub deploy needs Maciej's own words, asked for through the manager. On
+22 Nov main `833650c` was deployed for the follow-up chime (see the results file).

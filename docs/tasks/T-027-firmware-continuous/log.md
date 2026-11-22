@@ -75,3 +75,27 @@
   status-mode `execute_service` response with `success=False` still emits
   `CueFinished` and logs `cue service ... failed: ...`.
 
+## 2026-11-22 (OTA flash session: voice-pe-03, voice-pe-02)
+
+All times CET. Details and runbook: `ota-2026-11-22-results.md`.
+
+- 15:33 Maciej changed the gates: "just flash them OTA". No USB backup, no presence
+  needed; one box at a time, voice-pe-03 first, each flash on his go via the manager.
+  Rollback builds compiled in advance from the old project's YAML (`a299643`) on ESPHome
+  2026.4.5. `checklist.md` rewritten for the new gates.
+- Secrets: the existing `/home/maciek/piotr/firmware/esphome/secrets.yaml`, mounted
+  read-only in place; never copied or printed.
+- voice-pe-03: first flash 15:54; the 15:55–16:05 window looked like a fail, rolled back
+  at 16:09. Offline diff: audio path identical; Maciej had not spoken in that window.
+  Re-flashed; PASS 18:17, follow-up PASS 19:06.
+- 19:42 main `833650c` deployed (Maciej 19:36: "Yes, deploy main to production now") so
+  the hub calls `FOLLOW_UP_READY`; rollback tag `piotr-voice-hub:rollback-c64ebcf`;
+  `tools/check_gpu_cdi.sh piotr-voice-hub-hub-1` PASS, VRAM 4471 MiB. pe-03 chime PASS
+  19:44.
+- voice-pe-02: compiled 19:47, OTA 19:53:55, reconnect 19:54:34 with
+  `esphome_version=2026.4.0` and no lacks-warning. Live test 19:58 PASS (wake, cue,
+  reply, chime, follow-up without the wake word, chime, clean close).
+- Observations: pe-03 "pogoda" heard as "typu góda" (correct on pe-02); a stray wake in
+  the listener-swap gap got the 30 s reply-timeout cue (designed). No cross-satellite
+  arbitration (Maciej's decision).
+- Not flashed: voice-pe-bedroom, box3-satellite.
