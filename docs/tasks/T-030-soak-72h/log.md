@@ -9,3 +9,10 @@
 - Plan: add a quiet-room check on Voice PE with auto_gain at 0 dBFS. A quiet room with no
   speech must not trip T-029 liveness (15 s, RMS < 16 → `MicrophoneUnavailable`); count any
   liveness trips in the logs.
+
+## 2026-11-22 (plan)
+
+- Plan rewritten for the live run: monitors (hub log follower, 30 s /healthz, 5 min
+  resources), pass/abort criteria with proposed thresholds, Maciej's part, report format.
+  Hub logs carry no transcript text; the optional passive WS client and transcript
+  retention (options A/B) wait for the manager's decision. Branch local only, not pushed.
