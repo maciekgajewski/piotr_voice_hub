@@ -1,6 +1,7 @@
 # T-030: 72 h soak
 
-**Status:** planned. Branch `t-030-soak-72h`. The code PR ships this procedure and the
+**Status:** tools merged (PR #45, `4aee1e6`); live soak run 22–25 Nov 2026, FAIL as written
+(criteria 3 and 4, finding F1); results in `soak-2026-11-25-results.md`. Branch `t-030-soak-72h`. The code PR ships this procedure and the
 log-summary tool. The live run is a separate step, started only on the manager's go.
 Decisions (manager, 22 Nov 2026): option A (no API client, no transcript text stored),
 thresholds below accepted, production frozen for the 72 h; Maciej notes TV times and real
