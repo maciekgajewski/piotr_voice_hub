@@ -40,3 +40,16 @@
   SOAK_RES_EVERY, SOAK_ITERATIONS.
 - Nit: `soak_summary.py --health health.jsonl` tolerates and counts bad lines (HTML
   body, no answer); fixture and test added.
+
+## 2026-11-25 (soak results)
+
+- Live soak: start 22 Nov 20:45:45 CET (Maciej 22 Nov 20:44: "Go with the soak test"),
+  resumed 24 Nov 07:11:24 CET after the host outage (Maciej 24 Nov 07:11: continue this
+  run, accept the gap), ended 25 Nov 20:45:45 CET through `timeout 73h`. Production
+  unchanged (`833650c`, image `26df0492eca9`, RestartCount 0; StartedAt changed only at
+  the two host reboots).
+- Result: FAIL as written (criteria 3 and 4). Criteria 2, 7 and 8 PASS; 1 is not met as
+  written but there was no hub fault; 5 and 6 are N/A (no TV or real-wake notes reached
+  the developer). Main finding F1: liveness loops (15 s trip, 1 s re-arm) on voice-pe-03
+  and voice-pe-02 on 25 Nov. Details in `soak-2026-11-25-results.md`; carry-forward added
+  to the README.
